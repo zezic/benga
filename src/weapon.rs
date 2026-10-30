@@ -26,8 +26,10 @@ pub struct Catalog {
 
 impl Catalog {
     pub fn load() -> anyhow::Result<Self> {
-        let text = fs::read_to_string(CATALOG_PATH)
-            .with_context(|| format!("could not read the weapon catalog at {CATALOG_PATH}"))?;
+        let text = fs::read_to_string(crate::assets::path(
+            "models-spec/weapon_visualizer_meme_spec.json",
+        ))
+        .with_context(|| format!("could not read the weapon catalog at {CATALOG_PATH}"))?;
         serde_json::from_str(&text)
             .with_context(|| format!("invalid weapon catalog at {CATALOG_PATH}"))
     }

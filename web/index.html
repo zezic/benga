@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#121e19">
+  <meta name="description" content="Benga. Desktop audio visualizer for macOS, Windows, and Linux.">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Benga">
+  <meta property="og:description" content="Desktop audio visualizer for macOS, Windows, and Linux.">
+  <meta property="og:url" content="https://benga.zezic.ru/">
+  <meta property="og:image" content="https://benga.zezic.ru/assets/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="canonical" href="https://benga.zezic.ru/">
+  <link rel="icon" type="image/svg+xml" href="assets/icon.svg">
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="stylesheet" href="style.css">
+  <title>Benga</title>
+</head>
+<body>
+  <main>
+    <h1><img class="logo" src="assets/benga-logo.svg" alt="Benga" width="224" height="112"></h1>
+    <p class="description">Desktop audio visualizer.</p>
+
+    <section class="downloads" aria-label="Downloads">
+      <div class="platform">
+        <a class="download-button" id="download-macos" data-platform="macos-aarch64" href="https://github.com/zezic/benga/releases">macOS <span class="hit-icon" aria-hidden="true"></span></a>
+        <div class="package-links"><a data-platform="macos-aarch64" href="https://github.com/zezic/benga/releases" aria-label="Download for Apple silicon">Apple silicon</a><a data-platform="macos-x86_64" href="https://github.com/zezic/benga/releases" aria-label="Download for Intel Mac">Intel</a></div>
+      </div>
+      <div class="platform">
+        <a class="download-button" id="download-windows" data-platform="windows-x86_64" href="https://github.com/zezic/benga/releases">Windows <span class="hit-icon" aria-hidden="true"></span></a>
+      </div>
+      <div class="platform">
+        <a class="download-button" id="download-linux" data-platform="linux-x86_64" data-format="deb" href="https://github.com/zezic/benga/releases">Linux <span class="hit-icon" aria-hidden="true"></span></a>
+        <div class="package-links"><a data-platform="linux-x86_64" data-format="deb" href="https://github.com/zezic/benga/releases" aria-label="Download Linux DEB package">.deb</a><a data-platform="linux-x86_64" href="https://github.com/zezic/benga/releases" aria-label="Download Linux tar.gz archive">.tar.gz</a></div>
+      </div>
+    </section>
+
+    <div class="install">
+      <p class="install-label">macOS installation <a href="install-macos.sh">script</a></p>
+      <button class="command" id="copy-command" type="button" aria-label="Copy macOS install command"><code id="install-command">curl -fsSL https://benga.zezic.ru/install-macos.sh | bash</code><svg class="copy-icon" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M184,72V216H40V72Z" opacity="0.2"/><path d="M184,64H40a8,8,0,0,0-8,8V216a8,8,0,0,0,8,8H184a8,8,0,0,0,8-8V72A8,8,0,0,0,184,64Zm-8,144H48V80H176ZM224,40V184a8,8,0,0,1-16,0V48H72a8,8,0,0,1,0-16H216A8,8,0,0,1,224,40Z"/></svg></button>
+      <p class="install-note">Installs Benga in ~/Applications and removes quarantine attributes from it</p>
+      <span class="sr-only" id="copy-status" role="status"></span>
+    </div>
+
+    <section class="audio-setup" aria-labelledby="audio-setup-title">
+      <h2 id="audio-setup-title">Audio setup</h2>
+      <div class="setup">
+        <p><strong>macOS 14.6+</strong> Allow system audio recording when prompted.</p>
+        <p><strong>Windows</strong> Uses the default audio output. Restart Benga after changing the output device or sample rate.</p>
+        <p><strong>Linux</strong> Select your output’s monitor as Benga’s recording source in your audio settings or pavucontrol. PulseAudio and PipeWire’s PulseAudio service are supported.</p>
+      </div>
+    </section>
+    <p class="source"><a href="https://github.com/zezic/benga">GitHub <span class="hit-icon" aria-hidden="true"></span></a></p>
+  </main>
+  <script src="app.js" defer></script>
+</body>
+</html>

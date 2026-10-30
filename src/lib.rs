@@ -1,15 +1,18 @@
 //! Audio capture, a model-driven wireframe visualizer, themes and HUD.
 use std::time::Instant;
 
+pub mod assets;
 pub mod audio;
 pub mod config;
 pub mod frame_schedule;
+mod logo;
 pub mod render;
 pub mod shutter;
 pub mod text;
 pub mod theme;
 pub mod visualizer;
 pub mod weapon;
+pub mod window_chrome;
 
 pub enum AudioEvent {
     Config {

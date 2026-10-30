@@ -1,0 +1,5 @@
+#!/bin/sh
+# Certbot invokes deploy hooks for every lineage; reload only for Benga's.
+if [ "${RENEWED_LINEAGE:-}" = "/etc/letsencrypt/live/benga.zezic.ru" ]; then
+    /usr/sbin/nginx -t && /usr/bin/systemctl reload nginx
+fi

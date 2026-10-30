@@ -1,0 +1,27 @@
+BENGA
+
+Play music on your computer, then open Benga. Move the pointer to show controls.
+Double-click the background for fullscreen. Escape leaves fullscreen.
+
+macOS 14.6 or later
+Drag Benga.app into Applications. Allow system audio recording when macOS asks.
+If there is no movement, check System Settings > Privacy & Security > Screen &
+System Audio Recording and enable Benga. Relaunch after changing permission.
+These initial builds are ad-hoc signed, not Apple notarized. The website's
+optional installer removes quarantine only from the Benga app it installs.
+
+Windows
+Run the setup installer, or extract the whole portable ZIP before running
+benga.exe. Do not move benga.exe away from its assets directory. Benga listens
+to the default output device. Relaunch after changing audio output or sample
+rate. Unsigned builds may display a Windows SmartScreen warning.
+
+Linux
+Install the .deb on Debian/Ubuntu, or extract the archive and run ./Benga/benga.
+Use a working Vulkan driver. With PulseAudio or PipeWire, route Benga's capture
+source to the monitor of the output playing music (for example in pavucontrol).
+
+Settings save automatically. Find platform requirements, controls, and support:
+https://github.com/zezic/benga
+
+License: GPL-2.0-only; see LICENSE and the included asset license notices.

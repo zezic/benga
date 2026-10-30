@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Benga
+Comment=Music-driven 3D wireframe visualizer
+Exec=benga
+Icon=benga
+Terminal=false
+Categories=AudioVideo;Audio;
+StartupWMClass=benga

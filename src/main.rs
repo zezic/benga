@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 use std::{sync::mpsc::Receiver, time::Instant};
 
 use audio::capture_stream;
@@ -13,12 +15,15 @@ use winit::{
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, ModifiersState, PhysicalKey},
-    window::{Fullscreen, WindowId},
+    window::{CursorIcon, Fullscreen, WindowId},
 };
 
+use benga::window_chrome::{Chrome, Hit, WindowButton};
 use benga::{audio, config, frame_schedule, profile, render, visualizer, AudioEvent};
 use visualizer::{ControlAction, Dial, Ui, View};
+mod desktop;
 mod saved;
+mod updater;
 
 enum WindowState {
     Suspended,
@@ -27,6 +32,7 @@ enum WindowState {
 }
 
 struct ActiveWindow {
+    chrome: Chrome,
     render: RenderWindow,
     view: View,
     visualizer_renderer: visualizer::Renderer,
@@ -35,11 +41,14 @@ struct ActiveWindow {
 impl ActiveWindow {
     fn new(event_loop: &ActiveEventLoop) -> anyhow::Result<Self> {
         let render = RenderWindow::new(event_loop, wgpu::DeviceDescriptor::default())?;
+        let chrome = Chrome::new(&render.window)?;
         let mut view = View::fit(render.viewport());
         view.set_ui_scale(render.window.scale_factor());
+        view.set_top_inset(chrome.height());
         let visualizer_renderer =
             visualizer::Renderer::new(&render.device().device, render.format());
         Ok(Self {
+            chrome,
             render,
             view,
             visualizer_renderer,
@@ -58,12 +67,15 @@ enum Setting {
     NearOpacity,
     CreaseThreshold,
     LineWidth,
+    DetailThinning,
     Zoom,
     MotionOpacity,
     MotionFadePower,
 }
 
 struct App {
+    desktop: desktop::Desktop,
+    exit_requested: bool,
     state: WindowState,
     rx: Receiver<AudioEvent>,
     ui: Ui,
@@ -147,6 +159,10 @@ impl App {
                 settings.line_width = settings.line_width.adjusted(adjustment);
                 self.ui.set_line_width(settings.line_width);
             }
+            Setting::DetailThinning => {
+                settings.detail_thinning = settings.detail_thinning.adjusted(adjustment);
+                self.ui.set_detail_thinning(settings.detail_thinning);
+            }
             Setting::MotionOpacity => {
                 settings.motion_opacity = settings.motion_opacity.adjusted(adjustment);
                 self.ui.set_motion_opacity(settings.motion_opacity);
@@ -160,9 +176,14 @@ impl App {
 
     fn set_fullscreen(&mut self, fullscreen: bool) {
         self.ui.reset_presentation_clicks();
-        let WindowState::Active(window) = &self.state else {
+        let WindowState::Active(window) = &mut self.state else {
             unreachable!("fullscreen requires an active window");
         };
+        if fullscreen {
+            window.chrome.native_opacity(&window.render.window, 1.0);
+        }
+        window.chrome.set_pressed(None);
+        window.chrome.reset_drag_clicks();
         window
             .render
             .window
@@ -172,6 +193,7 @@ impl App {
 
     fn apply_control(&mut self, action: ControlAction) {
         match action {
+            ControlAction::Help => self.desktop.open = true,
             ControlAction::Fullscreen => {
                 let WindowState::Active(window) = &self.state else {
                     unreachable!("a control requires an active window");
@@ -186,6 +208,7 @@ impl App {
                         return;
                     }
                     Dial::LineWidth => Setting::LineWidth,
+                    Dial::DetailThinning => Setting::DetailThinning,
                     Dial::Zoom => Setting::Zoom,
                     Dial::FrameRate => Setting::FrameRate,
                     Dial::Shutter => Setting::Shutter,
@@ -252,6 +275,7 @@ impl App {
             return Ok(());
         };
         let ActiveWindow {
+            chrome,
             render,
             view,
             visualizer_renderer,
@@ -271,14 +295,22 @@ impl App {
                     self.settings.edit().fullscreen = fullscreen;
                 }
                 render.resize(size);
+                chrome.refresh_native_metrics(&render.window);
                 *view = View::fit(render.viewport());
                 view.set_zoom(self.settings.zoom);
                 view.set_ui_scale(render.window.scale_factor());
+                view.set_top_inset(if fullscreen { 0.0 } else { chrome.height() });
                 self.frames.resized(size.into(), Instant::now());
                 self.ui.set_plate_mask(Some(render.plate_mask_image()));
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 view.set_ui_scale(scale_factor);
+                chrome.refresh_native_metrics(&render.window);
+                view.set_top_inset(if render.window.fullscreen().is_some() {
+                    0.0
+                } else {
+                    chrome.height()
+                });
             }
             WindowEvent::Occluded(occluded) => {
                 let occlusion = if occluded {
@@ -295,7 +327,53 @@ impl App {
                 ..
             } => match state {
                 ElementState::Pressed => {
-                    if self.ui.presentation() {
+                    let scale = render.window.scale_factor();
+                    let fullscreen = render.window.fullscreen().is_some();
+                    let hit = chrome.hit_test(
+                        self.mouse,
+                        render.viewport(),
+                        scale,
+                        fullscreen,
+                        render.window.is_maximized(),
+                    );
+                    if let Some(hit) = hit {
+                        self.ui.reset_presentation_clicks();
+                        self.ui.reveal_controls();
+                        match hit {
+                            Hit::Button(button) => {
+                                chrome.reset_drag_clicks();
+                                chrome.set_pressed(Some(button));
+                            }
+                            Hit::Resize(direction) => {
+                                chrome.reset_drag_clicks();
+                                if let Err(error) = render.window.drag_resize_window(direction) {
+                                    log::debug!("Window resize: {error}");
+                                }
+                            }
+                            Hit::Drag => {
+                                let point = Point::new(self.mouse.x / scale, self.mouse.y / scale);
+                                if chrome.drag_double_click(point, Instant::now()) {
+                                    render.window.set_maximized(!render.window.is_maximized());
+                                } else if let Err(error) = render.window.drag_window() {
+                                    log::debug!("Window drag: {error}");
+                                }
+                            }
+                        }
+                        return Ok(());
+                    }
+                    chrome.set_pressed(None);
+                    chrome.reset_drag_clicks();
+                    if chrome.is_hovered(render.viewport(), scale, fullscreen) {
+                        self.ui.reset_presentation_clicks();
+                        self.ui.reveal_controls();
+                        return Ok(());
+                    }
+                    if self.ui.startup_visible() {
+                        return Ok(());
+                    }
+                    if self.desktop.open || self.desktop.contains(self.mouse) {
+                        self.exit_requested |= self.desktop.click(self.mouse, self.settings.edit());
+                    } else if self.ui.presentation() {
                         if let Some(action) = self.ui.click_controls(view, self.mouse) {
                             self.apply_control(action);
                         }
@@ -303,16 +381,81 @@ impl App {
                         self.ui.click_debug(view, self.mouse);
                     }
                 }
-                ElementState::Released => self.ui.end_slider_drag(),
+                ElementState::Released => {
+                    if let Some(pressed) = chrome.take_pressed() {
+                        let hit = chrome.hit_test(
+                            self.mouse,
+                            render.viewport(),
+                            render.window.scale_factor(),
+                            render.window.fullscreen().is_some(),
+                            render.window.is_maximized(),
+                        );
+                        if hit == Some(Hit::Button(pressed)) {
+                            match pressed {
+                                WindowButton::Close => self.exit_requested = true,
+                                WindowButton::Minimize => render.window.set_minimized(true),
+                                WindowButton::Maximize => {
+                                    render.window.set_maximized(!render.window.is_maximized())
+                                }
+                            }
+                        }
+                        return Ok(());
+                    }
+                    self.ui.end_slider_drag();
+                }
             },
+            WindowEvent::MouseInput {
+                button: MouseButton::Right,
+                state: ElementState::Pressed,
+                ..
+            } => {
+                if chrome.is_hovered(
+                    render.viewport(),
+                    render.window.scale_factor(),
+                    render.window.fullscreen().is_some(),
+                ) {
+                    render
+                        .window
+                        .show_window_menu(winit::dpi::PhysicalPosition::new(
+                            self.mouse.x,
+                            self.mouse.y,
+                        ));
+                    self.ui.reset_presentation_clicks();
+                }
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 let position = Point::new(position.x, position.y);
                 self.ui.set_pointer(Some(position));
+                self.desktop.set_pointer(Some(position));
+                chrome.pointer(Some(position));
+                let hit = chrome.hit_test(
+                    position,
+                    render.viewport(),
+                    render.window.scale_factor(),
+                    render.window.fullscreen().is_some(),
+                    render.window.is_maximized(),
+                );
+                render
+                    .window
+                    .set_cursor(hit.map(Hit::cursor).unwrap_or(CursorIcon::Default));
+                if chrome.is_hovered(
+                    render.viewport(),
+                    render.window.scale_factor(),
+                    render.window.fullscreen().is_some(),
+                ) {
+                    self.ui.reveal_controls();
+                    chrome.native_opacity(&render.window, 1.0);
+                }
                 render.window.set_cursor_visible(true);
                 self.mouse = position;
             }
             WindowEvent::CursorLeft { .. } => {
                 self.ui.set_pointer(None);
+                self.desktop.set_pointer(None);
+                chrome.pointer(None);
+                chrome.set_pressed(None);
+                chrome.reset_drag_clicks();
+                render.window.set_cursor(CursorIcon::Default);
                 render.window.set_cursor_visible(true);
                 self.ui.end_slider_drag();
             }
@@ -320,6 +463,10 @@ impl App {
                 self.modifiers = ModifiersState::empty();
                 self.ui.set_control_modifiers(false);
                 self.ui.set_pointer(None);
+                self.desktop.set_pointer(None);
+                chrome.pointer(None);
+                chrome.set_pressed(None);
+                chrome.reset_drag_clicks();
                 render.window.set_cursor_visible(true);
                 self.ui.end_slider_drag();
             }
@@ -328,6 +475,9 @@ impl App {
                 self.ui.set_control_modifiers(!self.modifiers.is_empty());
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if self.desktop.open || self.ui.startup_visible() {
+                    return Ok(());
+                }
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => f64::from(y),
                     MouseScrollDelta::PixelDelta(position) => position.y / 30.0,
@@ -342,6 +492,23 @@ impl App {
             }
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
                 if let PhysicalKey::Code(key) = event.physical_key {
+                    if self.ui.startup_visible() {
+                        return Ok(());
+                    }
+                    if key == KeyCode::F1 && !event.repeat {
+                        if self.desktop.open {
+                            self.desktop.close(self.settings.edit());
+                        } else {
+                            self.desktop.open = true;
+                        }
+                        return Ok(());
+                    }
+                    if self.desktop.open {
+                        if key == KeyCode::Escape && !event.repeat {
+                            self.desktop.close(self.settings.edit());
+                        }
+                        return Ok(());
+                    }
                     if self.ui.presentation() {
                         if key == KeyCode::Escape && !event.repeat {
                             self.set_fullscreen(false);
@@ -468,7 +635,18 @@ impl App {
                     self.settings.edit().theme_preferences = self.ui.theme_preferences().clone();
                 }
                 let now = Instant::now();
-                let top_overlay = self.profile.is_none()
+                let fullscreen = render.window.fullscreen().is_some();
+                view.set_top_inset(if fullscreen { 0.0 } else { chrome.height() });
+                if self.desktop.open
+                    || chrome.is_hovered(
+                        render.viewport(),
+                        render.window.scale_factor(),
+                        fullscreen,
+                    )
+                {
+                    self.ui.reveal_controls();
+                }
+                let mut top_overlay = self.profile.is_none()
                     && self.ui.draw_controls(
                         &mut render.overlay_scene,
                         view,
@@ -476,9 +654,47 @@ impl App {
                         render.window.fullscreen().is_some(),
                         now,
                     );
-                render
-                    .window
-                    .set_cursor_visible(self.ui.cursor_visible(self.settings.cursor_visibility));
+                if self.profile.is_none() {
+                    if self.ui.draw_startup(&mut render.overlay_scene, view, now) {
+                        top_overlay = true;
+                    } else {
+                        let viewport = render.viewport();
+                        let (colors, ink) = self.ui.scene_colors();
+                        top_overlay |= self.desktop.draw(
+                            &mut render.overlay_scene,
+                            viewport,
+                            render.window.scale_factor(),
+                            &self.settings,
+                            colors,
+                            ink,
+                        );
+                    }
+                }
+                let (colors, ink) = self.ui.scene_colors();
+                let chrome_opacity = if self.profile.is_some() {
+                    0.0
+                } else {
+                    self.ui.controls_opacity()
+                };
+                chrome.native_opacity(&render.window, chrome_opacity);
+                chrome.set_logo_opacity(self.ui.titlebar_logo_opacity(now));
+                if self.profile.is_none() {
+                    let viewport = render.viewport();
+                    top_overlay |= chrome.draw(
+                        &mut render.overlay_scene,
+                        viewport,
+                        render.window.scale_factor(),
+                        colors,
+                        ink,
+                        chrome_opacity,
+                        fullscreen,
+                        render.window.is_maximized(),
+                        render.window.has_focus(),
+                    );
+                }
+                render.window.set_cursor_visible(
+                    self.desktop.open || self.ui.cursor_visible(self.settings.cursor_visibility),
+                );
                 let frame_time = FrameTime::new(self.previous_frame, now);
                 self.previous_frame = now;
                 if let Some(profile) = &mut self.profile {
@@ -542,6 +758,7 @@ impl ApplicationHandler for App {
         if let Err(error) = self.settings.flush() {
             log::error!("{error:#}");
         }
+        self.desktop.install_on_exit(&self.settings);
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -550,6 +767,7 @@ impl ApplicationHandler for App {
         }
         self.state = match ActiveWindow::new(event_loop) {
             Ok(mut window) => {
+                std::thread::spawn(updater::cleanup_after_start);
                 window.view.set_zoom(self.settings.zoom);
                 window.render.window.set_fullscreen(
                     self.settings
@@ -573,6 +791,7 @@ impl ApplicationHandler for App {
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        self.desktop.set_pointer(None);
         self.modifiers = ModifiersState::empty();
         if matches!(self.state, WindowState::Active(_)) {
             self.state = WindowState::Suspended;
@@ -603,6 +822,11 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.exit_requested {
+            event_loop.exit();
+            return;
+        }
+        self.desktop.poll(&self.settings);
         while let Ok(event) = self.rx.try_recv() {
             self.ui.audio_event(event);
         }
@@ -642,12 +866,33 @@ impl ApplicationHandler for App {
 
 fn main() -> anyhow::Result<()> {
     pretty_env_logger::init();
+    if updater::run_helper()? {
+        return Ok(());
+    }
+    if std::env::args()
+        .nth(1)
+        .is_some_and(|arg| arg == "--version")
+    {
+        println!("Benga {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if std::env::args()
+        .nth(1)
+        .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
+        println!("Benga {} — desktop audio visualizer\nUsage: benga [--version | --help | --profile]\nIn the app: F1 for audio help and updates, double-click for fullscreen, Esc to leave.\nhttps://benga.zezic.ru • https://github.com/zezic/benga",env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let profile = profile::Run::from_args()?;
     let settings =
         Saved::<Config>::load(config::config_file()?, Some(config::legacy_config_file()?))?;
     let mut ui = Ui::new(&settings)?;
     ui.set_presentation(true);
+    if profile.is_some() {
+        ui.dismiss_startup();
+    }
     let (tx, rx) = std::sync::mpsc::channel();
+    let mut audio_error = None;
     let _stream = if profile.is_some() {
         ui.set_preamp(PreampDb::try_from(0.0)?);
         ui.audio_event(AudioEvent::Config {
@@ -655,10 +900,19 @@ fn main() -> anyhow::Result<()> {
         });
         None
     } else {
-        Some(capture_stream(tx)?)
+        match capture_stream(tx) {
+            Ok(stream) => Some(stream),
+            Err(error) => {
+                log::error!("Audio capture: {error:#}");
+                audio_error = Some(format!("{error:#}"));
+                None
+            }
+        }
     };
     let event_loop = EventLoop::new()?;
     let mut app = App {
+        desktop: desktop::Desktop::new(&settings, audio_error, profile.is_some())?,
+        exit_requested: false,
         state: WindowState::Suspended,
         rx,
         ui,

@@ -36,6 +36,9 @@ any control for a hint. They fade after 10 seconds of inactivity.
 Music drives the model's motion, part highlights, and close-ups of points of
 interest. Energy drops change the model unless Model Lock is enabled.
 
+**Auto Detail** reduces fine detail during fast motion and restores it as movement
+slows. It defaults to 100%; 0% disables it, and higher values simplify more strongly.
+
 For developer controls, hold any modifier key and click **Developer: exit
 presentation**. Common shortcuts:
 

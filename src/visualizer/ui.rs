@@ -28,10 +28,11 @@ use super::{
     controls::{ControlAction, ControlState, Controls},
     debug,
     presentation::Presentation,
-    Contribution, CreaseThreshold, DebugSelection, DebugSnapshot, DepthFade, Detector,
-    DetectorSettings, DropKernel, Frame as VisualizerFrame, LineWidth, ModelComposite, ModelMotion,
-    MotionFadePower, MotionOpacity, NearOpacity, Palette, Parameter, PatternKernel, PatternLayer,
-    Property, TreeTarget, Visualizer, VisualizerTuning, BAND_COUNT,
+    splash::Splash,
+    Contribution, CreaseThreshold, DebugSelection, DebugSnapshot, DepthFade, DetailThinning,
+    Detector, DetectorSettings, DropKernel, Frame as VisualizerFrame, LineWidth, ModelComposite,
+    ModelMotion, MotionFadePower, MotionOpacity, NearOpacity, Palette, Parameter, PatternKernel,
+    PatternLayer, Property, TreeTarget, Visualizer, VisualizerTuning, BAND_COUNT,
 };
 
 pub(super) const HUD_MARGIN: f64 = 24.0;
@@ -40,6 +41,7 @@ pub(super) const HUD_MARGIN: f64 = 24.0;
 #[derive(Clone, Copy, PartialEq)]
 pub struct View {
     pub(super) viewport: Size,
+    top_inset: f64,
     zoom: Zoom,
     ui_scale: f64,
 }
@@ -52,6 +54,7 @@ impl View {
         );
         Self {
             viewport,
+            top_inset: 0.0,
             zoom: Zoom::default(),
             ui_scale: 1.0,
         }
@@ -76,6 +79,15 @@ impl View {
 
     pub fn zoom_factor(&self) -> f64 {
         self.zoom.factor()
+    }
+
+    pub fn set_top_inset(&mut self, points: f64) {
+        assert!(points.is_finite() && points >= 0.0);
+        self.top_inset = points;
+    }
+
+    pub(super) fn top_inset(&self) -> f64 {
+        self.top_inset * self.ui_scale
     }
 }
 
@@ -253,6 +265,7 @@ struct PatternDrag {
 #[derive(Clone, Copy, PartialEq)]
 struct FaceSettings {
     viewport: Size,
+    top_inset: f64,
     ui_scale: f64,
     limit: FrameRateLimit,
     colors: ThemeColors,
@@ -264,6 +277,7 @@ struct FaceSettings {
 
 /// The interactive model visualizer: HUD, inspector and audio cursor.
 pub struct Ui {
+    startup: Splash,
     scene_readout: Readout,
     scene_value: Text,
     scene_name: String,
@@ -346,6 +360,11 @@ pub struct Ui {
 }
 
 impl Ui {
+    #[cfg(test)]
+    pub(super) fn benchmark_visualizer_mut(&mut self) -> &mut Visualizer {
+        &mut self.visualizer
+    }
+
     fn line_status(
         position: Option<(usize, usize)>,
         motion: ModelMotion,
@@ -464,6 +483,7 @@ impl Ui {
         visualizer.set_motion_opacity(motion_opacity);
         let motion_fade_power = config.motion_fade_power;
         visualizer.set_motion_fade_power(motion_fade_power);
+        visualizer.set_detail_thinning(config.detail_thinning);
         let scene_name = visualizer.scene_name().to_owned();
         let scene_value = fonts.layout_ui(&scene_name, 12.0, UiFace::SemiBold);
         let line_count = visualizer.line_count();
@@ -495,7 +515,9 @@ impl Ui {
         let theme_model_revision = visualizer.model_revision();
         let theme = Theme::new(selected);
         let presentation = Presentation::new(&Palette::from_theme(selected), theme.colors);
+        let startup = Splash::new(&mut fonts)?;
         Ok(Self {
+            startup,
             scene_readout,
             scene_value,
             scene_name,
@@ -591,6 +613,36 @@ impl Ui {
             }
             AudioEvent::Buffer { buf, captured_at } => self.consume_buf(&buf, captured_at),
         }
+    }
+
+    /// Draw over the complete app, in the normal-alpha top overlay. The
+    /// returned flag stays true through the fade so controls can wait until
+    /// the visualizer is visible. Call with a cleared scene each frame.
+    pub fn draw_startup(&mut self, scene: &mut Scene, view: &View, now: Instant) -> bool {
+        self.startup.draw(
+            scene,
+            view,
+            self.theme.colors,
+            Palette::from_theme(self.theme.selected()).neutral[0],
+            now,
+        )
+    }
+
+    /// Profiling and other synthetic runs should start with the visualizer.
+    pub fn dismiss_startup(&mut self) {
+        self.startup.dismiss();
+    }
+
+    pub fn startup_visible(&self) -> bool {
+        self.startup.visible()
+    }
+
+    pub fn titlebar_logo_opacity(&self, now: Instant) -> f32 {
+        self.startup.titlebar_logo_opacity(now)
+    }
+
+    pub fn scene_colors(&self) -> (ThemeColors, Color) {
+        (self.theme.colors, self.presentation.colors().ink)
     }
 
     /// Borrowed output audio follows the standalone capture processing path.
@@ -1398,6 +1450,18 @@ impl Ui {
             || self.controls.cursor_visible()
     }
 
+    pub fn controls_opacity(&self) -> f32 {
+        if self.presentation() {
+            self.controls.opacity()
+        } else {
+            1.0
+        }
+    }
+
+    pub fn reveal_controls(&mut self) {
+        self.controls.activate(Instant::now());
+    }
+
     pub fn draw_controls(
         &mut self,
         scene: &mut Scene,
@@ -1474,6 +1538,14 @@ impl Ui {
         self.motion_fade_power = power;
         self.visualizer.set_motion_fade_power(power);
         self.refresh_line_status();
+    }
+
+    pub fn set_detail_thinning(&mut self, thinning: DetailThinning) {
+        if self.visualizer.detail_thinning() == thinning {
+            return;
+        }
+        self.visualizer.set_detail_thinning(thinning);
+        self.face_settings = None;
     }
 
     pub fn set_model_motion(&mut self, motion: ModelMotion) {
@@ -1629,7 +1701,10 @@ impl Ui {
             shutter_transform * Affine::translate((-(self.line_count_value.width() + 16.0), 0.0));
         let line_status_transform = line_count_transform
             * Affine::translate((-(self.line_status_value.width() + 24.0), 0.0));
-        let top_left = Affine::translate((HUD_MARGIN * ui, 32.0 * ui)) * Affine::scale(ui);
+        let top_left = Affine::translate((
+            HUD_MARGIN * ui,
+            (32.0 * ui).max(view.top_inset() + 24.0 * ui),
+        )) * Affine::scale(ui);
         let palette = self.visualizer.palette();
         let hud_colors = ThemeColors {
             readout: palette.neutral[0],
@@ -1785,6 +1860,7 @@ impl Ui {
         self.update_hud(dt);
         let settings = FaceSettings {
             viewport: view.viewport,
+            top_inset: view.top_inset,
             ui_scale: view.ui_scale(),
             limit,
             colors: self.theme.colors,
@@ -1888,6 +1964,9 @@ pub struct UiFrame<'a> {
 }
 
 #[cfg(test)]
+mod cache_regression_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::render::RasterAssetCache;
@@ -1895,6 +1974,32 @@ mod tests {
         Contribution, EnvelopeTarget, Input, MixPoint, StyleInput, TreeTarget,
     };
     use std::time::Duration;
+
+    #[test]
+    fn inspector_header_clears_tall_titlebars_at_both_display_scales() {
+        for dpi in [1.0, 2.0] {
+            let mut view = View::fit(Size::new(1280.0 * dpi, 720.0 * dpi));
+            view.set_ui_scale(dpi);
+            view.set_top_inset(44.0);
+            let layout = debug::Layout::new(&view, VisualizerTextScale::default());
+            for button in [layout.hat_button, layout.scene_button, layout.flux_button] {
+                assert!(button.y0 >= 44.0 * dpi);
+            }
+            assert!(layout.panel.y1 <= view.viewport.height);
+        }
+    }
+
+    #[test]
+    fn auto_detail_setting_reaches_the_visualizer_from_config_and_controls() -> anyhow::Result<()> {
+        let mut config = Config::default();
+        config.detail_thinning = DetailThinning::try_from(0.0)?;
+        let mut ui = Ui::new(&config)?;
+        assert_eq!(ui.visualizer.detail_thinning(), config.detail_thinning);
+        let adjusted = DetailThinning::try_from(1.5)?;
+        ui.set_detail_thinning(adjusted);
+        assert_eq!(ui.visualizer.detail_thinning(), adjusted);
+        Ok(())
+    }
 
     #[test]
     fn background_click_pairs_use_logical_distance_and_reset_with_presentation_context(

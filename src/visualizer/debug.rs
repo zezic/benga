@@ -85,7 +85,7 @@ impl Layout {
             .min(view.viewport.width - margin * 2.0)
             .max(1.0);
         let x0 = view.viewport.width - margin - panel_width;
-        let y0 = margin;
+        let y0 = margin.max(view.top_inset() + 8.0 * scale);
         let header_height = HEADER_HEIGHT * scale;
         let band_row_height = BAND_ROW_HEIGHT * scale;
         let divider_gap = DIVIDER_GAP * scale;
@@ -97,9 +97,7 @@ impl Layout {
             + PROPERTY_ROWS as f64 * property_row_height
             + PANEL_BOTTOM_PAD * scale
             + footer_height;
-        let panel_height = body_height
-            .min(view.viewport.height - margin * 2.0)
-            .max(1.0);
+        let panel_height = body_height.min(view.viewport.height - y0 - margin).max(1.0);
         let panel =
             Rect::from_origin_size(Point::new(x0, y0), Size::new(panel_width, panel_height));
         let button_gap = 3.0 * scale;

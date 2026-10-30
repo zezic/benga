@@ -455,11 +455,13 @@ impl RenderWindow {
         preferences: wgpu::DeviceDescriptor<'_>,
     ) -> anyhow::Result<Self> {
         let window = Arc::new(
-            event_loop.create_window(
+            event_loop.create_window(crate::window_chrome::attributes(
                 Window::default_attributes()
                     .with_inner_size(PhysicalSize::new(1920, 1080))
-                    .with_title("Benga"),
-            )?,
+                    .with_min_inner_size(winit::dpi::LogicalSize::new(360.0, 240.0))
+                    .with_title("Benga")
+                    .with_window_icon(crate::assets::window_icon()),
+            ))?,
         );
         let size = window.inner_size();
         let mut context = RenderContext::new();

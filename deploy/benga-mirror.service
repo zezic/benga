@@ -1,0 +1,27 @@
+[Unit]
+Description=Mirror authenticated Benga GitHub Releases
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/benga/update-public-key
+
+[Service]
+Type=oneshot
+User=benga
+Group=benga
+WorkingDirectory=/srv/benga
+ExecStart=/usr/bin/python3 /opt/benga/mirror.py --root /srv/benga/downloads --public-key-file /etc/benga/update-public-key
+TimeoutStartSec=15min
+UMask=0022
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadWritePaths=/srv/benga/downloads
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+

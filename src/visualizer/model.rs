@@ -194,10 +194,12 @@ impl Model {
         let cosine_limit = crease.degrees().to_radians().cos();
         let mut edges = Vec::new();
         let mut edge_parts = Vec::new();
+        let mut edge_importance = Vec::new();
         for edge in &self.edges {
             if edge.kind.visible_at(cosine_limit) {
                 edges.push(edge.points);
                 edge_parts.push(edge.part);
+                edge_importance.push(edge.kind.importance());
             }
         }
         Wireframe::from_parts(
@@ -207,6 +209,7 @@ impl Model {
             edge_parts,
             u16::try_from(self.parts.len()).expect("the model has too many mesh parts"),
         )
+        .with_edge_importance(edge_importance)
     }
 
     /// The mesh part or empty box registered under a glTF node name.
@@ -271,6 +274,15 @@ impl EdgeKind {
         match self {
             Self::Always => true,
             Self::Crease(cosine) => cosine < cosine_limit,
+        }
+    }
+
+    /// Boundaries and sharp creases carry more shape information than shallow
+    /// interior tessellation. Keep the bias bounded so all lengths can thin.
+    fn importance(self) -> f32 {
+        match self {
+            Self::Always => 2.5,
+            Self::Crease(cosine) => 1.0 + 1.5 * (1.0 - cosine.clamp(0.0, 1.0)),
         }
     }
 }
@@ -366,7 +378,7 @@ fn shuffle(bag: &mut VecDeque<usize>, rng: &mut Rng) {
 }
 
 fn model_paths() -> anyhow::Result<Vec<std::path::PathBuf>> {
-    let directory = fs::read_dir(MODEL_DIRECTORY)
+    let directory = fs::read_dir(crate::assets::path("models"))
         .with_context(|| format!("could not read the model directory {MODEL_DIRECTORY}"))?;
     let mut paths = Vec::new();
     for entry in directory {
@@ -945,6 +957,79 @@ mod tests {
         let fine = model.wireframe(CreaseThreshold::MIN);
         let coarse = model.wireframe(CreaseThreshold::MAX);
         assert!(fine.edges().len() > coarse.edges().len());
+        Ok(())
+    }
+
+    #[test]
+    fn wireframe_filtering_preserves_structural_importance_and_parts() -> anyhow::Result<()> {
+        let crease = |degrees: f32| EdgeKind::Crease(degrees.to_radians().cos());
+        let model = Model {
+            name: "Importance fixture".to_owned(),
+            id: "importance_fixture".to_owned(),
+            vertices: vec![
+                Vec3::new(-0.5, 0.0, 0.0),
+                Vec3::new(0.0, 0.5, 0.0),
+                Vec3::new(0.5, 0.0, 0.0),
+                Vec3::new(0.0, 0.0, -0.5),
+                Vec3::new(0.0, 0.0, 0.5),
+            ],
+            edges: vec![
+                ModelEdge {
+                    points: [0, 1],
+                    kind: EdgeKind::Always,
+                    part: 0,
+                },
+                ModelEdge {
+                    points: [0, 2],
+                    kind: crease(20.0),
+                    part: 0,
+                },
+                ModelEdge {
+                    points: [1, 2],
+                    kind: crease(60.0),
+                    part: 0,
+                },
+                ModelEdge {
+                    points: [3, 4],
+                    kind: crease(80.0),
+                    part: 1,
+                },
+            ],
+            vertex_parts: vec![0, 0, 0, 1, 1],
+            parts: vec![
+                ModelPart {
+                    name: "body".to_owned(),
+                    index: 0,
+                    start: 0,
+                    len: 3,
+                },
+                ModelPart {
+                    name: "detail".to_owned(),
+                    index: 1,
+                    start: 3,
+                    len: 2,
+                },
+            ],
+            anchors: BTreeMap::new(),
+            node_parts: BTreeMap::new(),
+        };
+        let fine = model.wireframe(CreaseThreshold::try_from(10.0)?);
+        assert_eq!(fine.edges(), &[[0, 1], [0, 2], [1, 2], [3, 4]]);
+        assert_eq!(fine.edge_importance(0), 2.5);
+        assert!(fine.edge_importance(1) < fine.edge_importance(2));
+        assert!((fine.edge_importance(2) - 1.75).abs() < 1e-6);
+        assert!(fine.edge_importance(2) < fine.edge_importance(3));
+        assert!(fine.edge_importance(3) < fine.edge_importance(0));
+
+        let coarse = model.wireframe(CreaseThreshold::try_from(50.0)?);
+        assert_eq!(coarse.edges(), &[[0, 1], [1, 2], [3, 4]]);
+        for (index, original) in [0, 2, 3].into_iter().enumerate() {
+            assert_eq!(
+                coarse.edge_importance(index),
+                fine.edge_importance(original)
+            );
+            assert_eq!(coarse.edge_part(index), fine.edge_part(original));
+        }
         Ok(())
     }
 

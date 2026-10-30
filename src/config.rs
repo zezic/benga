@@ -286,6 +286,8 @@ pub enum CursorVisibility {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    pub updates: UpdatePreferences,
+    pub onboarding_seen: bool,
     pub theme: crate::theme::ThemeId,
     pub theme_preferences: crate::theme::ThemePreferences,
     pub fullscreen: bool,
@@ -305,6 +307,7 @@ pub struct Config {
     pub model_rotation: crate::visualizer::ModelRotation,
     pub motion_opacity: crate::visualizer::MotionOpacity,
     pub motion_fade_power: crate::visualizer::MotionFadePower,
+    pub detail_thinning: crate::visualizer::DetailThinning,
     pub tuning: crate::visualizer::VisualizerTuning,
     /// Removed display selectors accepted so an existing config still loads.
     #[serde(default, skip_serializing)]
@@ -313,6 +316,23 @@ pub struct Config {
     mode: Ignored,
     #[serde(default, skip_serializing)]
     peak_movement: Ignored,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpdatePreferences {
+    pub check_on_start: bool,
+    /// Download verified updates in the background and apply them on exit.
+    pub auto_install: bool,
+}
+
+impl Default for UpdatePreferences {
+    fn default() -> Self {
+        Self {
+            check_on_start: true,
+            auto_install: false,
+        }
+    }
 }
 
 /// A config value that is accepted for compatibility and discarded.
@@ -342,6 +362,21 @@ pub fn legacy_config_file() -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_detail_defaults_for_existing_configs_and_round_trips() -> anyhow::Result<()> {
+        let existing: Config = ron::from_str("()")?;
+        assert_eq!(existing.detail_thinning.strength(), 1.0);
+        for strength in [0.0, 0.5, 1.0, 1.7, 2.0] {
+            let mut config = Config::default();
+            config.detail_thinning = crate::visualizer::DetailThinning::try_from(strength)?;
+            let restored: Config = ron::from_str(&ron::to_string(&config)?)?;
+            assert_eq!(restored.detail_thinning, config.detail_thinning);
+        }
+        assert!(ron::from_str::<Config>("(detail_thinning: -0.1)").is_err());
+        assert!(ron::from_str::<Config>("(detail_thinning: 2.1)").is_err());
+        Ok(())
+    }
 
     #[test]
     fn zoom_preserves_camera_bounds_across_dials_and_wheel_scaling() {

@@ -481,7 +481,7 @@ mod tests {
 
     #[test]
     fn registry_cycles_and_serializes_every_shipped_theme() {
-        assert_eq!(registry().len(), 361);
+        assert_eq!(registry().len(), 362);
         let first = ThemeId(0);
         assert_eq!(
             first

@@ -23,6 +23,7 @@ use crate::{
 use super::{presentation::ScenePalette, DebugHistory, ModelMotion, ModelRotation, View};
 
 const IDLE: Duration = Duration::from_secs(5);
+const COLOR_COOLDOWN: Duration = Duration::from_secs(10);
 const BLOCK_WIDTH: f64 = 180.0;
 const BUTTON_HEIGHT: f64 = 30.0;
 const LABEL_HEIGHT: f64 = 16.0;
@@ -39,6 +40,7 @@ pub enum Dial {
     Theme,
     Model,
     LineWidth,
+    DetailThinning,
     FrameRate,
     Shutter,
     TextOpacity,
@@ -47,6 +49,7 @@ pub enum Dial {
 
 #[derive(Clone, Copy)]
 pub enum ControlAction {
+    Help,
     Fullscreen,
     Adjust(Dial, Adjustment),
     AutoColors,
@@ -66,6 +69,7 @@ pub enum ControlAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(test, derive(strum::VariantArray))]
 enum Control {
+    Help,
     Fullscreen,
     Theme,
     AutoColors,
@@ -79,6 +83,7 @@ enum Control {
     MotionBlur,
     Shutter,
     LineWidth,
+    DetailThinning,
     FrameRate,
     Zoom,
     TextOpacity,
@@ -88,6 +93,7 @@ enum Control {
 impl Control {
     fn title(self) -> &'static str {
         match self {
+            Self::Help => "BENGA",
             Self::Theme => "COLOR THEME",
             Self::AutoColors => "AUTO COLORS",
             Self::Contrast => "ALLOW CONTRAST",
@@ -99,6 +105,7 @@ impl Control {
             Self::MotionBlur => "MOTION BLUR",
             Self::Shutter => "SHUTTER",
             Self::LineWidth => "LINE WIDTH",
+            Self::DetailThinning => "AUTO DETAIL",
             Self::FrameRate => "FPS LIMIT",
             Self::Zoom => "ZOOM",
             Self::TextOpacity => "TEXT OPACITY",
@@ -110,6 +117,7 @@ impl Control {
 
     fn hint(self, config: &Config) -> &'static str {
         match self {
+            Self::Help => "Audio help and updates. F1 opens this panel.",
             Self::Theme => "Browse color themes. Disliked themes are skipped.",
             Self::AutoColors => "Choose a new theme on model changes, after 10 seconds without mouse movement.",
             Self::Contrast if !config.theme_preferences.auto_colors => "Enable Auto Colors to use contrast settings.",
@@ -123,6 +131,7 @@ impl Control {
             Self::Shutter if config.model_motion == ModelMotion::Still => "Enable Motion Blur to use the model shutter.",
             Self::Shutter => "Set the model's exposure length in frame intervals.",
             Self::LineWidth => "Adjust the thickness of model wireframe lines.",
+            Self::DetailThinning => "Reduce fine detail during fast motion while favoring important edges. 0% turns Auto Detail off; higher values simplify more strongly.",
             Self::FrameRate => "Limit drawing speed, or synchronize with the display using VSync.",
             Self::Zoom => "Adjust visualizer magnification.",
             Self::TextOpacity => "Adjust infographic opacity. Set 0% to hide the presentation text.",
@@ -168,15 +177,15 @@ struct ControlColumn {
 }
 
 impl ControlColumn {
+    const fn single(top: Control) -> Self {
+        Self { top, bottom: None }
+    }
+
     const fn pair(top: Control, bottom: Control) -> Self {
         Self {
             top,
             bottom: Some(bottom),
         }
-    }
-
-    const fn single(top: Control) -> Self {
-        Self { top, bottom: None }
     }
 
     fn cells(self) -> impl Iterator<Item = (Control, Row)> {
@@ -211,7 +220,7 @@ const GROUPS: [ControlGroup; 5] = [
     },
     ControlGroup {
         domain: Domain::Audio,
-        columns: &[ControlColumn::single(Control::Boost)],
+        columns: &[ControlColumn::pair(Control::Boost, Control::Help)],
     },
     ControlGroup {
         domain: Domain::Rendering,
@@ -219,6 +228,7 @@ const GROUPS: [ControlGroup; 5] = [
             ControlColumn::pair(Control::MotionBlur, Control::Shutter),
             ControlColumn::pair(Control::LineWidth, Control::Zoom),
             ControlColumn::pair(Control::FrameRate, Control::TextOpacity),
+            ControlColumn::single(Control::DetailThinning),
         ],
     },
     ControlGroup {
@@ -516,12 +526,16 @@ impl Controls {
         1.0 - (now
             .saturating_duration_since(self.last_motion)
             .as_secs_f32()
-            / IDLE.as_secs_f32())
+            / COLOR_COOLDOWN.as_secs_f32())
         .min(1.0)
     }
 
     pub fn cursor_visible(&self) -> bool {
         self.opacity > 0.01
+    }
+
+    pub fn opacity(&self) -> f32 {
+        self.opacity
     }
 
     pub fn activate(&mut self, now: Instant) {
@@ -686,11 +700,20 @@ impl Controls {
             )]
         };
         match control {
+            Control::Help => vec![Choice::new("Help / updates", ControlAction::Help, false)],
             Control::Theme => dial(Dial::Theme, theme.name().to_owned()),
             Control::Model => dial(Dial::Model, model.to_owned()),
             Control::LineWidth => {
                 dial(Dial::LineWidth, format!("{}%", config.line_width.percent()))
             }
+            Control::DetailThinning => dial(
+                Dial::DetailThinning,
+                if config.detail_thinning.percent() == 0 {
+                    "Off".to_owned()
+                } else {
+                    format!("{}%", config.detail_thinning.percent())
+                },
+            ),
             Control::FrameRate => dial(Dial::FrameRate, config.frame_rate_limit.to_string()),
             Control::Zoom => dial(Dial::Zoom, format!("{:.0}%", config.zoom.factor() * 100.0)),
             Control::Shutter => dial(
@@ -899,6 +922,7 @@ impl Controls {
                 Control::Theme
                     | Control::Model
                     | Control::LineWidth
+                    | Control::DetailThinning
                     | Control::FrameRate
                     | Control::Shutter
                     | Control::TextOpacity
@@ -1071,7 +1095,10 @@ impl Controls {
                 canvas.palette.ink.with_alpha(0.72 * self.opacity),
             );
         }
-        let label = format!("{}s", (remaining * IDLE.as_secs_f32()).ceil() as u32);
+        let label = format!(
+            "{}s",
+            (remaining * COLOR_COOLDOWN.as_secs_f32()).ceil() as u32
+        );
         self.label(
             canvas,
             Rect::new(rect.x1 - 23.0, rect.y0, rect.x1, rect.y1),
@@ -1234,6 +1261,42 @@ mod tests {
         controls.pointer(None, now + Duration::from_secs(7));
         assert_eq!(controls.cooldown(now + Duration::from_secs(7)), 0.5);
         assert_eq!(controls.cooldown(now + Duration::from_secs(12)), 0.0);
+    }
+
+    #[test]
+    fn exposed_opacity_follows_the_existing_five_second_idle_fade() -> anyhow::Result<()> {
+        let now = Instant::now();
+        let mut controls = Controls::new(now);
+        let mut fonts = Fonts::new()?;
+        let view = View::fit(vello::kurbo::Size::new(1280.0, 720.0));
+        let config = Config::default();
+        draw(
+            &mut controls,
+            &mut fonts,
+            &view,
+            &config,
+            now + Duration::from_millis(4999),
+        );
+        assert_eq!(controls.opacity(), 1.0);
+        draw(
+            &mut controls,
+            &mut fonts,
+            &view,
+            &config,
+            now + Duration::from_millis(5224),
+        );
+        assert!((controls.opacity() - 0.5).abs() < 0.001);
+        draw(
+            &mut controls,
+            &mut fonts,
+            &view,
+            &config,
+            now + Duration::from_millis(5500),
+        );
+        assert_eq!(controls.opacity(), 0.0);
+        controls.activate(now + Duration::from_secs(6));
+        assert_eq!(controls.opacity(), 1.0);
+        Ok(())
     }
 
     #[test]
@@ -1475,10 +1538,54 @@ mod tests {
             );
         }
         assert_eq!(layout.cell(Control::Boost).row, Row::Top);
-        assert!(!layout
-            .cells()
-            .any(|cell| cell.row == Row::Bottom
-                && cell.rect.x0 == layout.cell(Control::Boost).rect.x0));
+        assert_eq!(layout.cell(Control::Help).row, Row::Bottom);
+        assert_eq!(
+            layout.cell(Control::Help).rect.x0,
+            layout.cell(Control::Boost).rect.x0
+        );
+    }
+
+    #[test]
+    fn auto_detail_remains_adjustable_with_motion_blur_off() -> anyhow::Result<()> {
+        let now = Instant::now();
+        let mut controls = Controls::new(now);
+        let mut fonts = Fonts::new()?;
+        let view = View::fit(vello::kurbo::Size::new(1280.0, 720.0));
+        let mut config = Config::default();
+        config.model_motion = ModelMotion::Still;
+        config.detail_thinning = super::super::DetailThinning::try_from(0.0)?;
+        let choices = Controls::choices(
+            Control::DetailThinning,
+            &config,
+            config.theme,
+            "Model",
+            false,
+        );
+        assert_eq!(choices[1].label, "Off");
+        draw(&mut controls, &mut fonts, &view, &config, now);
+        let increase = target(&controls, |action| {
+            matches!(
+                action,
+                ControlAction::Adjust(Dial::DetailThinning, Adjustment::Increase)
+            )
+        });
+        assert!(matches!(
+            controls.click(increase.center(), now),
+            Some(ControlAction::Adjust(
+                Dial::DetailThinning,
+                Adjustment::Increase
+            ))
+        ));
+        config.detail_thinning = super::super::DetailThinning::try_from(1.2)?;
+        let choices = Controls::choices(
+            Control::DetailThinning,
+            &config,
+            config.theme,
+            "Model",
+            false,
+        );
+        assert_eq!(choices[1].label, "120%");
+        Ok(())
     }
 
     #[test]

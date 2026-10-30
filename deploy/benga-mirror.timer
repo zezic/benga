@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for a new public Benga release every half hour
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+RandomizedDelaySec=2min
+Unit=benga-mirror.service
+
+[Install]
+WantedBy=timers.target

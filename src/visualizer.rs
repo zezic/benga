@@ -1,5 +1,7 @@
 //! Spectrum-driven pseudo-3D model visualizer.
 
+#[cfg(test)]
+mod benchmark;
 mod computation;
 mod controls;
 mod debug;
@@ -10,6 +12,9 @@ mod presentation;
 mod renderer;
 mod showcase;
 mod spectrum;
+mod splash;
+mod thinning;
+mod transition;
 mod ui;
 
 use computation::{validate_value, MixContext};
@@ -311,6 +316,59 @@ impl TryFrom<f32> for LineWidth {
 
 impl From<LineWidth> for f32 {
     fn from(value: LineWidth) -> Self {
+        value.0
+    }
+}
+
+/// Motion-driven detail reduction. Zero disables it; one is the default and
+/// two applies stronger thinning at the same projected movement speed.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "f32", into = "f32")]
+pub struct DetailThinning(f32);
+
+impl DetailThinning {
+    pub const MIN: f32 = 0.0;
+    pub const MAX: f32 = 2.0;
+    const STEP: f32 = 0.1;
+
+    pub fn strength(self) -> f32 {
+        self.0
+    }
+
+    pub fn percent(self) -> u32 {
+        (self.0 * 100.0).round() as u32
+    }
+
+    #[must_use]
+    pub fn adjusted(self, adjustment: Adjustment) -> Self {
+        let delta = match adjustment {
+            Adjustment::Decrease => -Self::STEP,
+            Adjustment::Increase => Self::STEP,
+        };
+        Self((self.0 + delta).clamp(Self::MIN, Self::MAX))
+    }
+}
+
+impl Default for DetailThinning {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+impl TryFrom<f32> for DetailThinning {
+    type Error = anyhow::Error;
+
+    fn try_from(value: f32) -> Result<Self, Self::Error> {
+        anyhow::ensure!(
+            value.is_finite() && (Self::MIN..=Self::MAX).contains(&value),
+            "detail_thinning must be finite and between 0 and 2"
+        );
+        Ok(Self(value))
+    }
+}
+
+impl From<DetailThinning> for f32 {
+    fn from(value: DetailThinning) -> Self {
         value.0
     }
 }
@@ -2153,19 +2211,19 @@ impl Visualizer {
             .collect()
     }
 
-    /// Logical wireframe line count. Model edges stay counted while motion
-    /// blur renders them as swept ribbons; diagnosis lines are included.
+    /// Logical line count after the model transition's edge selection. Selected
+    /// edges stay counted while blurred or offscreen; diagnosis lines are included.
     pub fn line_count(&self) -> usize {
         let outgoing = self
             .scene
             .outgoing
             .as_ref()
-            .map_or(0, ModelRuntime::wireframe_edge_count);
+            .map_or(0, |model| model.active_edges);
         let current = self
             .scene
             .current
             .as_ref()
-            .map_or(0, ModelRuntime::wireframe_edge_count);
+            .map_or(0, |model| model.active_edges);
         self.lines.len() + current + outgoing
     }
 
@@ -2871,6 +2929,14 @@ impl Visualizer {
 
     pub fn set_line_width(&mut self, width: LineWidth) {
         self.line_width = width;
+    }
+
+    pub fn detail_thinning(&self) -> DetailThinning {
+        self.scene.detail_thinning
+    }
+
+    pub fn set_detail_thinning(&mut self, detail: DetailThinning) {
+        self.scene.detail_thinning = detail;
     }
 
     pub fn set_model_motion(&mut self, motion: ModelMotion) {
@@ -3674,6 +3740,7 @@ struct Scene {
     current: Option<ModelRuntime>,
     outgoing: Option<ModelRuntime>,
     transition: f32,
+    detail_thinning: DetailThinning,
 }
 
 impl Scene {
@@ -3682,6 +3749,7 @@ impl Scene {
             current: None,
             outgoing: None,
             transition: 1.0,
+            detail_thinning: DetailThinning::default(),
         }
     }
 
@@ -3719,7 +3787,7 @@ impl Scene {
         current.set_wireframe(model.wireframe(crease));
     }
 
-    /// Crossfades into another model while keeping the current orientation.
+    /// Dissolves edges into another model while keeping the current orientation.
     fn switch(
         &mut self,
         model: &model::Model,
@@ -3745,6 +3813,16 @@ impl Scene {
         entering.roll = current.roll;
         entering.style = current.style;
         entering.phase = current.phase;
+        let slots = current
+            .wireframe_edge_count()
+            .max(entering.wireframe_edge_count());
+        entering.edge_dissolve.incoming(0.0, slots);
+        entering.active_edges = 0;
+        self.current
+            .as_mut()
+            .expect("a model must be shown before switching models")
+            .edge_dissolve
+            .freeze();
         self.outgoing = self.current.replace(entering);
         self.transition = 0.0;
     }
@@ -3805,26 +3883,39 @@ impl Scene {
             );
             let rate = mixer.value(MixPoint::CrossfadeRate, &context);
             self.transition = (self.transition + dt * rate).min(1.0);
-            let progress = smoothstep(self.transition);
-            if let Some(outgoing) = &mut self.outgoing {
-                outgoing.opacity = 1.0 - progress;
-            }
-            self.current
-                .as_mut()
-                .expect("the crossfade has a current model")
-                .opacity = progress;
         } else {
             self.current
                 .as_mut()
                 .expect("the crossfade has a current model")
-                .opacity = 1.0;
+                .edge_dissolve
+                .show_all();
             if self.outgoing.is_some() {
                 // A muted crossfade swaps scenes without a fade.
                 self.transition = Property::Crossfade.neutral();
                 self.outgoing = None;
             }
         }
+        if self.transition >= 1.0 {
+            self.outgoing = None;
+            self.current
+                .as_mut()
+                .expect("a model is shown")
+                .edge_dissolve
+                .show_all();
+        } else if let Some(outgoing) = &mut self.outgoing {
+            let current = self
+                .current
+                .as_mut()
+                .expect("a transition has a current model");
+            let slots = current
+                .wireframe_edge_count()
+                .max(outgoing.wireframe_edge_count());
+            let progress = smoothstep(self.transition);
+            current.edge_dissolve.incoming(progress, slots);
+            outgoing.edge_dissolve.outgoing(progress, slots);
+        }
         if let Some(current) = &mut self.current {
+            current.detail_thinning = self.detail_thinning;
             current.update(
                 dt,
                 music,
@@ -3849,6 +3940,7 @@ impl Scene {
             );
         }
         if let Some(outgoing) = &mut self.outgoing {
+            outgoing.detail_thinning = self.detail_thinning;
             outgoing.update(
                 dt,
                 music,
@@ -3872,9 +3964,6 @@ impl Scene {
                 out_ribbons,
             );
         }
-        if self.transition >= 1.0 {
-            self.outgoing = None;
-        }
     }
 }
 
@@ -3895,7 +3984,12 @@ struct ModelRuntime {
     morph_rate: f32,
     line_energy: f32,
     entrance: f32,
-    opacity: f32,
+    edge_dissolve: transition::EdgeDissolve,
+    /// Logical edge selection before viewport culling; drives the HUD count.
+    active_edges: usize,
+    detail_thinning: DetailThinning,
+    thinning: thinning::Thinning,
+    detail_frame_end: Option<AudioTime>,
     motion_blur: bool,
     /// Scale captured when the POI motion fade starts.
     frozen_scale: f32,
@@ -4036,6 +4130,9 @@ impl ModelRuntime {
     ) -> Self {
         let vertex_capacity = wireframe.vertex_count();
         let edge_capacity = wireframe.edges().len();
+        let edge_dissolve =
+            transition::EdgeDissolve::new(edge_capacity, transition::model_seed(&name));
+        let thinning = thinning::Thinning::new(&wireframe, transition::model_seed(&name));
         let slide_vertices = (0..wireframe.vertex_count())
             .map(|index| slide_parts.contains(&wireframe.vertex_part(index)))
             .collect();
@@ -4055,7 +4152,11 @@ impl ModelRuntime {
             morph_rate: 1.1,
             line_energy: 0.6,
             entrance: 1.0,
-            opacity: 1.0,
+            edge_dissolve,
+            active_edges: edge_capacity,
+            detail_thinning: DetailThinning::default(),
+            thinning,
+            detail_frame_end: None,
             motion_blur,
             frozen_scale: pose.scale,
             motion_frozen: false,
@@ -4092,6 +4193,11 @@ impl ModelRuntime {
     }
 
     fn set_wireframe(&mut self, wireframe: Wireframe) {
+        self.thinning = thinning::Thinning::new(&wireframe, transition::model_seed(&self.name));
+        self.detail_frame_end = None;
+        self.active_edges = wireframe.edges().len();
+        self.edge_dissolve =
+            transition::EdgeDissolve::new(self.active_edges, transition::model_seed(&self.name));
         self.wireframe = wireframe;
         self.history.clear();
         self.current.clear();
@@ -4100,6 +4206,8 @@ impl ModelRuntime {
 
     fn reset_temporal(&mut self) {
         self.history.clear();
+        self.thinning.reset_motion();
+        self.detail_frame_end = None;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4315,6 +4423,30 @@ impl ModelRuntime {
                     visible,
                 }
             }));
+        // Use elapsed timeline time rather than shutter displacement: changing
+        // exposure or display cadence must not change the perceived motion speed.
+        let frame_seconds = self
+            .detail_frame_end
+            .filter(|previous| frame_end >= *previous)
+            .map_or(0.0, |previous| frame_end.seconds_since(previous) as f32);
+        let frame_seconds = if frame_seconds > 0.0 {
+            frame_seconds
+        } else {
+            dt
+        };
+        self.detail_frame_end = Some(frame_end);
+        self.thinning.update(
+            &self.current,
+            frame_seconds,
+            frame_seconds,
+            camera.minimum,
+            self.detail_thinning.strength(),
+            &[
+                showcase.highlight_part,
+                showcase.focus_child,
+                showcase.selector.selected,
+            ],
+        );
         let exposure = if self.motion_blur {
             let mut lines = if self.history.len() == MAX_HISTORY {
                 self.history.pop_front().expect("history is full").lines
@@ -4342,12 +4474,18 @@ impl ModelRuntime {
         } else {
             self.line_energy.max(near_opacity)
         };
-        let alpha = (self.opacity * base_opacity).clamp(0.0, 1.0);
+        let alpha = base_opacity.clamp(0.0, 1.0);
         let width = base_width * (1.0 + music.kick * 0.25);
         // Cull only the emitted instances; the temporal history keeps every
         // edge so a sweep stays correct when the edge re-enters the viewport.
         let screen = ScreenBounds::new(camera.viewport);
+        let mut active_edges = 0;
         for (index, current) in self.current.iter().enumerate() {
+            let transition_alpha = self.edge_dissolve.alpha(index) * self.thinning.alpha(index);
+            if transition_alpha <= 0.0 {
+                continue;
+            }
+            active_edges += 1;
             if !current.visible {
                 continue;
             }
@@ -4371,7 +4509,7 @@ impl ModelRuntime {
             } else {
                 1.0
             };
-            let edge_alpha = alpha * selector_alpha * focus_alpha;
+            let edge_alpha = alpha * transition_alpha * selector_alpha * focus_alpha;
 
             let Some(exposure) = &exposure else {
                 let start_color = [
@@ -4407,6 +4545,7 @@ impl ModelRuntime {
                 out_ribbons,
             );
         }
+        self.active_edges = active_edges;
     }
 
     fn project_vertices(&mut self, slide_offset: Vec3, project: impl Fn(Vec3) -> Projected) {
@@ -5760,6 +5899,14 @@ mod tests {
         showcase: &ShowcaseFrame,
         shake: Vec2,
     ) -> Vec<LineInstance> {
+        step_runtime_geometry(runtime, showcase, shake).0
+    }
+
+    fn step_runtime_geometry(
+        runtime: &mut ModelRuntime,
+        showcase: &ShowcaseFrame,
+        shake: Vec2,
+    ) -> (Vec<LineInstance>, Vec<RibbonInstance>) {
         let mut muted = [true; Property::COUNT];
         muted[Property::Line.index()] = false;
         let gates = PropertyGates {
@@ -5805,7 +5952,42 @@ mod tests {
             &mut lines,
             &mut ribbons,
         );
-        lines
+        (lines, ribbons)
+    }
+
+    #[test]
+    fn transition_culls_emission_but_keeps_every_edge_in_motion_history() {
+        let showcase = test_showcase_frame(0.0, false, 0.0);
+        for swept in [false, true] {
+            let mut runtime = test_runtime();
+            runtime.set_motion_blur(swept);
+            runtime.edge_dissolve.incoming(0.0, 1);
+            let (lines, ribbons) = step_runtime_geometry(&mut runtime, &showcase, Vec2::default());
+            assert!(lines.is_empty() && ribbons.is_empty());
+            assert_eq!(runtime.active_edges, 0);
+            assert_eq!(runtime.current.len(), 1);
+            if swept {
+                assert_eq!(runtime.history.back().unwrap().lines.len(), 1);
+            }
+            runtime.edge_dissolve.incoming(1.0, 1);
+            let (lines, ribbons) = step_runtime_geometry(&mut runtime, &showcase, Vec2::default());
+            assert_eq!(runtime.active_edges, 1);
+            assert_eq!(lines.len(), usize::from(!swept));
+            assert_eq!(ribbons.len(), if swept { 2 } else { 0 });
+        }
+    }
+
+    #[test]
+    fn changing_wireframe_rebuilds_the_transition_order() {
+        let mut runtime = test_runtime();
+        runtime.edge_dissolve.incoming(0.0, 1);
+        runtime.edge_dissolve.freeze();
+        let original = runtime.wireframe.clone();
+        runtime.set_wireframe(original);
+        assert_eq!(runtime.active_edges, 1);
+        assert_eq!(runtime.edge_dissolve.alpha(0), 1.0);
+        let showcase = test_showcase_frame(0.0, false, 0.0);
+        assert_eq!(step_runtime(&mut runtime, &showcase).len(), 1);
     }
 
     fn flip_line_endpoints(model_motion: f32) -> [f32; 4] {
@@ -7069,9 +7251,11 @@ mod tests {
             return;
         }
         let first = visualizer.scene_name().to_owned();
+        let initial_lines = visualizer.line_count();
         visualizer.handle_action(Action::Drop(1.0), 0.0, 0.75);
         assert_ne!(visualizer.scene_name(), first);
         assert!(visualizer.scene.outgoing.is_some());
+        assert_eq!(visualizer.line_count(), initial_lines);
         // Step through the rest of the bag cycle: every model appears once.
         let mut seen = vec![first, visualizer.scene_name().to_owned()];
         for _ in 2..total {

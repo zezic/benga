@@ -8,6 +8,9 @@ license = "GPL-2.0-only"
 
 [dependencies]
 anyhow = "1.0.86"
+base64 = "0.22"
+ed25519-dalek = "2.2"
+flate2 = "1.1"
 bytemuck = { version = "1.25", features = ["derive"] }
 cpal = "0.18.2"
 cpu-time = "1.0"
@@ -15,26 +18,34 @@ directories = "5.0"
 gltf = { version = "1.4.1", default-features = false, features = ["utils", "names"] }
 log = "0.4.22"
 pretty_env_logger = "0.5.0"
+quick-xml = "0.34"
 pollster = "0.4.0"
+png = "0.18.1"
 parley = { version = "0.9.0", default-features = false, features = ["std"] }
 ron = "0.8.1"
 rustfft = "6.4.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+semver = "1.0"
+sha2 = "0.10"
 skrifa = "0.44.0"
 strum = { version = "0.26.3", features = ["derive"] }
+tar = "0.4"
+tempfile = "3.20.0"
+ureq = "3.4"
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
 vello = "0.11.0"
 winit = "0.30.5"
-
-[dev-dependencies]
-png = "0.18.1"
-tempfile = "3.20.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 cpal = { version = "0.18.2", features = ["pulseaudio"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWindow", "NSView", "NSButton", "NSControl", "NSResponder", "objc2-core-foundation"] }
 coreaudio = { version = "0.5.0", features = ["process-tap"] }
 objc2 = { version = "0.6.5", default-features = false, features = ["std"] }
 objc2-core-audio = { version = "0.3.2", default-features = false, features = ["std", "AudioHardware", "objc2", "objc2-foundation"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSString", "NSUUID"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSString", "NSUUID", "NSGeometry", "NSProcessInfo"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Graphics_Dwm", "Win32_UI_Controls"] }

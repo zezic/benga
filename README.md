@@ -1,6 +1,6 @@
-# VU
+# Benga
 
-A stereo audio visualizer that drives a pseudo-3D wireframe model with the music
+An audio visualizer that drives a pseudo-3D wireframe model with the music
 playing on the desktop.
 
 ## Requirements
@@ -17,7 +17,7 @@ On macOS, allow system audio recording when prompted.
 
 ## Developer hotkeys
 
-VU starts in presentation mode, where `Esc` leaves fullscreen and other
+Benga starts in presentation mode, where `Esc` leaves fullscreen and other
 keyboard shortcuts are inactive. Move the mouse to reveal the controls. Hold
 any modifier key and click `Developer: exit presentation` to open the developer
 HUD and enable the following shortcuts.
@@ -66,7 +66,7 @@ HUD and enable the following shortcuts.
 
 ## Visualizer
 
-VU loads every `.glb` model in `assets/models/` in name order, welds vertices
+Benga loads every `.glb` model in `assets/models/` in name order, welds vertices
 that glTF split along UV and normal seams, and keeps boundary edges plus crease
 edges sharper than the adjustable crease threshold (45 degrees by default). It
 centers the mesh, scales it to unit radius, and projects the wireframe in
@@ -598,9 +598,12 @@ vertex readout sit optically centered in their boxes.
 
 ## Config
 
-- macOS: `~/Library/Application Support/com.zezic.vu/vu-config.ron`
-- Linux: `$XDG_CONFIG_HOME/vu/vu-config.ron` (normally `~/.config/vu/vu-config.ron`)
-- Windows: `%APPDATA%\zezic\vu\config\vu-config.ron`
+- macOS: `~/Library/Application Support/com.zezic.benga/benga-config.ron`
+- Linux: `$XDG_CONFIG_HOME/benga/benga-config.ron` (normally `~/.config/benga/benga-config.ron`)
+- Windows: `%APPDATA%\zezic\benga\config\benga-config.ron`
+
+If no Benga config exists, settings from the previous VU config location are
+loaded and saved to the Benga location automatically.
 
 Changes save automatically every two seconds and on exit. Presentation settings,
 manual dark/light choices, disliked themes, and the fullscreen state persist.
@@ -611,16 +614,16 @@ The startup theme changes only through Save as Default.
 On macOS 14.6+, a native Core Audio tap captures the stereo mix of all
 applications, including playback through duplex interfaces and virtual devices
 such as BlackHole. On Windows, CPAL WASAPI loopback captures the default output;
-restart VU after changing that output or its sample rate.
+restart Benga after changing that output or its sample rate.
 
-On Linux, VU records the default input source. While VU is running, use your
-audio system's routing UI to select the desktop output's monitor as VU's
+On Linux, Benga records the default input source. While Benga is running, use your
+audio system's routing UI to select the desktop output's monitor as Benga's
 recording source. For example, in `pavucontrol`, open the Recording tab and
-select "Monitor of ..." for VU's stream. VU uses PulseAudio (including
+select "Monitor of ..." for Benga's stream. Benga uses PulseAudio (including
 PipeWire's PulseAudio compatibility service) when available, and otherwise uses
 the default ALSA input.
 
-Mono output feeds both analysis channels. For multichannel output, VU analyzes
+Mono output feeds both analysis channels. For multichannel output, Benga analyzes
 the first two channels as left and right.
 
 ## Development
@@ -629,20 +632,20 @@ Run the tests with `cargo test`.
 
 Run the headless wireframe preview with
 `cargo test renders_wireframe_lines_and_swept_ribbons -- --ignored` (set
-`VU_RENDER_PREVIEW_PATH` to save the PNG). The test uses synthetic levels and
+`BENGA_RENDER_PREVIEW_PATH` to save the PNG). The test uses synthetic levels and
 does not initialize audio capture.
 
 The presentation previews are also headless and ignored by default:
 
 - `renders_presentation_at_sixteen_by_nine` with
-  `VU_PRESENTATION_PREVIEW_PATH`
-- `renders_presentation_entrance` with `VU_ENTRANCE_PREVIEW_PATH`
-- `renders_presentation_light_theme` with `VU_LIGHT_PREVIEW_PATH`
-- `renders_presentation_low_opacity` with `VU_OPACITY_PREVIEW_PATH`
-- `renders_presentation_aspects` with `VU_ASPECT_PREVIEW_DIR`
-- `renders_selector_presentation` with `VU_SELECTOR_PREVIEW_PATH`
-- `renders_selector_exit_presentation` with `VU_SELECTOR_EXIT_PREVIEW_PATH`
-- `renders_poi_presentation` with `VU_POI_PREVIEW_PATH`
+  `BENGA_PRESENTATION_PREVIEW_PATH`
+- `renders_presentation_entrance` with `BENGA_ENTRANCE_PREVIEW_PATH`
+- `renders_presentation_light_theme` with `BENGA_LIGHT_PREVIEW_PATH`
+- `renders_presentation_low_opacity` with `BENGA_OPACITY_PREVIEW_PATH`
+- `renders_presentation_aspects` with `BENGA_ASPECT_PREVIEW_DIR`
+- `renders_selector_presentation` with `BENGA_SELECTOR_PREVIEW_PATH`
+- `renders_selector_exit_presentation` with `BENGA_SELECTOR_EXIT_PREVIEW_PATH`
+- `renders_poi_presentation` with `BENGA_POI_PREVIEW_PATH`
 
 They render synthetic frames through the same retained-face and foreground
 overlay path as the application. They require a compute-capable GPU.
@@ -656,7 +659,7 @@ ribbons, and that foreground overlay.
 
 ## Profiling
 
-Build with `cargo build --release`, then run `target/release/vu --profile`.
+Build with `cargo build --release`, then run `target/release/benga --profile`.
 This opens the normal window at a 240 FPS limit with synthetic stereo audio and
 zero preamp. It warms up for one second, measures for ten seconds, and exits.
 The summary reports the GPU and pixel extent, achieved FPS, base rasterizations,
@@ -664,7 +667,7 @@ scene construction time, and presentation time split into drawable acquisition,
 rasterization, and submission. These are wall-clock timings; acquisition can
 wait for display synchronization. A second line reports actual process and main
 thread CPU usage, excluding warmup. Here 100% means one fully busy core, and
-process usage includes all of VU's threads. Resize the window during warmup to
+process usage includes all of Benga's threads. Resize the window during warmup to
 compare sizes; keep it visible throughout measurement. The run skips audio
 capture and leaves saved settings untouched.
 
@@ -674,15 +677,15 @@ cached background work; `submit` includes the combined GPU pass and presentation
 submission.
 
 On macOS, measure process CPU time with
-`/usr/bin/time -lp target/release/vu --profile`. Divide `user + sys` by `real`
+`/usr/bin/time -lp target/release/benga --profile`. Divide `user + sys` by `real`
 and multiply by 100 for average CPU usage, where 100% means one fully busy core.
 This external average includes startup and warmup. For a stack sample:
 
 ```sh
-target/release/vu --profile &
-vu_pid=$!
-sample "$vu_pid" 8 1 -file /tmp/vu.sample.txt
-wait "$vu_pid"
+target/release/benga --profile &
+benga_pid=$!
+sample "$benga_pid" 8 1 -file /tmp/benga.sample.txt
+wait "$benga_pid"
 ```
 
 ## Embedding

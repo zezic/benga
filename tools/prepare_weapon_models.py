@@ -151,7 +151,7 @@ def create_marker(name, points):
     obj.empty_display_type = 'CUBE'
     obj.empty_display_size = 1
     obj.location = (low + high) / 2
-    # VU uses an empty's scale as its focus-box size.
+    # Benga uses an empty's scale as its focus-box size.
     obj.scale = np.maximum((high - low) / 2, 0.001)
     return obj
 

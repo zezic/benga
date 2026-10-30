@@ -1801,7 +1801,7 @@ mod tests {
         rx.recv()??;
         let pixels = readback.slice(..).get_mapped_range()?.to_vec();
         readback.unmap();
-        if let Some(path) = std::env::var_os("VU_ODOMETER_PREVIEW_PATH") {
+        if let Some(path) = std::env::var_os("BENGA_ODOMETER_PREVIEW_PATH") {
             let file = std::fs::File::create(std::path::PathBuf::from(path))?;
             let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
             encoder.set_color(png::ColorType::Rgba);

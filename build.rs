@@ -4,7 +4,7 @@ fn main() {
         let manifest_dir =
             std::env::var("CARGO_MANIFEST_DIR").expect("Cargo must provide the package directory");
         println!(
-            "cargo:rustc-link-arg-bin=vu=-Wl,-sectcreate,__TEXT,__info_plist,{manifest_dir}/assets/Info.plist"
+            "cargo:rustc-link-arg-bin=benga=-Wl,-sectcreate,__TEXT,__info_plist,{manifest_dir}/assets/Info.plist"
         );
     }
 }

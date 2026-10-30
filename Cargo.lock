@@ -162,6 +162,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
 
 [[package]]
+name = "benga"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "coreaudio",
+ "cpal",
+ "cpu-time",
+ "directories",
+ "gltf",
+ "log",
+ "objc2 0.6.5",
+ "objc2-core-audio",
+ "objc2-foundation 0.3.2",
+ "parley",
+ "png",
+ "pollster",
+ "pretty_env_logger",
+ "ron",
+ "rustfft",
+ "serde",
+ "serde_json",
+ "skrifa 0.44.0",
+ "strum",
+ "tempfile",
+ "vello",
+ "winit",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2897,36 +2927,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "vu"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytemuck",
- "coreaudio",
- "cpal",
- "cpu-time",
- "directories",
- "gltf",
- "log",
- "objc2 0.6.5",
- "objc2-core-audio",
- "objc2-foundation 0.3.2",
- "parley",
- "png",
- "pollster",
- "pretty_env_logger",
- "ron",
- "rustfft",
- "serde",
- "serde_json",
- "skrifa 0.44.0",
- "strum",
- "tempfile",
- "vello",
- "winit",
-]
 
 [[package]]
 name = "walkdir"

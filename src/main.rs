@@ -16,8 +16,8 @@ use winit::{
     window::{Fullscreen, WindowId},
 };
 
+use benga::{audio, config, frame_schedule, profile, render, visualizer, AudioEvent};
 use visualizer::{ControlAction, Dial, Ui, View};
-use vu::{audio, config, frame_schedule, profile, render, visualizer, AudioEvent};
 mod saved;
 
 enum WindowState {
@@ -643,7 +643,8 @@ impl ApplicationHandler for App {
 fn main() -> anyhow::Result<()> {
     pretty_env_logger::init();
     let profile = profile::Run::from_args()?;
-    let settings = Saved::<Config>::load(config::config_file()?)?;
+    let settings =
+        Saved::<Config>::load(config::config_file()?, Some(config::legacy_config_file()?))?;
     let mut ui = Ui::new(&settings)?;
     ui.set_presentation(true);
     let (tx, rx) = std::sync::mpsc::channel();

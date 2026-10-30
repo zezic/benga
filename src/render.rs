@@ -458,7 +458,7 @@ impl RenderWindow {
             event_loop.create_window(
                 Window::default_attributes()
                     .with_inner_size(PhysicalSize::new(1920, 1080))
-                    .with_title("VU"),
+                    .with_title("Benga"),
             )?,
         );
         let size = window.inner_size();

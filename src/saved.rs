@@ -2,7 +2,7 @@ use std::{
     fs,
     io::ErrorKind,
     ops::Deref,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -16,7 +16,7 @@ enum OnDisk {
     Behind,
 }
 
-/// Editing marks the value for the next flush; reads cannot mark it dirty.
+/// Editing and importing mark the value for the next flush; reads keep it clean.
 pub struct Saved<T> {
     value: T,
     path: PathBuf,
@@ -25,21 +25,32 @@ pub struct Saved<T> {
 }
 
 impl<T: Default + DeserializeOwned> Saved<T> {
-    pub fn load(path: PathBuf) -> anyhow::Result<Self> {
-        let value = match fs::read_to_string(&path) {
-            Ok(text) => ron::from_str(&text)
-                .with_context(|| format!("Invalid settings in {}", path.display()))?,
-            Err(error) if error.kind() == ErrorKind::NotFound => T::default(),
-            Err(error) => {
-                return Err(error).with_context(|| format!("Could not read {}", path.display()))
-            }
+    /// Imports fallback settings only when the primary file is missing.
+    /// Imported values are saved to the primary path on the next flush.
+    pub fn load(path: PathBuf, fallback: Option<PathBuf>) -> anyhow::Result<Self> {
+        let (value, on_disk) = match Self::read(&path)? {
+            Some(value) => (value, OnDisk::Current),
+            None => match fallback.as_deref().map(Self::read).transpose()?.flatten() {
+                Some(value) => (value, OnDisk::Behind),
+                None => (T::default(), OnDisk::Current),
+            },
         };
         Ok(Self {
             value,
             path,
-            on_disk: OnDisk::Current,
+            on_disk,
             last_write: Instant::now(),
         })
+    }
+
+    fn read(path: &Path) -> anyhow::Result<Option<T>> {
+        match fs::read_to_string(path) {
+            Ok(text) => ron::from_str(&text)
+                .map(Some)
+                .with_context(|| format!("Invalid settings in {}", path.display())),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).with_context(|| format!("Could not read {}", path.display())),
+        }
     }
 }
 
@@ -98,10 +109,78 @@ mod tests {
     };
 
     #[test]
+    fn imports_legacy_settings_without_changing_the_original_file() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("benga/benga-config.ron");
+        let legacy = directory.path().join("vu/vu-config.ron");
+        fs::create_dir_all(legacy.parent().unwrap())?;
+        let original = "(preamp_db: -12.0, zoom: 1.7, fullscreen: true)";
+        fs::write(&legacy, original)?;
+
+        let mut settings = Saved::<Config>::load(path.clone(), Some(legacy.clone()))?;
+        assert_eq!(settings.preamp_db.db(), -12.0);
+        assert_eq!(settings.zoom.factor(), 1.7);
+        assert!(settings.fullscreen);
+        settings.flush_if_due(settings.last_write + SAVE_INTERVAL)?;
+        assert_eq!(*Saved::<Config>::load(path, None)?, *settings);
+        assert_eq!(fs::read_to_string(legacy)?, original);
+        Ok(())
+    }
+
+    #[test]
+    fn current_settings_take_priority_over_legacy_settings() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("benga-config.ron");
+        let legacy = directory.path().join("vu-config.ron");
+        let original = "(preamp_db: 6.0)";
+        fs::write(&path, original)?;
+        // The legacy file must not even be parsed when a current file exists.
+        fs::write(&legacy, "invalid legacy settings")?;
+
+        let mut settings = Saved::<Config>::load(path.clone(), Some(legacy))?;
+        assert_eq!(settings.preamp_db.db(), 6.0);
+        settings.flush()?;
+        assert_eq!(fs::read_to_string(path)?, original);
+        Ok(())
+    }
+
+    #[test]
+    fn missing_current_and_legacy_settings_use_defaults_without_creating_a_file(
+    ) -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("benga-config.ron");
+        let legacy = directory.path().join("vu-config.ron");
+        let mut settings = Saved::<Config>::load(path.clone(), Some(legacy.clone()))?;
+        assert_eq!(*settings, Config::default());
+        settings.flush()?;
+        assert!(!path.exists());
+        assert!(!legacy.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_settings_are_not_replaced_during_migration() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("benga-config.ron");
+        let legacy = directory.path().join("vu-config.ron");
+        let invalid = "(preamp_db: 97.0)";
+        fs::write(&legacy, invalid)?;
+        assert!(Saved::<Config>::load(path.clone(), Some(legacy.clone())).is_err());
+        assert!(!path.exists());
+        assert_eq!(fs::read_to_string(&legacy)?, invalid);
+
+        fs::write(&path, invalid)?;
+        fs::write(&legacy, "(preamp_db: 6.0)")?;
+        assert!(Saved::<Config>::load(path.clone(), Some(legacy)).is_err());
+        assert_eq!(fs::read_to_string(path)?, invalid);
+        Ok(())
+    }
+
+    #[test]
     fn saves_changed_settings_atomically_and_restores_them_after_restart() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
-        let path = directory.path().join("config/vu-config.ron");
-        let mut config = Saved::<Config>::load(path.clone())?;
+        let path = directory.path().join("config/benga-config.ron");
+        let mut config = Saved::<Config>::load(path.clone(), None)?;
         assert_eq!(*config, Config::default());
         config.flush()?;
         assert!(!path.exists());
@@ -113,13 +192,13 @@ mod tests {
             .theme
             .adjusted(crate::frame_schedule::Adjustment::Increase);
         let startup_theme = config.theme;
-        let light_theme = vu::theme::ThemeId::all()
-            .find(|theme| theme.tone() == vu::theme::Tone::Light)
+        let light_theme = benga::theme::ThemeId::all()
+            .find(|theme| theme.tone() == benga::theme::Tone::Light)
             .unwrap();
         let manual_theme = startup_theme.adjusted(crate::frame_schedule::Adjustment::Increase);
         let preferences = &mut config.edit().theme_preferences;
         preferences.auto_colors = true;
-        preferences.contrast = vu::theme::ThemeContrast::Always;
+        preferences.contrast = benga::theme::ThemeContrast::Always;
         preferences.remember_manual(manual_theme);
         preferences.remember_manual(light_theme);
         assert!(preferences.dislike(startup_theme));
@@ -168,13 +247,13 @@ mod tests {
         config.flush_if_due(config.last_write + SAVE_INTERVAL - Duration::from_millis(1))?;
         assert!(!path.exists());
         config.flush_if_due(config.last_write + SAVE_INTERVAL)?;
-        let loaded = Saved::<Config>::load(path.clone())?;
+        let loaded = Saved::<Config>::load(path.clone(), None)?;
         assert_eq!(*loaded, *config);
         assert!(!path.with_extension("tmp").exists());
         config.edit().frame_rate_limit = FrameRateLimit::VSync;
         config.flush()?;
         assert_eq!(
-            Saved::<Config>::load(path)?.frame_rate_limit,
+            Saved::<Config>::load(path, None)?.frame_rate_limit,
             FrameRateLimit::VSync
         );
         Ok(())
@@ -183,7 +262,7 @@ mod tests {
     #[test]
     fn refuses_invalid_settings_without_overwriting_the_file() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
-        let path = directory.path().join("vu-config.ron");
+        let path = directory.path().join("benga-config.ron");
         for text in [
             "(preamp_db: 97.0)",
             "(preamp_db: NaN)",
@@ -261,13 +340,13 @@ mod tests {
             "(theme: \"Unknown theme\")",
         ] {
             fs::write(&path, text)?;
-            assert!(Saved::<Config>::load(path.clone()).is_err());
+            assert!(Saved::<Config>::load(path.clone(), None).is_err());
             assert_eq!(fs::read_to_string(&path)?, text);
         }
         let missing: Config = ron::from_str("(frame_rate_limit: Fps48)")?;
         assert_eq!(
             missing.theme_preferences,
-            vu::theme::ThemePreferences::default()
+            benga::theme::ThemePreferences::default()
         );
         assert!(!missing.fullscreen);
         assert_eq!(
@@ -431,14 +510,14 @@ mod tests {
     fn keeps_a_failed_save_pending_until_it_can_be_written() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let parent = directory.path().join("config");
-        let path = parent.join("vu-config.ron");
-        let mut config = Saved::<Config>::load(path.clone())?;
+        let path = parent.join("benga-config.ron");
+        let mut config = Saved::<Config>::load(path.clone(), None)?;
         config.edit().preamp_db = PreampDb::try_from(24.0)?;
         fs::write(&parent, "not a directory")?;
         assert!(config.flush().is_err());
         fs::remove_file(&parent)?;
         config.flush()?;
-        assert_eq!(Saved::<Config>::load(path)?.preamp_db.db(), 24.0);
+        assert_eq!(Saved::<Config>::load(path, None)?.preamp_db.db(), 24.0);
         Ok(())
     }
 }

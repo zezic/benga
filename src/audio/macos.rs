@@ -39,7 +39,7 @@ impl DesktopTap {
                 CATapDescription::alloc(),
                 &NSArray::new(),
             );
-            description.setName(&NSString::from_str("VU desktop audio"));
+            description.setName(&NSString::from_str("Benga desktop audio"));
             description.setPrivate(true);
             description.setMuteBehavior(CATapMuteBehavior::Unmuted);
             description
@@ -58,8 +58,9 @@ impl DesktopTap {
 
         // SAFETY: The live tap description supplies its retained UUID string.
         let tap_uid = unsafe { description.UUID().UUIDString() }.to_string();
-        let device_uid = format!("com.zezic.vu.tap.{tap_uid}");
-        let aggregate = AppTapAggregateDevice::with_tap("VU desktop audio", &device_uid, &tap_uid)?;
+        let device_uid = format!("com.zezic.benga.tap.{tap_uid}");
+        let aggregate =
+            AppTapAggregateDevice::with_tap("Benga desktop audio", &device_uid, &tap_uid)?;
         let device = cpal::default_host()
             .device_by_id(&cpal::DeviceId::new(cpal::HostId::CoreAudio, device_uid))
             .context("The private desktop audio device is unavailable")?;

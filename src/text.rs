@@ -16,7 +16,7 @@ use vello::{
 /// Internal family name for the stripped Iosevka subsets. The original name
 /// table is gone, so the family, width, weight, and style are supplied when the
 /// fonts are registered.
-const UI_FAMILY: &str = "VU Iosevka";
+const UI_FAMILY: &str = "Benga Iosevka";
 
 /// Characters the glitch effect can substitute. The bundled subsets contain
 /// all printable ASCII.

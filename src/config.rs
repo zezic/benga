@@ -327,8 +327,15 @@ impl<'de> Deserialize<'de> for Ignored {
 }
 
 pub fn config_file() -> anyhow::Result<PathBuf> {
+    let directories = ProjectDirs::from("com", "zezic", "benga")
+        .context("Could not resolve Benga's user config directory")?;
+    Ok(directories.config_dir().join("benga-config.ron"))
+}
+
+/// The former application path, used only to import settings after the rename.
+pub fn legacy_config_file() -> anyhow::Result<PathBuf> {
     let directories = ProjectDirs::from("com", "zezic", "vu")
-        .context("Could not resolve VU's user config directory")?;
+        .context("Could not resolve the legacy user config directory")?;
     Ok(directories.config_dir().join("vu-config.ron"))
 }
 

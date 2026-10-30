@@ -54,7 +54,7 @@ impl Run {
                 draw: Duration::ZERO,
                 stages: Stages::default(),
             })),
-            _ => bail!("Usage: vu [--profile]"),
+            _ => bail!("Usage: benga [--profile]"),
         }
     }
 
@@ -151,7 +151,7 @@ impl Run {
         let main_cpu = thread_start.try_elapsed()?.as_secs_f64();
         let frames = f64::from(self.frames);
         eprintln!(
-            "VU profile: {:.1} FPS; {}/{} frames rasterized; draw {:.1} us/frame; present {:.1} us/frame",
+            "Benga profile: {:.1} FPS; {}/{} frames rasterized; draw {:.1} us/frame; present {:.1} us/frame",
             frames / elapsed,
             self.rasterized_frames,
             self.frames,

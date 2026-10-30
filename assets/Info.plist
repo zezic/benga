@@ -3,10 +3,10 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.zezic.vu</string>
+    <string>com.zezic.benga</string>
     <key>CFBundleName</key>
-    <string>VU</string>
+    <string>Benga</string>
     <key>NSAudioCaptureUsageDescription</key>
-    <string>VU analyzes desktop audio to display left and right signal levels.</string>
+    <string>Benga analyzes desktop audio to display left and right signal levels.</string>
 </dict>
 </plist>

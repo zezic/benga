@@ -27,7 +27,7 @@ pub struct CaptureStream {
 }
 
 /// Captures desktop output on macOS and Windows, or the default recording source on Linux.
-/// Keep the stream alive while VU runs.
+/// Keep the stream alive while Benga runs.
 pub fn capture_stream(tx: Sender<AudioEvent>) -> anyhow::Result<CaptureStream> {
     if !cfg!(any(
         target_os = "macos",

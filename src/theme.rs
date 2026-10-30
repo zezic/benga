@@ -289,7 +289,7 @@ impl ThemeId {
     }
 }
 
-/// The single mapping from Gogh's terminal palette to VU's UI roles.
+/// The single mapping from Gogh's terminal palette to Benga's UI roles.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThemeColors {
     pub background: Color,

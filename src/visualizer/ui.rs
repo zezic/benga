@@ -2490,7 +2490,7 @@ mod tests {
     #[test]
     #[ignore = "requires a compute-capable GPU"]
     fn renders_analyzer_boost_gap_graph() -> anyhow::Result<()> {
-        let directory = std::env::var_os("VU_GAP_PREVIEW_DIR").map(std::path::PathBuf::from);
+        let directory = std::env::var_os("BENGA_GAP_PREVIEW_DIR").map(std::path::PathBuf::from);
         if let Some(directory) = &directory {
             std::fs::create_dir_all(directory)?;
         }
@@ -2526,7 +2526,8 @@ mod tests {
     #[test]
     #[ignore = "requires a compute-capable GPU"]
     fn renders_presentation_controls() -> anyhow::Result<()> {
-        let directory = std::env::var_os("VU_CONTROLS_PREVIEW_DIR").map(std::path::PathBuf::from);
+        let directory =
+            std::env::var_os("BENGA_CONTROLS_PREVIEW_DIR").map(std::path::PathBuf::from);
         if let Some(directory) = &directory {
             std::fs::create_dir_all(directory)?;
         }
@@ -2622,7 +2623,7 @@ mod tests {
             ui.visualizer.next_model();
         }
         let pixels = presentation_pixels(&mut ui, &view, 150, false, None, |_, _| {})?;
-        if let Some(path) = std::env::var_os("VU_PRESENTATION_PREVIEW_PATH") {
+        if let Some(path) = std::env::var_os("BENGA_PRESENTATION_PREVIEW_PATH") {
             write_preview(&std::path::PathBuf::from(path), width, height, &pixels)?;
         }
         Ok(())
@@ -2651,7 +2652,7 @@ mod tests {
             ui.visualizer.next_model();
         }
         let pixels = presentation_pixels(&mut ui, &view, 22, false, None, |_, _| {})?;
-        if let Some(path) = std::env::var_os("VU_ENTRANCE_PREVIEW_PATH") {
+        if let Some(path) = std::env::var_os("BENGA_ENTRANCE_PREVIEW_PATH") {
             write_preview(&std::path::PathBuf::from(path), width, height, &pixels)?;
         }
         Ok(())
@@ -2682,7 +2683,7 @@ mod tests {
             ui.visualizer.next_model();
         }
         let pixels = presentation_pixels(&mut ui, &view, 80, false, None, |_, _| {})?;
-        if let Some(path) = std::env::var_os("VU_OPACITY_PREVIEW_PATH") {
+        if let Some(path) = std::env::var_os("BENGA_OPACITY_PREVIEW_PATH") {
             write_preview(&std::path::PathBuf::from(path), width, height, &pixels)?;
         }
         Ok(())
@@ -2713,7 +2714,7 @@ mod tests {
             ui.visualizer.next_model();
         }
         let pixels = presentation_pixels(&mut ui, &view, 80, false, None, |_, _| {})?;
-        if let Some(path) = std::env::var_os("VU_LIGHT_PREVIEW_PATH") {
+        if let Some(path) = std::env::var_os("BENGA_LIGHT_PREVIEW_PATH") {
             write_preview(&std::path::PathBuf::from(path), width, height, &pixels)?;
         }
         Ok(())
@@ -2722,7 +2723,7 @@ mod tests {
     #[test]
     #[ignore = "requires a compute-capable GPU"]
     fn renders_presentation_aspects() -> anyhow::Result<()> {
-        let Some(directory) = std::env::var_os("VU_ASPECT_PREVIEW_DIR") else {
+        let Some(directory) = std::env::var_os("BENGA_ASPECT_PREVIEW_DIR") else {
             return Ok(());
         };
         let directory = std::path::PathBuf::from(directory);
@@ -2791,7 +2792,7 @@ mod tests {
                 ui.visualizer.handle_action(Action::Hat, 0.0, 0.75);
             }
         })?;
-        if let Some(path) = std::env::var_os("VU_SELECTOR_PREVIEW_PATH") {
+        if let Some(path) = std::env::var_os("BENGA_SELECTOR_PREVIEW_PATH") {
             write_preview(&std::path::PathBuf::from(path), width, height, &pixels)?;
         }
         Ok(())
@@ -2833,7 +2834,7 @@ mod tests {
                 ui.visualizer.handle_action(Action::Kick(0.6), 0.0, 0.75);
             }
         })?;
-        if let Some(path) = std::env::var_os("VU_SELECTOR_EXIT_PREVIEW_PATH") {
+        if let Some(path) = std::env::var_os("BENGA_SELECTOR_EXIT_PREVIEW_PATH") {
             write_preview(&std::path::PathBuf::from(path), width, height, &pixels)?;
         }
         Ok(())
@@ -2876,7 +2877,7 @@ mod tests {
                 ui.presentation.debug_hit_marker();
             }
         })?;
-        if let Some(path) = std::env::var_os("VU_POI_PREVIEW_PATH") {
+        if let Some(path) = std::env::var_os("BENGA_POI_PREVIEW_PATH") {
             write_preview(&std::path::PathBuf::from(path), width, height, &pixels)?;
         }
         Ok(())

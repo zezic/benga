@@ -1076,7 +1076,7 @@ mod tests {
             frame.ribbons.len()
         );
         assert!(ink > 2_000, "the wireframe must cover the retained face");
-        if let Some(path) = std::env::var_os("VU_RENDER_PREVIEW_PATH") {
+        if let Some(path) = std::env::var_os("BENGA_RENDER_PREVIEW_PATH") {
             let path = std::path::PathBuf::from(path).with_extension("visualizer.png");
             let mut encoder = png::Encoder::new(BufWriter::new(File::create(path)?), width, height);
             encoder.set_color(png::ColorType::Rgba);

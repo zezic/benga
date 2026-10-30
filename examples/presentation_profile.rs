@@ -1,13 +1,13 @@
 //! Deterministic CPU workload without a window or GPU.
 use std::time::{Duration, Instant};
 
-use vello::{kurbo::Size, Scene};
-use vu::{
+use benga::{
     config::Config,
     frame_schedule::{FrameRateLimit, FrameTime},
     visualizer::{Ui, View},
     AudioEvent,
 };
+use vello::{kurbo::Size, Scene};
 
 fn main() -> anyhow::Result<()> {
     let mut ui = Ui::new(&Config::default())?;
@@ -43,7 +43,7 @@ fn main() -> anyhow::Result<()> {
         );
         if index >= 60 {
             measured += before.elapsed();
-            rebuilt += usize::from(matches!(frame.background, vu::render::Frame::Rebuilt(_)));
+            rebuilt += usize::from(matches!(frame.background, benga::render::Frame::Rebuilt(_)));
             ribbons += frame.overlay.ribbons.len();
         }
     }

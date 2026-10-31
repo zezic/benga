@@ -115,7 +115,6 @@ fn select<'a>(models: &'a mut ModelSet, id: &str) -> &'a Model {
 
 fn scene_and_baseline(models: &mut ModelSet, ids: &[String; 2]) -> (Scene, [ModelRuntime; 2]) {
     let mut scene = Scene::new();
-    scene.detail_thinning = super::super::DetailThinning::try_from(0.0).unwrap();
     let mut runtimes = Vec::new();
     for (index, id) in ids.iter().enumerate() {
         let model = select(models, id);
@@ -197,7 +196,6 @@ fn step_baseline(
 ) -> Output {
     let mut output = Output::default();
     for (runtime, alpha) in runtimes.iter_mut().zip([1.0 - progress, progress]) {
-        runtime.detail_thinning = super::super::DetailThinning::try_from(0.0).unwrap();
         runtime.edge_dissolve.show_all();
         let (line_start, ribbon_start) = (output.lines.len(), output.ribbons.len());
         runtime.update(

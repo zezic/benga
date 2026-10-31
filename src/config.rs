@@ -307,8 +307,10 @@ pub struct Config {
     pub model_rotation: crate::visualizer::ModelRotation,
     pub motion_opacity: crate::visualizer::MotionOpacity,
     pub motion_fade_power: crate::visualizer::MotionFadePower,
-    pub detail_thinning: crate::visualizer::DetailThinning,
     pub tuning: crate::visualizer::VisualizerTuning,
+    /// Removed Auto Detail setting accepted and discarded for old configs.
+    #[serde(default, skip_serializing)]
+    detail_thinning: Ignored,
     /// Removed display selectors accepted so an existing config still loads.
     #[serde(default, skip_serializing)]
     presentation: Ignored,
@@ -364,17 +366,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn auto_detail_defaults_for_existing_configs_and_round_trips() -> anyhow::Result<()> {
-        let existing: Config = ron::from_str("()")?;
-        assert_eq!(existing.detail_thinning.strength(), 1.0);
-        for strength in [0.0, 0.5, 1.0, 1.7, 2.0] {
-            let mut config = Config::default();
-            config.detail_thinning = crate::visualizer::DetailThinning::try_from(strength)?;
-            let restored: Config = ron::from_str(&ron::to_string(&config)?)?;
-            assert_eq!(restored.detail_thinning, config.detail_thinning);
+    fn legacy_detail_thinning_is_ignored_without_changing_other_settings() -> anyhow::Result<()> {
+        let expected: Config = ron::from_str("(zoom: 1.7, shutter_frames: 4.0)")?;
+        for strength in ["0.0", "0.5", "1.0", "1.7", "2.0", "-0.1", "2.1"] {
+            let restored: Config = ron::from_str(&format!(
+                "(detail_thinning: {strength}, zoom: 1.7, shutter_frames: 4.0)"
+            ))?;
+            assert_eq!(restored, expected);
+            let saved = ron::to_string(&restored)?;
+            assert!(!saved.contains("detail_thinning"));
+            assert_eq!(ron::from_str::<Config>(&saved)?, expected);
         }
-        assert!(ron::from_str::<Config>("(detail_thinning: -0.1)").is_err());
-        assert!(ron::from_str::<Config>("(detail_thinning: 2.1)").is_err());
         Ok(())
     }
 

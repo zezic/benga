@@ -67,7 +67,6 @@ enum Setting {
     NearOpacity,
     CreaseThreshold,
     LineWidth,
-    DetailThinning,
     Zoom,
     MotionOpacity,
     MotionFadePower,
@@ -159,10 +158,6 @@ impl App {
                 settings.line_width = settings.line_width.adjusted(adjustment);
                 self.ui.set_line_width(settings.line_width);
             }
-            Setting::DetailThinning => {
-                settings.detail_thinning = settings.detail_thinning.adjusted(adjustment);
-                self.ui.set_detail_thinning(settings.detail_thinning);
-            }
             Setting::MotionOpacity => {
                 settings.motion_opacity = settings.motion_opacity.adjusted(adjustment);
                 self.ui.set_motion_opacity(settings.motion_opacity);
@@ -208,7 +203,6 @@ impl App {
                         return;
                     }
                     Dial::LineWidth => Setting::LineWidth,
-                    Dial::DetailThinning => Setting::DetailThinning,
                     Dial::Zoom => Setting::Zoom,
                     Dial::FrameRate => Setting::FrameRate,
                     Dial::Shutter => Setting::Shutter,

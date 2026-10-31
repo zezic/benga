@@ -167,8 +167,6 @@ pub struct Wireframe {
     vertex_parts: Vec<u16>,
     /// Mesh part that owns each edge.
     edge_parts: Vec<u16>,
-    /// Stable structural importance used to prioritize edges when thinning.
-    edge_importance: Vec<f32>,
 }
 
 impl Wireframe {
@@ -223,32 +221,12 @@ impl Wireframe {
             edge_parts.iter().all(|&part| part < part_count),
             "every wireframe edge part must exist"
         );
-        let edge_importance = vec![1.0; edges.len()];
         Self {
             vertices,
             edges,
             vertex_parts,
             edge_parts,
-            edge_importance,
         }
-    }
-
-    /// Attaches per-edge structural priorities without changing edge order.
-    /// Existing callers receive neutral importance from `from_parts`.
-    pub fn with_edge_importance(mut self, importance: Vec<f32>) -> Self {
-        assert_eq!(
-            importance.len(),
-            self.edges.len(),
-            "every wireframe edge must have an importance"
-        );
-        assert!(
-            importance
-                .iter()
-                .all(|value| value.is_finite() && *value > 0.0),
-            "edge importance must be finite and positive"
-        );
-        self.edge_importance = importance;
-        self
     }
 
     pub fn vertex_count(&self) -> usize {
@@ -269,10 +247,6 @@ impl Wireframe {
 
     pub fn edge_part(&self, index: usize) -> u16 {
         self.edge_parts[index]
-    }
-
-    pub fn edge_importance(&self, index: usize) -> f32 {
-        self.edge_importance[index]
     }
 }
 
@@ -745,33 +719,5 @@ mod tests {
             Wireframe::from_edges(vec![Vec3::new(0.0, 0.0, 0.0)], vec![[0, 1]])
         })
         .is_err());
-    }
-
-    #[test]
-    fn wireframe_importance_defaults_to_neutral_and_preserves_edge_order() {
-        let wireframe = cube();
-        assert!((0..wireframe.edges().len()).all(|index| wireframe.edge_importance(index) == 1.0));
-        let edges = wireframe.edges().to_vec();
-        let importance: Vec<_> = (0..edges.len())
-            .map(|index| 1.0 + index as f32 * 0.1)
-            .collect();
-        let wireframe = wireframe.with_edge_importance(importance.clone());
-        assert_eq!(wireframe.edges(), edges);
-        for (index, expected) in importance.into_iter().enumerate() {
-            assert_eq!(wireframe.edge_importance(index), expected);
-        }
-    }
-
-    #[test]
-    fn wireframe_rejects_missing_or_invalid_importance() {
-        let count = cube().edges().len();
-        assert!(
-            std::panic::catch_unwind(|| cube().with_edge_importance(vec![1.0; count - 1])).is_err()
-        );
-        for invalid in [0.0, -1.0, f32::NAN, f32::INFINITY] {
-            let mut importance = vec![1.0; count];
-            importance[count / 2] = invalid;
-            assert!(std::panic::catch_unwind(|| cube().with_edge_importance(importance)).is_err());
-        }
     }
 }

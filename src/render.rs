@@ -304,6 +304,11 @@ pub struct BackgroundCache {
 }
 
 impl BackgroundCache {
+    #[cfg(test)]
+    pub(crate) fn benchmark_invalidate(&mut self, renderer: &mut Renderer) {
+        self.invalidate(renderer);
+    }
+
     pub fn new() -> Self {
         Self {
             image: None,

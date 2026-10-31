@@ -9,8 +9,10 @@
 
 mod fixture;
 mod gpu;
-mod thinning;
+mod pipeline;
+mod poi_workload;
 mod transition;
+mod transparent_pixels;
 
 use std::{
     fs::{self, File},
@@ -151,7 +153,7 @@ fn measures_frozen_motion() -> anyhow::Result<()> {
         for &motion in &motions {
             let mut pair = model.prepare(width, height, motion);
             // Projection of both endpoints is intentionally independent of the
-            // emission variants. Loading and object-space ranking are excluded.
+            // emission variants. Model loading is excluded.
             let mut projection_ms = Vec::new();
             for index in 0..24 {
                 let before = Instant::now();
@@ -221,7 +223,7 @@ fn measures_frozen_motion() -> anyhow::Result<()> {
         "schema_version":1,"model":model.id,"ranking":ranking,"adapters":adapters,
         "samples_per_case":samples,"crease_degrees":CreaseThreshold::default().degrees(),
         "method":"Frozen two-pose model geometry; production camera/sweep/shader/blend; offscreen Bgra8Unorm; configurable batch size1..8 (default1);16 warmup frames per case; no audio, VSync, animated UI or adaptive quality. Sampling completes before counter resolve to work around Metal/wgpu issue9414.",
-        "timing_scope":"GPU render pass includes cached-background composite and model only, excludes staging uploads, Vello UI rasterization and presentation. Batch wall includes upload/encode/submit, synchronization and query readback. CPU prepare reuses allocations for two endpoint projections and edge materialization, excluding model load/ranking. CPU build reuses triangle capacity. No metric alone predicts application FPS.",
+        "timing_scope":"GPU render pass includes cached-background composite and model only, excludes staging uploads, Vello UI rasterization and presentation. Batch wall includes upload/encode/submit, synchronization and query readback. CPU prepare reuses allocations for two endpoint projections and edge materialization, excluding model loading. CPU build reuses triangle capacity. No metric alone predicts application FPS.",
         "area_scope":"Sum of emitted triangle areas before viewport clipping; overlapping fragments count repeatedly. Sharp uses padded axis-aligned rectangles; coverage/alpha is not subtracted.",
         "queueing_scope":"Single-frame batches isolate pass execution. Queued pass vertex/fragment stages may overlap, making individual pass latencies exceed sustainable per-frame throughput. For batch>1 inspect GPU batch span/frame and batch wall separately; do not infer FPS from individual pass latency.",
         "frame_budgets_ms":{"60":1000.0/60.0,"120":1000.0/120.0,"144":1000.0/144.0,"165":1000.0/165.0,"240":1000.0/240.0,"30_emergency":1000.0/30.0},

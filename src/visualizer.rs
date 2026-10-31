@@ -13,7 +13,6 @@ mod renderer;
 mod showcase;
 mod spectrum;
 mod splash;
-mod thinning;
 mod transition;
 mod ui;
 
@@ -316,59 +315,6 @@ impl TryFrom<f32> for LineWidth {
 
 impl From<LineWidth> for f32 {
     fn from(value: LineWidth) -> Self {
-        value.0
-    }
-}
-
-/// Motion-driven detail reduction. Zero disables it; one is the default and
-/// two applies stronger thinning at the same projected movement speed.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "f32", into = "f32")]
-pub struct DetailThinning(f32);
-
-impl DetailThinning {
-    pub const MIN: f32 = 0.0;
-    pub const MAX: f32 = 2.0;
-    const STEP: f32 = 0.1;
-
-    pub fn strength(self) -> f32 {
-        self.0
-    }
-
-    pub fn percent(self) -> u32 {
-        (self.0 * 100.0).round() as u32
-    }
-
-    #[must_use]
-    pub fn adjusted(self, adjustment: Adjustment) -> Self {
-        let delta = match adjustment {
-            Adjustment::Decrease => -Self::STEP,
-            Adjustment::Increase => Self::STEP,
-        };
-        Self((self.0 + delta).clamp(Self::MIN, Self::MAX))
-    }
-}
-
-impl Default for DetailThinning {
-    fn default() -> Self {
-        Self(1.0)
-    }
-}
-
-impl TryFrom<f32> for DetailThinning {
-    type Error = anyhow::Error;
-
-    fn try_from(value: f32) -> Result<Self, Self::Error> {
-        anyhow::ensure!(
-            value.is_finite() && (Self::MIN..=Self::MAX).contains(&value),
-            "detail_thinning must be finite and between 0 and 2"
-        );
-        Ok(Self(value))
-    }
-}
-
-impl From<DetailThinning> for f32 {
-    fn from(value: DetailThinning) -> Self {
         value.0
     }
 }
@@ -2931,14 +2877,6 @@ impl Visualizer {
         self.line_width = width;
     }
 
-    pub fn detail_thinning(&self) -> DetailThinning {
-        self.scene.detail_thinning
-    }
-
-    pub fn set_detail_thinning(&mut self, detail: DetailThinning) {
-        self.scene.detail_thinning = detail;
-    }
-
     pub fn set_model_motion(&mut self, motion: ModelMotion) {
         if self.model_motion == motion {
             return;
@@ -3740,7 +3678,6 @@ struct Scene {
     current: Option<ModelRuntime>,
     outgoing: Option<ModelRuntime>,
     transition: f32,
-    detail_thinning: DetailThinning,
 }
 
 impl Scene {
@@ -3749,7 +3686,6 @@ impl Scene {
             current: None,
             outgoing: None,
             transition: 1.0,
-            detail_thinning: DetailThinning::default(),
         }
     }
 
@@ -3915,7 +3851,6 @@ impl Scene {
             outgoing.edge_dissolve.outgoing(progress, slots);
         }
         if let Some(current) = &mut self.current {
-            current.detail_thinning = self.detail_thinning;
             current.update(
                 dt,
                 music,
@@ -3940,7 +3875,6 @@ impl Scene {
             );
         }
         if let Some(outgoing) = &mut self.outgoing {
-            outgoing.detail_thinning = self.detail_thinning;
             outgoing.update(
                 dt,
                 music,
@@ -3987,9 +3921,6 @@ struct ModelRuntime {
     edge_dissolve: transition::EdgeDissolve,
     /// Logical edge selection before viewport culling; drives the HUD count.
     active_edges: usize,
-    detail_thinning: DetailThinning,
-    thinning: thinning::Thinning,
-    detail_frame_end: Option<AudioTime>,
     motion_blur: bool,
     /// Scale captured when the POI motion fade starts.
     frozen_scale: f32,
@@ -4132,7 +4063,6 @@ impl ModelRuntime {
         let edge_capacity = wireframe.edges().len();
         let edge_dissolve =
             transition::EdgeDissolve::new(edge_capacity, transition::model_seed(&name));
-        let thinning = thinning::Thinning::new(&wireframe, transition::model_seed(&name));
         let slide_vertices = (0..wireframe.vertex_count())
             .map(|index| slide_parts.contains(&wireframe.vertex_part(index)))
             .collect();
@@ -4154,9 +4084,6 @@ impl ModelRuntime {
             entrance: 1.0,
             edge_dissolve,
             active_edges: edge_capacity,
-            detail_thinning: DetailThinning::default(),
-            thinning,
-            detail_frame_end: None,
             motion_blur,
             frozen_scale: pose.scale,
             motion_frozen: false,
@@ -4193,8 +4120,6 @@ impl ModelRuntime {
     }
 
     fn set_wireframe(&mut self, wireframe: Wireframe) {
-        self.thinning = thinning::Thinning::new(&wireframe, transition::model_seed(&self.name));
-        self.detail_frame_end = None;
         self.active_edges = wireframe.edges().len();
         self.edge_dissolve =
             transition::EdgeDissolve::new(self.active_edges, transition::model_seed(&self.name));
@@ -4206,8 +4131,6 @@ impl ModelRuntime {
 
     fn reset_temporal(&mut self) {
         self.history.clear();
-        self.thinning.reset_motion();
-        self.detail_frame_end = None;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4423,30 +4346,6 @@ impl ModelRuntime {
                     visible,
                 }
             }));
-        // Use elapsed timeline time rather than shutter displacement: changing
-        // exposure or display cadence must not change the perceived motion speed.
-        let frame_seconds = self
-            .detail_frame_end
-            .filter(|previous| frame_end >= *previous)
-            .map_or(0.0, |previous| frame_end.seconds_since(previous) as f32);
-        let frame_seconds = if frame_seconds > 0.0 {
-            frame_seconds
-        } else {
-            dt
-        };
-        self.detail_frame_end = Some(frame_end);
-        self.thinning.update(
-            &self.current,
-            frame_seconds,
-            frame_seconds,
-            camera.minimum,
-            self.detail_thinning.strength(),
-            &[
-                showcase.highlight_part,
-                showcase.focus_child,
-                showcase.selector.selected,
-            ],
-        );
         let exposure = if self.motion_blur {
             let mut lines = if self.history.len() == MAX_HISTORY {
                 self.history.pop_front().expect("history is full").lines
@@ -4481,7 +4380,7 @@ impl ModelRuntime {
         let screen = ScreenBounds::new(camera.viewport);
         let mut active_edges = 0;
         for (index, current) in self.current.iter().enumerate() {
-            let transition_alpha = self.edge_dissolve.alpha(index) * self.thinning.alpha(index);
+            let transition_alpha = self.edge_dissolve.alpha(index);
             if transition_alpha <= 0.0 {
                 continue;
             }
@@ -4524,6 +4423,9 @@ impl ModelRuntime {
                     rgb[2],
                     edge_alpha * current.end_depth_opacity,
                 ];
+                if start_color[3] == 0.0 && end_color[3] == 0.0 {
+                    continue;
+                }
                 let line =
                     LineInstance::flat(current.start, current.end, start_color, end_color, width);
                 if line.intersects(screen) {
@@ -4696,6 +4598,12 @@ fn push_sweep(
 ) {
     let half = (ink.width * 0.5).max(0.5);
     let middle = lerp_line(first, last, 0.5);
+    // Depth-faded POI geometry can cover a huge screen area while contributing
+    // no ink. Every emitted vertex alpha derives from these two middle values;
+    // omitting an entirely transparent edge preserves both themed composites.
+    if ink.alpha == 0.0 || (middle.start_depth_opacity == 0.0 && middle.end_depth_opacity == 0.0) {
+        return;
+    }
     let start_motion = last.start - first.start;
     let end_motion = last.end - first.end;
     let movement = start_motion
@@ -4705,6 +4613,9 @@ fn push_sweep(
     // A fast edge spreads the same ink over more pixels, so its peak opacity
     // is lower. Even a motionless edge keeps the central body.
     let peak = ink.alpha * motion_fade.factor(movement, ink.width);
+    if peak == 0.0 {
+        return;
+    }
     let opaque_start = [
         ink.rgb[0],
         ink.rgb[1],
@@ -4886,8 +4797,11 @@ fn push_sweep(
     }
 }
 
-/// Appends a ribbon only when it can cover the render target.
+/// Appends a ribbon only when it can contribute ink to the render target.
 fn push_ribbon(out: &mut Vec<RibbonInstance>, screen: ScreenBounds, ribbon: RibbonInstance) {
+    if ribbon.start_color[3] == 0.0 && ribbon.end_color[3] == 0.0 && ribbon.third_color[3] == 0.0 {
+        return;
+    }
     if ribbon.intersects(screen) {
         out.push(ribbon);
     }
@@ -5907,6 +5821,22 @@ mod tests {
         showcase: &ShowcaseFrame,
         shake: Vec2,
     ) -> (Vec<LineInstance>, Vec<RibbonInstance>) {
+        step_runtime_exposure(
+            runtime,
+            showcase,
+            shake,
+            AudioTime::ZERO,
+            AudioTime::ZERO.shifted(1.0 / 60.0),
+        )
+    }
+
+    fn step_runtime_exposure(
+        runtime: &mut ModelRuntime,
+        showcase: &ShowcaseFrame,
+        shake: Vec2,
+        exposure_start: AudioTime,
+        frame_end: AudioTime,
+    ) -> (Vec<LineInstance>, Vec<RibbonInstance>) {
         let mut muted = [true; Property::COUNT];
         muted[Property::Line.index()] = false;
         let gates = PropertyGates {
@@ -5934,8 +5864,8 @@ mod tests {
             &BandRouting::default(),
             &Mixer::default(),
             &gates,
-            AudioTime::ZERO,
-            AudioTime::ZERO.shifted(1.0 / 60.0),
+            exposure_start,
+            frame_end,
             Camera::new(1280.0, 440.0, 1.0),
             &Palette::from_theme(ThemeId::default()),
             0.5,
@@ -5953,6 +5883,135 @@ mod tests {
             &mut ribbons,
         );
         (lines, ribbons)
+    }
+
+    #[test]
+    fn fast_motion_keeps_the_complete_dense_wireframe() {
+        const EDGE_COUNT: usize = 24_000;
+        let wireframe = Wireframe::from_edges(
+            vec![
+                Vec3::new(-0.2, 0.0, 0.0),
+                Vec3::new(-0.194, 0.0, 0.0),
+                Vec3::new(-0.18, 0.0, 0.0),
+                Vec3::new(-0.1, 0.0, 0.0),
+            ],
+            (0..EDGE_COUNT)
+                .map(|index| [0, 1 + (index % 3) as u16])
+                .collect(),
+        );
+        let showcase = test_showcase_frame(0.0, false, 0.0);
+        for swept in [false, true] {
+            let mut runtime = test_runtime_with(wireframe.clone());
+            runtime.set_motion_blur(swept);
+            for frame in 0..6 {
+                let start = AudioTime::ZERO.shifted(frame as f64 / 60.0);
+                let shake = Vec2::new(0.0, if frame % 2 == 0 { -48.0 } else { 48.0 });
+                let (lines, ribbons) = step_runtime_exposure(
+                    &mut runtime,
+                    &showcase,
+                    shake,
+                    start,
+                    start.shifted(1.0 / 60.0),
+                );
+                assert_eq!(runtime.active_edges, EDGE_COUNT);
+                assert_eq!(runtime.current.len(), EDGE_COUNT);
+                if swept && frame > 0 {
+                    assert!(lines.is_empty());
+                    assert_eq!(ribbons.len(), EDGE_COUNT * 6);
+                    let peak = |ribbons: &[RibbonInstance]| {
+                        ribbons
+                            .iter()
+                            .flat_map(|ribbon| {
+                                [
+                                    ribbon.start_color[3],
+                                    ribbon.end_color[3],
+                                    ribbon.third_color[3],
+                                ]
+                            })
+                            .fold(0.0_f32, f32::max)
+                    };
+                    let expected = peak(&ribbons[..6]);
+                    assert!(expected > 0.0);
+                    assert!(ribbons.chunks_exact(6).all(|edge| peak(edge) == expected));
+                } else {
+                    assert_eq!(lines.len(), EDGE_COUNT);
+                    assert!(ribbons.is_empty());
+                    assert!(lines
+                        .iter()
+                        .all(|line| line.start_color[3] == lines[0].start_color[3]));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_blur_uses_the_full_recorded_shutter_and_original_opacity() {
+        let showcase = test_showcase_frame(0.0, false, 0.0);
+        for shutter in [1.0, 3.0] {
+            let mut runtime = test_runtime_with(Wireframe::from_edges(
+                vec![Vec3::new(-0.3, 0.0, 0.0), Vec3::new(0.3, 0.0, 0.0)],
+                vec![[0, 1]],
+            ));
+            runtime.set_motion_blur(true);
+            let mut ribbons = Vec::new();
+            for frame in 0..4 {
+                let end = AudioTime::ZERO.shifted((frame + 1) as f64 / 60.0);
+                let (_, emitted) = step_runtime_exposure(
+                    &mut runtime,
+                    &showcase,
+                    Vec2::new(0.0, -100.0 + frame as f32 * (200.0 / 3.0)),
+                    end.shifted(-shutter / 60.0),
+                    end,
+                );
+                ribbons = emitted;
+            }
+            let end = AudioTime::ZERO.shifted(4.0 / 60.0);
+            let exposure = runtime
+                .exposure_poses(end.shifted(-shutter / 60.0), end)
+                .unwrap();
+            let first = exposure.first.line(0);
+            let last = exposure.last.line(0);
+            let movement = (last.start - first.start).length();
+            assert!(movement > 64.0);
+            let points: Vec<_> = ribbons
+                .iter()
+                .flat_map(|ribbon| {
+                    [
+                        Vec2::new(ribbon.start[0], ribbon.start[1]),
+                        Vec2::new(ribbon.start[2], ribbon.start[3]),
+                        Vec2::new(ribbon.end[0], ribbon.end[1]),
+                    ]
+                })
+                .collect();
+            for endpoint in [first.start, first.end, last.start, last.end] {
+                assert!(
+                    points
+                        .iter()
+                        .any(|point| (*point - endpoint).length() < 1e-4),
+                    "full shutter endpoint must be present for {shutter} frames"
+                );
+            }
+            assert_eq!(first.start_depth_opacity, 0.75);
+            assert_eq!(last.start_depth_opacity, 0.75);
+            let expected_peak = runtime.line_energy.max(0.6).clamp(0.0, 1.0)
+                * 0.75
+                * MotionFade {
+                    opacity: MotionOpacity::default(),
+                    power: MotionFadePower::default(),
+                }
+                .factor(movement, 1.0);
+            let peak = ribbons
+                .iter()
+                .flat_map(|ribbon| {
+                    [
+                        ribbon.start_color[3],
+                        ribbon.end_color[3],
+                        ribbon.third_color[3],
+                    ]
+                })
+                .fold(0.0_f32, f32::max);
+            assert!((peak - expected_peak).abs() < 1e-6);
+        }
     }
 
     #[test]
@@ -7483,6 +7542,36 @@ mod tests {
             &mut ribbons,
         );
         ribbons
+    }
+
+    #[test]
+    fn fully_transparent_sweeps_emit_no_geometry() {
+        for crossing in [false, true] {
+            let mut first = sweep_line(Vec2::new(-40.0, -60.0), Vec2::new(40.0, -60.0));
+            let mut last = if crossing {
+                sweep_line(Vec2::new(40.0, 60.0), Vec2::new(-40.0, 60.0))
+            } else {
+                sweep_line(Vec2::new(-40.0, 60.0), Vec2::new(40.0, 60.0))
+            };
+            first.start_depth_opacity = 0.0;
+            first.end_depth_opacity = 0.0;
+            last.start_depth_opacity = 0.0;
+            last.end_depth_opacity = 0.0;
+            assert!(sweep_ribbons(first, last).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_sweep_with_one_visible_endpoint_still_emits_geometry() {
+        let mut first = sweep_line(Vec2::new(-40.0, -60.0), Vec2::new(40.0, -60.0));
+        let mut last = sweep_line(Vec2::new(-40.0, 60.0), Vec2::new(40.0, 60.0));
+        first.start_depth_opacity = 0.0;
+        last.start_depth_opacity = 0.0;
+        let ribbons = sweep_ribbons(first, last);
+        assert!(!ribbons.is_empty());
+        assert!(ribbons.iter().all(|ribbon| {
+            ribbon.start_color[3] > 0.0 || ribbon.end_color[3] > 0.0 || ribbon.third_color[3] > 0.0
+        }));
     }
 
     #[test]

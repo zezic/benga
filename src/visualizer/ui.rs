@@ -29,10 +29,10 @@ use super::{
     debug,
     presentation::Presentation,
     splash::Splash,
-    Contribution, CreaseThreshold, DebugSelection, DebugSnapshot, DepthFade, DetailThinning,
-    Detector, DetectorSettings, DropKernel, Frame as VisualizerFrame, LineWidth, ModelComposite,
-    ModelMotion, MotionFadePower, MotionOpacity, NearOpacity, Palette, Parameter, PatternKernel,
-    PatternLayer, Property, TreeTarget, Visualizer, VisualizerTuning, BAND_COUNT,
+    Contribution, CreaseThreshold, DebugSelection, DebugSnapshot, DepthFade, Detector,
+    DetectorSettings, DropKernel, Frame as VisualizerFrame, LineWidth, ModelComposite, ModelMotion,
+    MotionFadePower, MotionOpacity, NearOpacity, Palette, Parameter, PatternKernel, PatternLayer,
+    Property, TreeTarget, Visualizer, VisualizerTuning, BAND_COUNT,
 };
 
 pub(super) const HUD_MARGIN: f64 = 24.0;
@@ -483,7 +483,6 @@ impl Ui {
         visualizer.set_motion_opacity(motion_opacity);
         let motion_fade_power = config.motion_fade_power;
         visualizer.set_motion_fade_power(motion_fade_power);
-        visualizer.set_detail_thinning(config.detail_thinning);
         let scene_name = visualizer.scene_name().to_owned();
         let scene_value = fonts.layout_ui(&scene_name, 12.0, UiFace::SemiBold);
         let line_count = visualizer.line_count();
@@ -667,9 +666,11 @@ impl Ui {
         self.presentation.set_active(presentation);
         if presentation {
             self.controls.activate(Instant::now());
-        }
-        if presentation {
             self.clear_drag();
+        } else {
+            // Hidden debug data is not refreshed during presentation mode.
+            // Refresh it before painting the first visible inspector frame.
+            self.debug_snapshot = None;
         }
         self.face_settings = None;
     }
@@ -1540,14 +1541,6 @@ impl Ui {
         self.refresh_line_status();
     }
 
-    pub fn set_detail_thinning(&mut self, thinning: DetailThinning) {
-        if self.visualizer.detail_thinning() == thinning {
-            return;
-        }
-        self.visualizer.set_detail_thinning(thinning);
-        self.face_settings = None;
-    }
-
     pub fn set_model_motion(&mut self, motion: ModelMotion) {
         if self.model_motion == motion {
             return;
@@ -1558,6 +1551,12 @@ impl Ui {
     }
 
     fn update_hud(&mut self, dt: f32) {
+        if self.presentation.active() {
+            // The presentation face contains only the background color. Hidden
+            // readouts must not invalidate its full-size retained GPU texture
+            // whenever a model transition changes the edge count.
+            return;
+        }
         let name = self.visualizer.scene_name();
         if name != self.scene_name {
             self.scene_name = name.to_owned();
@@ -1987,18 +1986,6 @@ mod tests {
             }
             assert!(layout.panel.y1 <= view.viewport.height);
         }
-    }
-
-    #[test]
-    fn auto_detail_setting_reaches_the_visualizer_from_config_and_controls() -> anyhow::Result<()> {
-        let mut config = Config::default();
-        config.detail_thinning = DetailThinning::try_from(0.0)?;
-        let mut ui = Ui::new(&config)?;
-        assert_eq!(ui.visualizer.detail_thinning(), config.detail_thinning);
-        let adjusted = DetailThinning::try_from(1.5)?;
-        ui.set_detail_thinning(adjusted);
-        assert_eq!(ui.visualizer.detail_thinning(), adjusted);
-        Ok(())
     }
 
     #[test]

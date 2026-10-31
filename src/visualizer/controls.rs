@@ -40,7 +40,6 @@ pub enum Dial {
     Theme,
     Model,
     LineWidth,
-    DetailThinning,
     FrameRate,
     Shutter,
     TextOpacity,
@@ -83,7 +82,6 @@ enum Control {
     MotionBlur,
     Shutter,
     LineWidth,
-    DetailThinning,
     FrameRate,
     Zoom,
     TextOpacity,
@@ -105,7 +103,6 @@ impl Control {
             Self::MotionBlur => "MOTION BLUR",
             Self::Shutter => "SHUTTER",
             Self::LineWidth => "LINE WIDTH",
-            Self::DetailThinning => "AUTO DETAIL",
             Self::FrameRate => "FPS LIMIT",
             Self::Zoom => "ZOOM",
             Self::TextOpacity => "TEXT OPACITY",
@@ -131,7 +128,6 @@ impl Control {
             Self::Shutter if config.model_motion == ModelMotion::Still => "Enable Motion Blur to use the model shutter.",
             Self::Shutter => "Set the model's exposure length in frame intervals.",
             Self::LineWidth => "Adjust the thickness of model wireframe lines.",
-            Self::DetailThinning => "Reduce fine detail during fast motion while favoring important edges. 0% turns Auto Detail off; higher values simplify more strongly.",
             Self::FrameRate => "Limit drawing speed, or synchronize with the display using VSync.",
             Self::Zoom => "Adjust visualizer magnification.",
             Self::TextOpacity => "Adjust infographic opacity. Set 0% to hide the presentation text.",
@@ -177,10 +173,6 @@ struct ControlColumn {
 }
 
 impl ControlColumn {
-    const fn single(top: Control) -> Self {
-        Self { top, bottom: None }
-    }
-
     const fn pair(top: Control, bottom: Control) -> Self {
         Self {
             top,
@@ -228,7 +220,6 @@ const GROUPS: [ControlGroup; 5] = [
             ControlColumn::pair(Control::MotionBlur, Control::Shutter),
             ControlColumn::pair(Control::LineWidth, Control::Zoom),
             ControlColumn::pair(Control::FrameRate, Control::TextOpacity),
-            ControlColumn::single(Control::DetailThinning),
         ],
     },
     ControlGroup {
@@ -706,14 +697,6 @@ impl Controls {
             Control::LineWidth => {
                 dial(Dial::LineWidth, format!("{}%", config.line_width.percent()))
             }
-            Control::DetailThinning => dial(
-                Dial::DetailThinning,
-                if config.detail_thinning.percent() == 0 {
-                    "Off".to_owned()
-                } else {
-                    format!("{}%", config.detail_thinning.percent())
-                },
-            ),
             Control::FrameRate => dial(Dial::FrameRate, config.frame_rate_limit.to_string()),
             Control::Zoom => dial(Dial::Zoom, format!("{:.0}%", config.zoom.factor() * 100.0)),
             Control::Shutter => dial(
@@ -922,7 +905,6 @@ impl Controls {
                 Control::Theme
                     | Control::Model
                     | Control::LineWidth
-                    | Control::DetailThinning
                     | Control::FrameRate
                     | Control::Shutter
                     | Control::TextOpacity
@@ -1543,49 +1525,6 @@ mod tests {
             layout.cell(Control::Help).rect.x0,
             layout.cell(Control::Boost).rect.x0
         );
-    }
-
-    #[test]
-    fn auto_detail_remains_adjustable_with_motion_blur_off() -> anyhow::Result<()> {
-        let now = Instant::now();
-        let mut controls = Controls::new(now);
-        let mut fonts = Fonts::new()?;
-        let view = View::fit(vello::kurbo::Size::new(1280.0, 720.0));
-        let mut config = Config::default();
-        config.model_motion = ModelMotion::Still;
-        config.detail_thinning = super::super::DetailThinning::try_from(0.0)?;
-        let choices = Controls::choices(
-            Control::DetailThinning,
-            &config,
-            config.theme,
-            "Model",
-            false,
-        );
-        assert_eq!(choices[1].label, "Off");
-        draw(&mut controls, &mut fonts, &view, &config, now);
-        let increase = target(&controls, |action| {
-            matches!(
-                action,
-                ControlAction::Adjust(Dial::DetailThinning, Adjustment::Increase)
-            )
-        });
-        assert!(matches!(
-            controls.click(increase.center(), now),
-            Some(ControlAction::Adjust(
-                Dial::DetailThinning,
-                Adjustment::Increase
-            ))
-        ));
-        config.detail_thinning = super::super::DetailThinning::try_from(1.2)?;
-        let choices = Controls::choices(
-            Control::DetailThinning,
-            &config,
-            config.theme,
-            "Model",
-            false,
-        );
-        assert_eq!(choices[1].label, "120%");
-        Ok(())
     }
 
     #[test]

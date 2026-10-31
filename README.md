@@ -1,3 +1,5 @@
+![Benga Logo](/assets/benga-logo.svg)
+
 # Benga
 
 An audio visualizer that animates 3D wireframe models to music playing on your
@@ -25,7 +27,7 @@ Audio capture:
 ## Controls
 
 Benga starts in presentation mode. Move the mouse to reveal the controls; hover
-any control for a hint. They fade after 10 seconds of inactivity.
+any control for a hint. They fade after 5 seconds of inactivity.
 
 - Browse models and themes, lock the current model, or enable automatic colors.
 - Adjust motion blur, shutter exposure, line width, zoom, and the FPS limit.
@@ -35,9 +37,6 @@ any control for a hint. They fade after 10 seconds of inactivity.
 
 Music drives the model's motion, part highlights, and close-ups of points of
 interest. Energy drops change the model unless Model Lock is enabled.
-
-**Auto Detail** reduces fine detail during fast motion and restores it as movement
-slows. It defaults to 100%; 0% disables it, and higher values simplify more strongly.
 
 For developer controls, hold any modifier key and click **Developer: exit
 presentation**. Common shortcuts:

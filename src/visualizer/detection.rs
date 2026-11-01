@@ -2637,6 +2637,7 @@ pub struct Spring {
     value: f32,
     velocity: f32,
     target: f32,
+    filtered_target: f32,
 }
 
 impl Spring {
@@ -2662,11 +2663,36 @@ impl Spring {
     }
 
     pub fn advance(&mut self, dt: f32, stiffness: f32, damping: f32) {
+        self.advance_with_target_filter(dt, stiffness, damping, 0.0);
+    }
+
+    /// Ease target changes before applying spring force. A zero time constant
+    /// preserves the unfiltered response, including when filtering is disabled
+    /// during a transition. The requested target still determines settlement.
+    pub fn advance_with_target_filter(
+        &mut self,
+        dt: f32,
+        stiffness: f32,
+        damping: f32,
+        target_filter_seconds: f32,
+    ) {
         assert!(stiffness > 0.0, "a spring needs a positive stiffness");
+        assert!(
+            target_filter_seconds.is_finite() && target_filter_seconds >= 0.0,
+            "a target filter needs a finite, nonnegative time constant"
+        );
+        if target_filter_seconds == 0.0 {
+            self.filtered_target = self.target;
+        }
         let mut remaining = dt.max(0.0);
         while remaining > 0.0 {
             let step = remaining.min(SPRING_STEP);
-            let acceleration = -stiffness * (self.value - self.target) - damping * self.velocity;
+            if target_filter_seconds > 0.0 {
+                let follow = -(-step / target_filter_seconds).exp_m1();
+                self.filtered_target += (self.target - self.filtered_target) * follow;
+            }
+            let acceleration =
+                -stiffness * (self.value - self.filtered_target) - damping * self.velocity;
             self.velocity += acceleration * step;
             self.value += self.velocity * step;
             remaining -= step;
@@ -2677,6 +2703,7 @@ impl Spring {
         self.value = value;
         self.velocity = 0.0;
         self.target = value;
+        self.filtered_target = value;
     }
 
     /// Whether the spring is within `position_epsilon` of its target and
@@ -3334,6 +3361,88 @@ mod tests {
         }
         assert!(peak > 1.0, "an underdamped spring overshoots");
         assert!((spring.value() - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn filtered_spring_retargets_consistently_across_frame_rates() {
+        let run = |fps: u32| {
+            let mut spring = Spring::default();
+            spring.reset(-0.3);
+            for target in [0.9, -0.6] {
+                spring.set_target(target);
+                for _ in 0..fps / 5 {
+                    spring.advance_with_target_filter(1.0 / fps as f32, 40.0, 20.0, 0.2);
+                }
+            }
+            spring
+        };
+        let reference = run(240);
+        for fps in [30, 60, 120] {
+            let spring = run(fps);
+            assert!(
+                (spring.value() - reference.value()).abs() < 1e-5,
+                "{fps} FPS"
+            );
+            assert!(
+                (spring.velocity() - reference.velocity()).abs() < 1e-5,
+                "{fps} FPS"
+            );
+        }
+    }
+
+    #[test]
+    fn filtered_spring_reset_discards_the_previous_transition() {
+        let mut spring = Spring::default();
+        spring.set_target(3.0);
+        spring.advance_with_target_filter(0.1, 40.0, 20.0, 0.2);
+        spring.reset(-0.75);
+        let mut fresh = Spring::default();
+        fresh.reset(-0.75);
+        spring.set_target(0.5);
+        fresh.set_target(0.5);
+        for _ in 0..8 {
+            spring.advance_with_target_filter(1.0 / 60.0, 40.0, 20.0, 0.2);
+            fresh.advance_with_target_filter(1.0 / 60.0, 40.0, 20.0, 0.2);
+            assert_eq!(spring.value(), fresh.value());
+            assert_eq!(spring.velocity(), fresh.velocity());
+        }
+    }
+
+    #[test]
+    fn filtered_spring_can_disable_and_reenable_filtering_without_stale_targets() {
+        let mut spring = Spring::default();
+        spring.set_target(1.0);
+        spring.advance_with_target_filter(0.1, 40.0, 20.0, 0.2);
+        let mut raw = Spring::default();
+        raw.reset(spring.value());
+        raw.impulse(spring.velocity());
+        raw.set_target(spring.target());
+
+        spring.advance_with_target_filter(1.0 / 60.0, 40.0, 20.0, 0.0);
+        raw.advance(1.0 / 60.0, 40.0, 20.0);
+        assert_eq!(spring.value(), raw.value());
+        assert_eq!(spring.velocity(), raw.velocity());
+
+        spring.set_target(-0.5);
+        raw.set_target(-0.5);
+        for _ in 0..8 {
+            spring.advance_with_target_filter(1.0 / 60.0, 40.0, 20.0, 0.2);
+            raw.advance_with_target_filter(1.0 / 60.0, 40.0, 20.0, 0.2);
+            assert_eq!(spring.value(), raw.value());
+            assert_eq!(spring.velocity(), raw.velocity());
+        }
+    }
+
+    #[test]
+    fn filtered_spring_settles_only_at_the_requested_target() {
+        let mut spring = Spring::default();
+        spring.set_target(1.0);
+        spring.advance_with_target_filter(0.001, 40.0, 20.0, 0.2);
+        assert!(!spring.is_settled(0.01, 0.02));
+        for _ in 0..240 {
+            spring.advance_with_target_filter(1.0 / 60.0, 40.0, 20.0, 0.2);
+        }
+        assert!(spring.is_settled(0.01, 0.02));
     }
 
     #[test]

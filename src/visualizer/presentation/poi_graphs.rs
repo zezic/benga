@@ -281,7 +281,9 @@ impl PoiGraphs {
         let blend = focus_alpha(focus_blend);
         for graph in &self.graphs {
             let (reveal, alpha) = graph.life.animation(0);
-            let alpha = alpha
+            // Fade the complete callout without dissolving its cells or traces.
+            let alpha = reveal
+                * alpha
                 * if graph.life.exiting() {
                     graph.focus_alpha
                 } else {
@@ -289,16 +291,9 @@ impl PoiGraphs {
                 };
             graph
                 .plot
-                .draw(scene, graph.rect, stage, palette, reveal, alpha, graph.seed);
-            draw_leader(
-                scene,
-                stage,
-                palette,
-                graph.anchor,
-                graph.rect,
-                reveal * alpha,
-            );
-            draw_anchor(scene, stage, palette, graph.anchor, reveal * alpha);
+                .draw(scene, graph.rect, stage, palette, 1.0, alpha, graph.seed);
+            draw_leader(scene, stage, palette, graph.anchor, graph.rect, alpha);
+            draw_anchor(scene, stage, palette, graph.anchor, alpha);
         }
     }
 

@@ -71,6 +71,9 @@ const ENTRY_SETTLED_BLEND_GAP: f32 = 0.001;
 const ENTRY_SETTLED_ANGLE: f32 = 0.005;
 const ENTRY_SETTLED_FOV: f32 = 0.005;
 const ENTRY_SETTLED_VELOCITY: f32 = 0.02;
+/// Target low-pass time constant at full relaxation, in seconds. The squared
+/// relaxation curve removes most of the lag well before full aggression.
+const CAMERA_RETARGET_FILTER_MAX: f32 = 0.25;
 
 /// Every tunable showcase parameter. Stored with the rest of the inspector
 /// tuning so the settings survive a restart.
@@ -803,11 +806,13 @@ impl Showcase {
 
     /// Scale the camera and POI springs without changing their authored tuning.
     /// Overdrive compensates damping to retain its bounce; relaxation keeps
-    /// damping fixed for a more sluggish response.
+    /// damping fixed and filters target changes for a smooth change of velocity.
     pub fn advance_with_stiffness_scale(&mut self, dt: f32, stiffness_scale: f32) {
         assert!(stiffness_scale.is_finite(), "spring scale must be finite");
         let stiffness_scale = stiffness_scale.clamp(0.05, AGGRESSION_STIFFNESS_MAX);
         let damping_scale = stiffness_scale.max(1.0).sqrt();
+        let target_filter_seconds =
+            CAMERA_RETARGET_FILTER_MAX * (1.0 - stiffness_scale.min(1.0)).powi(2);
         let settings = &self.settings;
         let focus_stiffness = settings.focus_stiffness * stiffness_scale;
         let motion_stiffness = settings.motion_stiffness * stiffness_scale;
@@ -817,16 +822,56 @@ impl Showcase {
         let motion_damping = settings.motion_damping * damping_scale;
         let orbit_damping = settings.orbit_damping * damping_scale;
         let dolly_damping = settings.dolly_damping * damping_scale;
-        self.blend.advance(dt, focus_stiffness, focus_damping);
-        self.motion.advance(dt, motion_stiffness, motion_damping);
+        self.blend.advance_with_target_filter(
+            dt,
+            focus_stiffness,
+            focus_damping,
+            target_filter_seconds,
+        );
+        self.motion.advance_with_target_filter(
+            dt,
+            motion_stiffness,
+            motion_damping,
+            target_filter_seconds,
+        );
         for spring in &mut self.center {
-            spring.advance(dt, focus_stiffness, focus_damping);
+            spring.advance_with_target_filter(
+                dt,
+                focus_stiffness,
+                focus_damping,
+                target_filter_seconds,
+            );
         }
-        self.radius.advance(dt, focus_stiffness, focus_damping);
-        self.orbit_yaw.advance(dt, orbit_stiffness, orbit_damping);
-        self.orbit_pitch.advance(dt, orbit_stiffness, orbit_damping);
-        self.fov.advance(dt, dolly_stiffness, dolly_damping);
-        self.slide.advance(dt, focus_stiffness, focus_damping);
+        self.radius.advance_with_target_filter(
+            dt,
+            focus_stiffness,
+            focus_damping,
+            target_filter_seconds,
+        );
+        self.orbit_yaw.advance_with_target_filter(
+            dt,
+            orbit_stiffness,
+            orbit_damping,
+            target_filter_seconds,
+        );
+        self.orbit_pitch.advance_with_target_filter(
+            dt,
+            orbit_stiffness,
+            orbit_damping,
+            target_filter_seconds,
+        );
+        self.fov.advance_with_target_filter(
+            dt,
+            dolly_stiffness,
+            dolly_damping,
+            target_filter_seconds,
+        );
+        self.slide.advance_with_target_filter(
+            dt,
+            focus_stiffness,
+            focus_damping,
+            target_filter_seconds,
+        );
         if self.mode == ShowcaseMode::Poi
             && !self.entry_settled
             && !self.focus_entry_held
@@ -1604,6 +1649,115 @@ mod tests {
         }
         assert_eq!(normal.settings, tuning);
         assert_eq!(relaxed.settings, tuning);
+    }
+
+    #[test]
+    fn relaxed_poi_retarget_filters_the_velocity_change_while_moving() {
+        let moving_camera = || {
+            let mut showcase = Showcase::new(ShowcaseSettings::default());
+            showcase.set_model(
+                vec![
+                    FocusPoi::new("first".to_owned(), anchor(-0.5, None), false),
+                    FocusPoi::new("second".to_owned(), anchor(0.5, None), false),
+                ],
+                1,
+            );
+            let mut rng = Rng::new(84);
+            showcase.enter_focus(&mut rng, 0.75);
+            for _ in 0..240 {
+                showcase.advance(1.0 / 60.0);
+            }
+            showcase.select_next_poi(&mut rng);
+            for _ in 0..6 {
+                showcase.advance_with_stiffness_scale(1.0 / 60.0, 0.25);
+            }
+            (showcase, rng)
+        };
+        let (mut retargeted, mut rng) = moving_camera();
+        let (mut continuing, _) = moving_camera();
+        assert!(retargeted.center[0].velocity().abs() > 0.1);
+        let mut raw_continuing = retargeted.center[0];
+        retargeted.select_next_poi(&mut rng);
+        let mut raw_retargeted = raw_continuing;
+        raw_retargeted.set_target(retargeted.center[0].target());
+
+        let dt = 1.0 / 60.0;
+        let stiffness = retargeted.settings.focus_stiffness * 0.25;
+        let damping = retargeted.settings.focus_damping;
+        raw_continuing.advance(dt, stiffness, damping);
+        raw_retargeted.advance(dt, stiffness, damping);
+        continuing.advance_with_stiffness_scale(dt, 0.25);
+        retargeted.advance_with_stiffness_scale(dt, 0.25);
+        let raw_change = (raw_retargeted.velocity() - raw_continuing.velocity()).abs();
+        let filtered_change =
+            (retargeted.center[0].velocity() - continuing.center[0].velocity()).abs();
+        assert!(
+            filtered_change < raw_change * 0.25,
+            "a relaxed retarget must ease its velocity change: {filtered_change} vs {raw_change} unfiltered"
+        );
+    }
+
+    #[test]
+    fn camera_retarget_filter_fades_out_as_aggression_approaches_full_strength() {
+        let mut previous_response = 0.0;
+        for scale in [0.05, 0.25, 0.5, 0.75, 0.9, 0.99, 1.0, 1.5, 2.0] {
+            let mut showcase = showcase();
+            let mut rng = Rng::new(85);
+            showcase.enter_focus(&mut rng, 0.75);
+            for _ in 0..240 {
+                showcase.advance(1.0 / 60.0);
+            }
+            showcase.select_next_poi(&mut rng);
+            showcase.kick(&mut rng, true);
+
+            let camera_springs = |showcase: &Showcase| {
+                [
+                    showcase.blend,
+                    showcase.motion,
+                    showcase.center[0],
+                    showcase.radius,
+                    showcase.orbit_yaw,
+                    showcase.orbit_pitch,
+                    showcase.fov,
+                    showcase.slide,
+                ]
+            };
+            let settings = showcase.settings.clone();
+            let tuning = [
+                (settings.focus_stiffness, settings.focus_damping),
+                (settings.motion_stiffness, settings.motion_damping),
+                (settings.focus_stiffness, settings.focus_damping),
+                (settings.focus_stiffness, settings.focus_damping),
+                (settings.orbit_stiffness, settings.orbit_damping),
+                (settings.orbit_stiffness, settings.orbit_damping),
+                (settings.dolly_stiffness, settings.dolly_damping),
+                (settings.focus_stiffness, settings.focus_damping),
+            ];
+            let mut raw = camera_springs(&showcase);
+            for (spring, (stiffness, damping)) in raw.iter_mut().zip(tuning) {
+                spring.advance(
+                    1.0 / 60.0,
+                    stiffness * scale,
+                    damping * scale.max(1.0).sqrt(),
+                );
+            }
+            showcase.advance_with_stiffness_scale(1.0 / 60.0, scale);
+            let response = showcase.center[0].velocity().abs() / raw[2].velocity().abs();
+            assert!(response + 1e-5 >= previous_response);
+            previous_response = response;
+            if scale == 0.25 {
+                assert!(response < 0.25, "low aggression strongly eases retargets");
+            }
+            if scale >= 0.9 {
+                assert!(response > 0.9, "near full aggression stays responsive");
+            }
+            if scale >= 1.0 {
+                for (filtered, raw) in camera_springs(&showcase).iter().zip(raw) {
+                    assert_eq!(filtered.value(), raw.value());
+                    assert_eq!(filtered.velocity(), raw.velocity());
+                }
+            }
+        }
     }
 
     #[test]

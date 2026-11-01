@@ -53,14 +53,14 @@ rules. Up to two compositions can coexist; each has an 18–28-second protected 
 then waits for another 48–96 onset
 events before leaving. Quiet passages have a 75–105-second lifetime limit.
 Static plots flicker on and off like neon lamps, staying steady between their
-entrance and exit. Heatmaps keep their cell-based assembly and dissolve.
+entrance and exit. Static heatmaps keep their cell-based assembly and dissolve.
 Static formations survive POI switches when their space stays clear. In POI
 close-ups, additional graphs follow model vertices alongside the floating
 cards, using the same spring motion, anchor markers, and leader lines. On
 defocus, floating cards coast and fade for 0.5 seconds; vertex graphs retain
-their 1.1-second coasting fade. Vertex graphs move freely over the scene. Static
-formations make room for cards and controls. Maps, envelopes, timelines, and
-other plots can assemble into compact formations whose rectangles follow
+their 1.1-second coasting fade. Attached graphs fade as a whole while moving
+freely over the scene. Static formations make room for cards and controls. Maps,
+envelopes, timelines, and other plots can assemble into compact formations whose rectangles follow
 shared rows, columns, and gapped grid spans, including asymmetric layouts. Some compositions
 pair two tight formations with a wider gap between them. Heatmaps retain their
 square, wide, or tall proportions.

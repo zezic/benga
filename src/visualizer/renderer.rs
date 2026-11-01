@@ -66,7 +66,7 @@ pub struct Renderer {
     ribbon_bindings: wgpu::BindGroup,
     ribbon_buffer: wgpu::Buffer,
     ribbon_capacity: usize,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "gpu-ribbon-prototype"))]
     benchmark_timestamps: Option<(wgpu::QuerySet, u32, u32)>,
 }
 
@@ -361,13 +361,13 @@ impl Renderer {
             ribbon_bindings,
             ribbon_buffer,
             ribbon_capacity,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "gpu-ribbon-prototype"))]
             benchmark_timestamps: None,
         }
     }
 
     /// Time the next render pass without changing the production rendering path.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "gpu-ribbon-prototype"))]
     pub(super) fn benchmark_timestamps(
         &mut self,
         queries: &wgpu::QuerySet,
@@ -507,7 +507,7 @@ impl Renderer {
                 ));
             }
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "gpu-ribbon-prototype"))]
         let benchmark_timestamps = self.benchmark_timestamps.take();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Visualizer overlay"),
@@ -520,7 +520,7 @@ impl Renderer {
                     store: wgpu::StoreOp::Store,
                 },
             })],
-            #[cfg(test)]
+            #[cfg(any(test, feature = "gpu-ribbon-prototype"))]
             timestamp_writes: benchmark_timestamps.as_ref().map(|(set, beginning, end)| {
                 wgpu::RenderPassTimestampWrites {
                     query_set: set,

@@ -9,6 +9,8 @@ mod computation;
 mod controls;
 mod detection;
 mod geometry;
+#[cfg(feature = "gpu-ribbon-prototype")]
+pub mod gpu_ribbon_prototype;
 mod model;
 mod percussion;
 #[cfg(test)]

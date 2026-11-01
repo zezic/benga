@@ -16,7 +16,7 @@ use super::{
     Parameter, Visualizer, VisualizerTuning,
 };
 use crate::{
-    audio::AudioCursor,
+    audio::{timeline::AudioInterval, AudioCursor},
     config::{
         Config, CursorVisibility, PreampDb, PresentationOpacity, ShutterFrames,
         VisualizerTextScale, Zoom,
@@ -540,11 +540,24 @@ impl Ui {
         _limit: FrameRateLimit,
         frame_time: FrameTime,
     ) -> UiFrame<'_> {
+        let frame_interval = self.audio.frame(frame_time.start(), frame_time.end());
+        self.draw_at_audio_time(scene, view, frame_time, frame_interval)
+    }
+
+    /// Draw a recorded frame at an explicit sample interval, bypassing the
+    /// live capture cursor's buffering and complete-bin availability policy.
+    /// Feed the interval's samples through `consume_buf` before calling this.
+    pub fn draw_at_audio_time(
+        &mut self,
+        scene: &mut Scene,
+        view: &View,
+        frame_time: FrameTime,
+        frame_interval: AudioInterval,
+    ) -> UiFrame<'_> {
         let dt = frame_time.seconds();
         let composite = Self::model_composite(self.theme.selected());
         self.visualizer.set_model_composite(composite);
         self.theme.advance(dt);
-        let frame_interval = self.audio.frame(frame_time.start(), frame_time.end());
         let palette = Palette::from_theme(self.theme.selected());
         self.visualizer.update(
             frame_interval,
@@ -647,6 +660,64 @@ mod tests {
             FrameRateLimit::Fps120,
             FrameTime::new(now, now + Duration::from_millis(16)),
         );
+    }
+
+    #[test]
+    fn recorded_frames_follow_sample_intervals_at_arbitrary_frame_rates() -> anyhow::Result<()> {
+        use crate::audio::timeline::AudioTime;
+
+        const SAMPLERATE: usize = 48_000;
+        for fps in [59.0, 29.97] {
+            let mut config = Config::default();
+            config.theme_preferences.auto_colors = false;
+            config.model_rotation = crate::visualizer::ModelRotation::Locked;
+            config.model_motion = ModelMotion::Swept;
+            let mut ui = Ui::new(&config)?;
+            ui.audio_event(AudioEvent::Config {
+                samplerate: SAMPLERATE,
+            });
+            let view = View::fit(Size::new(640.0, 360.0));
+            let mut scene = Scene::new();
+            let origin = Instant::now();
+            let mut previous_sample = 0;
+
+            for index in 0..12 {
+                let start = origin + Duration::from_secs_f64(index as f64 / fps);
+                let end = origin + Duration::from_secs_f64((index + 1) as f64 / fps);
+                let next_sample = ((index + 1) as f64 * SAMPLERATE as f64 / fps) as u64;
+                ui.consume_buf(
+                    &vec![[0.0; 2]; (next_sample - previous_sample) as usize],
+                    origin + Duration::from_secs_f64(previous_sample as f64 / SAMPLERATE as f64),
+                );
+                let interval = AudioInterval::new(
+                    AudioTime::from_samples(previous_sample, SAMPLERATE),
+                    AudioTime::from_samples(next_sample, SAMPLERATE),
+                );
+                scene.reset();
+                let _ =
+                    ui.draw_at_audio_time(&mut scene, &view, FrameTime::new(start, end), interval);
+                let latest_pose = ui
+                    .visualizer
+                    .scene
+                    .current
+                    .as_ref()
+                    .expect("the bundled model loads")
+                    .history
+                    .back()
+                    .expect("motion blur records each frame");
+                assert_eq!(
+                    latest_pose.at,
+                    interval.end(),
+                    "{fps} FPS frame {index} must use its sample interval without waiting for a complete millisecond"
+                );
+                assert!(
+                    (ui.visualizer.time - (index + 1) as f32 / fps as f32).abs() < 1e-6,
+                    "animation must advance by the recorded frame duration"
+                );
+                previous_sample = next_sample;
+            }
+        }
+        Ok(())
     }
 
     #[test]

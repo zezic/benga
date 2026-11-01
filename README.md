@@ -24,6 +24,36 @@ Audio capture:
   `pavucontrol`). PulseAudio and PipeWire's PulseAudio service are supported,
   with ALSA as a fallback.
 
+## Render an audio file to video
+
+Render the presentation without opening a window or capturing desktop audio:
+
+```sh
+cargo run --release -- --render "track.flac" --output "video.mp4" \
+  --fps 60 --width 1920 --height 1080 --gain -6
+```
+
+Requires [FFmpeg](https://ffmpeg.org/) on `PATH`, with the `libx264` and AAC
+encoders, and a GPU with compute support. Any audio format FFmpeg can decode
+can be used, including WAV, FLAC, MP3, and Ogg. The first audio track is used.
+The result is an H.264 MP4 with the source audio encoded as AAC.
+
+- `--fps`: 10–240, including decimal values such as `29.97`; defaults to 60.
+- `--width` / `--height`: positive even pixel dimensions; default to 1920×1080.
+- `--gain`: analyzer gain in decibels, from −96 to +96. Overrides the saved
+  analyzer gain for this render; the soundtrack volume stays unchanged.
+- `--config`: use a particular settings `.ron` file; otherwise use saved
+  desktop settings, including theme, detector tuning, zoom, and motion blur.
+- `--overwrite`: replace an existing output after the render succeeds.
+
+`--output` is required and must end in `.mp4`. Rendering follows the audio
+timeline at the requested FPS and runs as fast as the GPU and encoder allow.
+It streams audio and frames rather than loading the whole track into memory.
+The presentation includes models, motion blur, and infographics, with controls
+and startup screens hidden. Saved settings remain unchanged. The last frame
+can extend past the audio by less than one frame interval. Visual choices
+remain randomized between runs, as in the desktop app.
+
 ## Controls
 
 Benga runs in presentation mode. Move the mouse to reveal the controls; hover

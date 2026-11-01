@@ -41,7 +41,7 @@ impl AudioCursor {
         self.read = ReadMode::default();
     }
 
-    /// A capture buffer of `frames` stereo frames ending at `captured_at`.
+    /// A capture buffer of `frames` stereo frames starting at `captured_at`.
     pub fn push(&mut self, frames: usize, captured_at: Instant) {
         if frames == 0 {
             return;

@@ -1,5 +1,7 @@
+mod offscreen;
 mod raster_asset;
 
+pub use offscreen::OffscreenRenderer;
 pub use raster_asset::{RasterAsset, RasterAssetCache};
 
 use std::sync::Arc;

@@ -2,6 +2,7 @@
 
 use std::{sync::mpsc::Receiver, time::Instant};
 
+use anyhow::Context;
 use audio::capture_stream;
 use config::{Config, CursorVisibility, PreampDb};
 use frame_schedule::{
@@ -21,6 +22,7 @@ use winit::{
 use benga::window_chrome::{Chrome, Hit, WindowButton};
 use benga::{audio, config, frame_schedule, profile, render, visualizer, AudioEvent};
 use visualizer::{ControlAction, Dial, Ui, View};
+mod cli;
 mod desktop;
 mod saved;
 mod updater;
@@ -683,19 +685,31 @@ fn main() -> anyhow::Result<()> {
     if updater::run_helper()? {
         return Ok(());
     }
-    if std::env::args()
-        .nth(1)
-        .is_some_and(|arg| arg == "--version")
-    {
-        println!("Benga {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
-    }
-    if std::env::args()
-        .nth(1)
-        .is_some_and(|arg| arg == "--help" || arg == "-h")
-    {
-        println!("Benga {} — desktop audio visualizer\nUsage: benga [--version | --help | --profile]\nIn the app: F1 for audio help and updates, double-click for fullscreen, Esc to leave.\nhttps://benga.zezic.ru • https://github.com/zezic/benga",env!("CARGO_PKG_VERSION"));
-        return Ok(());
+    match cli::parse(std::env::args_os().skip(1))? {
+        cli::Command::Help => {
+            cli::help();
+            return Ok(());
+        }
+        cli::Command::Version => {
+            println!("Benga {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        cli::Command::Render(options) => {
+            let settings = if let Some(path) = &options.config {
+                let text = std::fs::read_to_string(path)
+                    .with_context(|| format!("Could not read {}", path.display()))?;
+                ron::from_str::<Config>(&text)
+                    .with_context(|| format!("Invalid settings in {}", path.display()))?
+            } else {
+                (*Saved::<Config>::load(
+                    config::config_file()?,
+                    Some(config::legacy_config_file()?),
+                )?)
+                .clone()
+            };
+            return benga::export::run(options, &settings);
+        }
+        cli::Command::Desktop | cli::Command::Profile => {}
     }
     let profile = profile::Run::from_args()?;
     let settings =

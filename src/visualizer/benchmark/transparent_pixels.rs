@@ -147,6 +147,7 @@ fn transparent_model_geometry_can_be_omitted_without_changing_pixels() -> anyhow
                 model_lines: &lines,
                 ribbons: &ribbons,
                 model_composite: composite,
+                model_edge_capacity: 0,
             },
             &before,
         )?;
@@ -156,6 +157,7 @@ fn transparent_model_geometry_can_be_omitted_without_changing_pixels() -> anyhow
                 model_lines: &selected_lines,
                 ribbons: &selected_ribbons,
                 model_composite: composite,
+                model_edge_capacity: 0,
             },
             &after,
         )?;

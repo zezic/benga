@@ -305,6 +305,7 @@ impl FrozenOutput {
             model_lines: &self.lines,
             ribbons: &self.ribbons,
             model_composite: composite,
+            model_edge_capacity: 0,
         }
     }
 

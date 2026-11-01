@@ -2,7 +2,7 @@
 //! real-world fields supplies the support structure, and one authored fact is
 //! typed somewhere along the edges.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use vello::{
     kurbo::{Affine, Line, Point, Rect},
@@ -214,7 +214,7 @@ pub struct NormalScene {
 
 struct AmmoTally {
     capacity: u32,
-    icon: Vec<[f32; 4]>,
+    icon: Arc<[[f32; 4]]>,
     grid: Rect,
     bounds: Rect,
     columns: usize,
@@ -882,7 +882,7 @@ fn draw_ammo(
                     ammo.grid.y0 + (row as f64 + 0.5) * ammo.cell,
                 );
                 let color = if index % 10 == 0 { accent } else { muted };
-                for line in &ammo.icon {
+                for line in ammo.icon.iter() {
                     let a = Point::new(
                         center.x + f64::from(line[0]) * scale,
                         center.y + f64::from(line[1]) * scale,
@@ -1179,7 +1179,7 @@ mod tests {
     fn ammunition_raster_reuses_its_source_until_ink_changes() {
         let fixture = || AmmoTally {
             capacity: 2,
-            icon: vec![[-0.5, -0.5, 0.5, 0.5], [-0.5, 0.5, 0.5, -0.5]],
+            icon: vec![[-0.5, -0.5, 0.5, 0.5], [-0.5, 0.5, 0.5, -0.5]].into(),
             grid: Rect::new(0.0, 0.0, 20.0, 10.0),
             bounds: Rect::new(0.0, 0.0, 20.0, 10.0),
             columns: 2,

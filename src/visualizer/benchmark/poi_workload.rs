@@ -61,8 +61,7 @@ pub(super) fn configure(ui: &mut Ui, mode: Mode) -> anyhow::Result<Value> {
     }
     ensure!(models.current().id == id, "selected POI model disappeared");
     visualizer.scene.show(
-        models.current(),
-        visualizer.crease_threshold,
+        models.current_prepared(),
         visualizer.model_motion,
         0.5,
         &visualizer.style_tuning,

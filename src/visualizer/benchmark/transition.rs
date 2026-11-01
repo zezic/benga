@@ -37,6 +37,7 @@ impl Output {
             model_lines: &self.lines,
             ribbons: &self.ribbons,
             model_composite: ModelComposite::Additive,
+            model_edge_capacity: 0,
         }
     }
 
@@ -118,26 +119,21 @@ fn scene_and_baseline(models: &mut ModelSet, ids: &[String; 2]) -> (Scene, [Mode
     let mut runtimes = Vec::new();
     for (index, id) in ids.iter().enumerate() {
         let model = select(models, id);
+        let prepared =
+            super::super::prepared::PreparedModel::new(model, CreaseThreshold::default(), None);
         let accent = if index == 0 { 0.15 } else { 0.75 };
         if index == 0 {
             scene.show(
-                model,
-                CreaseThreshold::default(),
+                &prepared,
                 ModelMotion::Swept,
                 accent,
                 &StyleTuning::default(),
             );
         } else {
-            scene.switch(
-                model,
-                CreaseThreshold::default(),
-                ModelMotion::Swept,
-                accent,
-            );
+            scene.switch(&prepared, ModelMotion::Swept, accent);
         }
         runtimes.push(ModelRuntime::new(
-            model.name.clone(),
-            model.wireframe(CreaseThreshold::default()),
+            &prepared,
             Pose {
                 yaw: std::f32::consts::TAU * 0.25,
                 ..Pose::default()
@@ -145,9 +141,19 @@ fn scene_and_baseline(models: &mut ModelSet, ids: &[String; 2]) -> (Scene, [Mode
             Style::default(),
             ModelTint::solid(accent),
             true,
-            model.node_parts(super::super::model::SLIDE_NODE),
         ));
     }
+    let vertices = runtimes
+        .iter()
+        .map(|runtime| runtime.wireframe.vertex_count())
+        .max()
+        .unwrap();
+    let edges = runtimes
+        .iter()
+        .map(|runtime| runtime.wireframe.edges().len())
+        .max()
+        .unwrap();
+    scene.reserve(vertices, edges);
     (scene, runtimes.try_into().ok().unwrap())
 }
 

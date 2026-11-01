@@ -18,6 +18,9 @@ mod percussion_integration_tests;
 mod percussion_spectrum;
 #[cfg(test)]
 mod percussion_stereo_tests;
+#[cfg(test)]
+mod preparation_tests;
+mod prepared;
 mod presentation;
 mod renderer;
 mod showcase;
@@ -57,11 +60,12 @@ use detection::{OnsetBank, QuakeSequence, Spring};
 pub use percussion::*;
 use percussion_spectrum::{PercussionAnalyzer, PercussionFrame};
 pub use showcase::ShowcaseSettings;
-use showcase::{FocusPoi, Showcase, ShowcaseFrame};
+use showcase::{Showcase, ShowcaseFrame};
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     f32::consts::TAU,
+    sync::Arc,
 };
 
 use serde::{Deserialize, Serialize};
@@ -80,6 +84,7 @@ use geometry::{
     soft_saturate, wrap_angle, Camera, DepthOpacity, FocusProjection, Pose, Projected,
     ScreenBounds, Vec2, Vec3, Wireframe,
 };
+use prepared::PreparedModel;
 pub use spectrum::{OnsetBinMeter, RelativeExcessSettings, BAND_COUNT};
 use spectrum::{Spectrum, SpectrumAnalyzer};
 
@@ -1502,6 +1507,8 @@ pub struct Frame<'a> {
     /// Swept model motion blur drawn with the themed composite.
     pub ribbons: &'a [RibbonInstance],
     pub model_composite: ModelComposite,
+    /// Largest prepared model, used to reserve GPU storage before animation.
+    pub model_edge_capacity: usize,
 }
 
 /// Monotonic detector hit counters. Presentation compares these across frames
@@ -1685,16 +1692,18 @@ impl Visualizer {
         };
         let accent = self.accent();
         match model::ModelSet::load(&mut self.rng) {
-            Ok(models) => {
+            Ok(mut models) => {
+                models.prepare(self.crease_threshold, self.catalog.as_ref());
                 let (_, total) = models.position();
                 log::info!("model visualizer: {total} models");
                 self.scene.show(
-                    models.current(),
-                    self.crease_threshold,
+                    models.current_prepared(),
                     self.model_motion,
                     accent,
                     &self.style_tuning,
                 );
+                let (vertices, edges) = models.prepared_capacity();
+                self.reserve_model_buffers(vertices, edges);
                 self.models = Models::Ready(Box::new(models));
                 self.sync_showcase();
             }
@@ -1705,41 +1714,25 @@ impl Visualizer {
         }
     }
 
-    /// Rebuild the POI list for the model the scene is showing.
+    /// Reuse the POIs resolved before the first animation update.
     fn sync_showcase(&mut self) {
         let Models::Ready(models) = &self.models else {
             self.showcase.set_model(Vec::new(), 0);
             return;
         };
-        let model = models.current();
-        let mut pois = Vec::new();
-        if let Some(weapon) = self
-            .catalog
-            .as_ref()
-            .and_then(|catalog| catalog.weapons.get(&model.id))
-        {
-            for poi in &weapon.poi {
-                if let Some(anchor) = model.anchor(&poi.anchor.name) {
-                    let mut focus = FocusPoi::new(
-                        poi.anchor.name.clone(),
-                        anchor,
-                        poi.id == "ejection_port" && anchor.part.is_none(),
-                    )
-                    .with_identity(poi.id.clone(), poi.label.clone());
-                    if anchor.part.is_some() {
-                        let children = model
-                            .node_parts(&poi.anchor.name)
-                            .iter()
-                            .copied()
-                            .filter(|part| Some(*part) != anchor.part)
-                            .collect();
-                        focus = focus.with_children(children);
-                    }
-                    pois.push(focus);
-                }
-            }
-        }
-        self.showcase.set_model(pois, model.part_count());
+        self.showcase.set_model(
+            Arc::clone(&models.current_prepared().pois),
+            models.current().part_count(),
+        );
+    }
+
+    fn reserve_model_buffers(&mut self, vertices: usize, edges: usize) {
+        self.scene.reserve(vertices, edges);
+        self.model_lines
+            .reserve(edges.saturating_sub(self.model_lines.len()));
+        // A crossing swept edge emits at most four body and four wing triangles.
+        self.model_ribbons
+            .reserve((edges * 8).saturating_sub(self.model_ribbons.len()));
     }
 
     /// Steps through the automatic shuffled cycle when model rotation is on.
@@ -1760,12 +1753,8 @@ impl Visualizer {
         let Models::Ready(models) = &self.models else {
             unreachable!("switching a model requires a loaded catalog")
         };
-        self.scene.switch(
-            models.current(),
-            self.crease_threshold,
-            self.model_motion,
-            accent,
-        );
+        self.scene
+            .switch(models.current_prepared(), self.model_motion, accent);
         self.model_revision.0 += 1;
         self.sync_showcase();
     }
@@ -2108,6 +2097,7 @@ impl Visualizer {
             model_lines: &self.model_lines,
             ribbons: &self.model_ribbons,
             model_composite: self.model_composite,
+            model_edge_capacity: self.model_lines.capacity(),
         }
     }
 
@@ -2227,114 +2217,23 @@ impl Visualizer {
     /// Normalized 2D wireframe of the first magazine child when the magazine
     /// has at least three modelled children. The presentation repeats it for
     /// every round of capacity.
-    pub fn magazine_ammo_icon(&self) -> Option<Vec<[f32; 4]>> {
+    pub fn magazine_ammo_icon(&self) -> Option<Arc<[[f32; 4]]>> {
         let Models::Ready(models) = &self.models else {
             return None;
         };
-        let model = models.current();
-        let parts = model.node_parts("magazine");
-        let parent = model.anchor("magazine").and_then(|anchor| anchor.part);
-        let children: Vec<u16> = parts
-            .iter()
-            .copied()
-            .filter(|part| Some(*part) != parent)
-            .collect();
-        if children.len() < 3 {
-            return None;
-        }
-        let part = children[0];
-        let wireframe = &self.scene.current.as_ref()?.wireframe;
-        let mut low = [f32::INFINITY; 3];
-        let mut high = [f32::NEG_INFINITY; 3];
-        for index in 0..wireframe.vertex_count() {
-            if wireframe.vertex_part(index) != part {
-                continue;
-            }
-            let vertex = wireframe.vertex(index);
-            for (axis, value) in [vertex.x, vertex.y, vertex.z].into_iter().enumerate() {
-                low[axis] = low[axis].min(value);
-                high[axis] = high[axis].max(value);
-            }
-        }
-        if !low[0].is_finite() {
-            return None;
-        }
-        let spans = [high[0] - low[0], high[1] - low[1], high[2] - low[2]];
-        let (u, v) = [(0, 1), (0, 2), (1, 2)]
-            .into_iter()
-            .max_by(|a, b| (spans[a.0] * spans[a.1]).total_cmp(&(spans[b.0] * spans[b.1])))
-            .expect("axis pairs exist");
-        let center_u = (low[u] + high[u]) * 0.5;
-        let center_v = (low[v] + high[v]) * 0.5;
-        let scale = 1.0 / spans[u].max(spans[v]).max(1e-5);
-        let mut projected = vec![None; wireframe.vertex_count()];
-        for index in 0..wireframe.vertex_count() {
-            if wireframe.vertex_part(index) != part {
-                continue;
-            }
-            let vertex = wireframe.vertex(index);
-            let coordinates = [vertex.x, vertex.y, vertex.z];
-            projected[index] = Some([
-                (coordinates[u] - center_u) * scale,
-                (coordinates[v] - center_v) * scale,
-            ]);
-        }
-        let mut lines = Vec::new();
-        for (index, edge) in wireframe.edges().iter().enumerate() {
-            if wireframe.edge_part(index) != part {
-                continue;
-            }
-            let (Some(a), Some(b)) = (
-                projected[usize::from(edge[0])],
-                projected[usize::from(edge[1])],
-            ) else {
-                continue;
-            };
-            lines.push([a[0], a[1], b[0], b[1]]);
-        }
-        (!lines.is_empty()).then_some(lines)
+        models.current_prepared().magazine_icon.clone()
     }
 
-    /// Vertices that may represent the POI. Mesh POIs use every vertex below
-    /// the anchor node; marker POIs use the mesh vertex nearest the marker.
-    pub fn poi_vertices(&self, poi_id: &str) -> Vec<u16> {
-        let Some(weapon) = self.weapon() else {
-            return Vec::new();
-        };
-        let Some(poi) = weapon.poi.iter().find(|poi| poi.id == poi_id) else {
-            return Vec::new();
-        };
+    /// Prepared mesh or nearest-marker vertices for a catalog POI.
+    pub fn poi_vertices(&self, poi_id: &str) -> &[u16] {
         let Models::Ready(models) = &self.models else {
-            return Vec::new();
+            return &[];
         };
-        let model = models.current();
-        let Some(current) = self.scene.current.as_ref() else {
-            return Vec::new();
-        };
-        let Some(anchor) = model.anchor(&poi.anchor.name) else {
-            return Vec::new();
-        };
-        if anchor.part.is_some() {
-            let parts = model.node_parts(&poi.anchor.name);
-            return (0..current.wireframe.vertex_count())
-                .filter(|index| parts.contains(&current.wireframe.vertex_part(*index)))
-                .map(|index| u16::try_from(index).expect("a model has at most u16::MAX vertices"))
-                .collect();
-        }
-        let mut nearest = None;
-        let mut nearest_distance = f32::INFINITY;
-        for index in 0..current.wireframe.vertex_count() {
-            let offset = current.wireframe.vertex(index) - anchor.center;
-            let distance = offset.length();
-            if distance < nearest_distance {
-                nearest = Some(index);
-                nearest_distance = distance;
-            }
-        }
-        nearest
-            .map(|index| u16::try_from(index).expect("a model has at most u16::MAX vertices"))
-            .into_iter()
-            .collect()
+        models
+            .current_prepared()
+            .poi_vertices
+            .get(poi_id)
+            .map_or(&[], |vertices| vertices.as_ref())
     }
 
     /// Logical line count after the model transition's edge selection. Selected
@@ -3159,11 +3058,12 @@ impl Visualizer {
             return;
         }
         self.crease_threshold = crease;
-        if let Models::Ready(models) = &self.models {
-            if self.scene.current.is_some() {
-                self.scene.set_wireframe(models.current(), crease);
-                self.diagnosis.reset();
-            }
+        if let Models::Ready(models) = &mut self.models {
+            models.prepare(crease, self.catalog.as_ref());
+            self.scene.set_prepared(models.current_prepared());
+            let (vertices, edges) = models.prepared_capacity();
+            self.reserve_model_buffers(vertices, edges);
+            self.diagnosis.reset();
         }
     }
 
@@ -4014,6 +3914,7 @@ impl Smoother {
 struct Scene {
     current: Option<ModelRuntime>,
     outgoing: Option<ModelRuntime>,
+    spare: Option<ModelRuntime>,
     transition: f32,
 }
 
@@ -4022,66 +3923,78 @@ impl Scene {
         Self {
             current: None,
             outgoing: None,
+            spare: None,
             transition: 1.0,
         }
     }
 
     fn show(
         &mut self,
-        model: &model::Model,
-        crease: CreaseThreshold,
+        model: &PreparedModel,
         motion: ModelMotion,
         accent: f32,
         style_tuning: &StyleTuning,
     ) {
         let mut style = Style::default();
         style_tuning.apply(&mut style);
+        let pose = Pose {
+            yaw: TAU * 0.25,
+            ..Pose::default()
+        };
         self.current = Some(ModelRuntime::new(
-            model.name.clone(),
-            model.wireframe(crease),
-            Pose {
-                yaw: TAU * 0.25,
-                ..Pose::default()
-            },
+            model,
+            pose,
             style,
             ModelTint::solid(accent),
             motion == ModelMotion::Swept,
-            model.node_parts(model::SLIDE_NODE),
+        ));
+        self.spare = Some(ModelRuntime::new(
+            model,
+            pose,
+            style,
+            ModelTint::solid(accent),
+            motion == ModelMotion::Swept,
         ));
         self.outgoing = None;
         self.transition = 1.0;
     }
 
-    fn set_wireframe(&mut self, model: &model::Model, crease: CreaseThreshold) {
-        let current = self
+    /// Size both reusable animation slots before a model can enter the scene.
+    fn reserve(&mut self, vertices: usize, edges: usize) {
+        for runtime in self
             .current
-            .as_mut()
-            .expect("a model must be shown before changing its wireframe");
-        current.set_wireframe(model.wireframe(crease));
+            .iter_mut()
+            .chain(self.outgoing.iter_mut())
+            .chain(self.spare.iter_mut())
+        {
+            runtime.reserve(vertices, edges);
+        }
     }
 
-    /// Dissolves edges into another model while keeping the current orientation.
-    fn switch(
-        &mut self,
-        model: &model::Model,
-        crease: CreaseThreshold,
-        motion: ModelMotion,
-        accent: f32,
-    ) {
+    fn set_prepared(&mut self, model: &PreparedModel) {
+        if let Some(current) = &mut self.current {
+            current.set_prepared(model);
+        }
+    }
+
+    /// Reuse the retired animation slot and immutable model preparation.
+    fn switch(&mut self, model: &PreparedModel, motion: ModelMotion, accent: f32) {
+        let mut entering = self
+            .outgoing
+            .take()
+            .or_else(|| self.spare.take())
+            .expect("a shown scene has two animation slots");
         let current = self
             .current
             .as_ref()
             .expect("a model must be shown before switching models");
-        let mut entering = ModelRuntime::new(
-            model.name.clone(),
-            model.wireframe(crease),
+        entering.reset(
+            model,
             current.pose,
             current.target_style,
             ModelTint::solid(accent),
             motion == ModelMotion::Swept,
-            model.node_parts(model::SLIDE_NODE),
         );
-        entering.pose = current.pose;
         entering.pitch = current.pitch;
         entering.roll = current.roll;
         entering.style = current.style;
@@ -4093,11 +4006,17 @@ impl Scene {
         entering.active_edges = 0;
         self.current
             .as_mut()
-            .expect("a model must be shown before switching models")
+            .expect("a model is shown")
             .edge_dissolve
             .freeze();
         self.outgoing = self.current.replace(entering);
         self.transition = 0.0;
+    }
+
+    fn recycle_outgoing(&mut self) {
+        if let Some(outgoing) = self.outgoing.take() {
+            self.spare = Some(outgoing);
+        }
     }
 
     fn set_model_motion(&mut self, motion: ModelMotion) {
@@ -4165,11 +4084,11 @@ impl Scene {
             if self.outgoing.is_some() {
                 // A muted crossfade swaps scenes without a fade.
                 self.transition = Property::Crossfade.neutral();
-                self.outgoing = None;
+                self.recycle_outgoing();
             }
         }
         if self.transition >= 1.0 {
-            self.outgoing = None;
+            self.recycle_outgoing();
             self.current
                 .as_mut()
                 .expect("a model is shown")
@@ -4239,8 +4158,8 @@ impl Scene {
 }
 
 struct ModelRuntime {
-    name: String,
-    wireframe: Wireframe,
+    name: Arc<str>,
+    wireframe: Arc<Wireframe>,
     pose: Pose,
     pitch: Smoother,
     roll: Smoother,
@@ -4278,8 +4197,10 @@ struct ModelRuntime {
     rotation_offset_yaw: f32,
     rotation_offset_pitch: f32,
     /// Vertices that move with the ejecting slide subtree.
-    slide_vertices: Vec<bool>,
+    slide_vertices: Arc<[bool]>,
     history: VecDeque<PoseSnapshot>,
+    /// Recycled pose storage; clearing history never frees its edge buffers.
+    history_buffers: Vec<Vec<LineGeometry>>,
     vertices: Vec<Projected>,
     current: Vec<LineGeometry>,
 }
@@ -4388,24 +4309,31 @@ fn focus_depth_radius(model_radius: f32, poi_radius: f32, blend: f32) -> f32 {
 
 impl ModelRuntime {
     fn new(
-        name: String,
-        wireframe: Wireframe,
+        model: &PreparedModel,
         pose: Pose,
         target_style: Style,
         tint: ModelTint,
         motion_blur: bool,
-        slide_parts: &[u16],
     ) -> Self {
-        let vertex_capacity = wireframe.vertex_count();
-        let edge_capacity = wireframe.edges().len();
-        let edge_dissolve =
-            transition::EdgeDissolve::new(edge_capacity, transition::model_seed(&name));
-        let slide_vertices = (0..wireframe.vertex_count())
-            .map(|index| slide_parts.contains(&wireframe.vertex_part(index)))
-            .collect();
+        let mut runtime = Self::unallocated(model, pose, target_style, tint, motion_blur);
+        runtime.reserve(
+            model.wireframe.vertex_count(),
+            model.wireframe.edges().len(),
+        );
+        runtime
+    }
+
+    fn unallocated(
+        model: &PreparedModel,
+        pose: Pose,
+        target_style: Style,
+        tint: ModelTint,
+        motion_blur: bool,
+    ) -> Self {
+        let edge_capacity = model.wireframe.edges().len();
         Self {
-            name,
-            wireframe,
+            name: Arc::clone(&model.name),
+            wireframe: Arc::clone(&model.wireframe),
             pose,
             pitch: Smoother::new(pose.pitch),
             roll: Smoother::new(pose.roll),
@@ -4419,7 +4347,7 @@ impl ModelRuntime {
             morph_rate: 1.1,
             line_energy: 0.6,
             entrance: 1.0,
-            edge_dissolve,
+            edge_dissolve: transition::EdgeDissolve::from_order(model.edge_order.clone()),
             active_edges: edge_capacity,
             motion_blur,
             frozen_scale: pose.scale,
@@ -4434,11 +4362,68 @@ impl ModelRuntime {
             last_rotation_pitch: 0.0,
             rotation_offset_yaw: 0.0,
             rotation_offset_pitch: 0.0,
-            slide_vertices,
-            history: VecDeque::with_capacity(MAX_HISTORY),
-            vertices: Vec::with_capacity(vertex_capacity),
-            current: Vec::with_capacity(edge_capacity),
+            slide_vertices: Arc::clone(&model.slide_vertices),
+            history: VecDeque::new(),
+            history_buffers: Vec::new(),
+            vertices: Vec::new(),
+            current: Vec::new(),
         }
+    }
+
+    fn reserve(&mut self, vertices: usize, edges: usize) {
+        self.vertices
+            .reserve(vertices.saturating_sub(self.vertices.len()));
+        self.current
+            .reserve(edges.saturating_sub(self.current.len()));
+        self.history
+            .reserve(MAX_HISTORY.saturating_sub(self.history.len()));
+        self.history_buffers
+            .reserve(MAX_HISTORY.saturating_sub(self.history_buffers.len()));
+        while self.history.len() + self.history_buffers.len() < MAX_HISTORY {
+            self.history_buffers.push(Vec::with_capacity(edges));
+        }
+        for lines in self
+            .history_buffers
+            .iter_mut()
+            .chain(self.history.iter_mut().map(|snapshot| &mut snapshot.lines))
+        {
+            lines.reserve(edges.saturating_sub(lines.len()));
+        }
+    }
+
+    fn clear_history(&mut self) {
+        while let Some(snapshot) = self.history.pop_front() {
+            self.history_buffers.push(snapshot.lines);
+        }
+    }
+
+    fn reset(
+        &mut self,
+        model: &PreparedModel,
+        pose: Pose,
+        target_style: Style,
+        tint: ModelTint,
+        motion_blur: bool,
+    ) {
+        self.clear_history();
+        self.vertices.clear();
+        self.current.clear();
+        let mut fresh = Self::unallocated(model, pose, target_style, tint, motion_blur);
+        std::mem::swap(&mut self.history, &mut fresh.history);
+        std::mem::swap(&mut self.history_buffers, &mut fresh.history_buffers);
+        std::mem::swap(&mut self.vertices, &mut fresh.vertices);
+        std::mem::swap(&mut self.current, &mut fresh.current);
+        *self = fresh;
+    }
+
+    fn set_prepared(&mut self, model: &PreparedModel) {
+        self.wireframe = Arc::clone(&model.wireframe);
+        self.slide_vertices = Arc::clone(&model.slide_vertices);
+        self.edge_dissolve = transition::EdgeDissolve::from_order(model.edge_order.clone());
+        self.active_edges = self.wireframe.edges().len();
+        self.clear_history();
+        self.vertices.clear();
+        self.current.clear();
     }
 
     fn name(&self) -> &str {
@@ -4452,22 +4437,24 @@ impl ModelRuntime {
     fn set_motion_blur(&mut self, enabled: bool) {
         self.motion_blur = enabled;
         if !enabled {
-            self.history.clear();
+            self.clear_history();
         }
     }
 
+    #[cfg(test)]
     fn set_wireframe(&mut self, wireframe: Wireframe) {
         self.active_edges = wireframe.edges().len();
         self.edge_dissolve =
             transition::EdgeDissolve::new(self.active_edges, transition::model_seed(&self.name));
-        self.wireframe = wireframe;
-        self.history.clear();
-        self.current.clear();
+        self.clear_history();
         self.vertices.clear();
+        self.current.clear();
+        self.wireframe = Arc::new(wireframe);
+        self.reserve(self.wireframe.vertex_count(), self.active_edges);
     }
 
     fn reset_temporal(&mut self) {
-        self.history.clear();
+        self.clear_history();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4687,7 +4674,9 @@ impl ModelRuntime {
             let mut lines = if self.history.len() == MAX_HISTORY {
                 self.history.pop_front().expect("history is full").lines
             } else {
-                Vec::new()
+                self.history_buffers
+                    .pop()
+                    .expect("history buffers were reserved before playback")
             };
             lines.clone_from(&self.current);
             self.history.push_back(PoseSnapshot {
@@ -4699,7 +4688,8 @@ impl ModelRuntime {
                 .front()
                 .is_some_and(|snapshot| frame_end.seconds_since(snapshot.at) > HISTORY_SECONDS)
             {
-                self.history.pop_front();
+                let snapshot = self.history.pop_front().expect("the expired pose exists");
+                self.history_buffers.push(snapshot.lines);
             }
             self.exposure_poses(exposure_start, frame_end)
         } else {
@@ -6543,9 +6533,20 @@ mod tests {
     }
 
     fn test_runtime_with(wireframe: Wireframe) -> ModelRuntime {
+        let prepared = PreparedModel {
+            name: Arc::from("test"),
+            edge_order: transition::EdgeOrder::new(
+                wireframe.edges().len(),
+                transition::model_seed("test"),
+            ),
+            slide_vertices: vec![false; wireframe.vertex_count()].into(),
+            wireframe: Arc::new(wireframe),
+            pois: Arc::from([]),
+            poi_vertices: BTreeMap::new(),
+            magazine_icon: None,
+        };
         let mut runtime = ModelRuntime::new(
-            "test".to_owned(),
-            wireframe,
+            &prepared,
             Pose {
                 yaw: 0.0,
                 pitch: 0.0,
@@ -6557,7 +6558,6 @@ mod tests {
             Style::default(),
             ModelTint::solid(0.5),
             false,
-            &[],
         );
         runtime.pitch = Smoother::new(0.0);
         runtime.roll = Smoother::new(0.0);
@@ -6824,7 +6824,7 @@ mod tests {
         runtime.edge_dissolve.incoming(0.0, 1);
         runtime.edge_dissolve.freeze();
         let original = runtime.wireframe.clone();
-        runtime.set_wireframe(original);
+        runtime.set_wireframe((*original).clone());
         assert_eq!(runtime.active_edges, 1);
         assert_eq!(runtime.edge_dissolve.alpha(0), 1.0);
         let showcase = test_showcase_frame(0.0, false, 0.0);
@@ -7578,7 +7578,7 @@ mod tests {
         assert_eq!(vertex.data.screen, model.vertices[0].screen);
         assert_eq!(vertex.data.world, model.wireframe.vertex(0));
 
-        model.slide_vertices[1] = true;
+        Arc::make_mut(&mut model.slide_vertices)[1] = true;
         let slide = Vec3::new(0.1, 0.0, 0.0);
         let selected = TrackedVertex::new(1, &model, slide);
         assert_eq!(selected.data.velocity, Vec2::default());

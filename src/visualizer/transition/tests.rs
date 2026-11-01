@@ -1,4 +1,6 @@
-use super::EdgeDissolve;
+use std::sync::Arc;
+
+use super::{EdgeDissolve, EdgeOrder, InheritedCoverage};
 
 fn alphas(dissolve: &EdgeDissolve, count: usize) -> Vec<f32> {
     (0..count).map(|index| dissolve.alpha(index)).collect()
@@ -133,5 +135,56 @@ fn show_all_discards_an_interrupted_visibility_mask() {
     dissolve.show_all();
     assert!(alphas(&dissolve, count).iter().all(|&alpha| alpha == 1.0));
     dissolve.outgoing(0.0, count);
+    assert!(alphas(&dissolve, count).iter().all(|&alpha| alpha == 1.0));
+}
+
+#[test]
+fn prepared_order_is_shared_without_sharing_visibility_state() {
+    let count = 257;
+    let order = EdgeOrder::new(count, 42);
+    let mut outgoing = EdgeDissolve::from_order(order.clone());
+    let mut incoming = EdgeDissolve::from_order(order.clone());
+    assert!(Arc::ptr_eq(&order.ranks, &outgoing.order.ranks));
+    assert!(Arc::ptr_eq(&order.ranks, &incoming.order.ranks));
+
+    outgoing.incoming(0.37, count);
+    let interrupted = alphas(&outgoing, count);
+    outgoing.freeze();
+    assert!(matches!(
+        outgoing.inherited,
+        InheritedCoverage::Selection(_)
+    ));
+    outgoing.outgoing(0.2, count);
+    assert!(alphas(&incoming, count).iter().all(|&alpha| alpha == 1.0));
+    incoming.incoming(0.37, count);
+    assert_eq!(interrupted, alphas(&incoming, count));
+    incoming.show_all();
+    assert!(alphas(&outgoing, count)
+        .iter()
+        .zip(interrupted)
+        .all(|(&alpha, previous)| alpha <= previous));
+}
+
+#[test]
+fn repeated_freezes_preserve_combined_coverage() {
+    let count = 997;
+    let mut dissolve = EdgeDissolve::new(count, 1234);
+    dissolve.incoming(0.37, count);
+    let mut expected = alphas(&dissolve, count);
+    dissolve.freeze();
+    dissolve.freeze();
+    assert_eq!(expected, alphas(&dissolve, count));
+
+    for (progress, slots) in [(0.2, 1021), (0.4, 1171), (0.6, count)] {
+        let mut outgoing = EdgeDissolve::new(count, 1234);
+        outgoing.outgoing(progress, slots);
+        for (alpha, factor) in expected.iter_mut().zip(alphas(&outgoing, count)) {
+            *alpha *= factor;
+        }
+        dissolve.outgoing(progress, slots);
+        dissolve.freeze();
+        assert_eq!(expected, alphas(&dissolve, count));
+    }
+    dissolve.show_all();
     assert!(alphas(&dissolve, count).iter().all(|&alpha| alpha == 1.0));
 }

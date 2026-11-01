@@ -1,6 +1,6 @@
 //! Normal and POI-focused showcase modes, with the selector effect state.
 
-use std::{collections::VecDeque, f32::consts::TAU};
+use std::{collections::VecDeque, f32::consts::TAU, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
@@ -424,7 +424,7 @@ pub struct Showcase {
     fov: Spring,
     slide: Spring,
     target: Option<FocusPoi>,
-    pois: Vec<FocusPoi>,
+    pois: Arc<[FocusPoi]>,
     current: Option<usize>,
     recent: VecDeque<usize>,
     normal_flips: u32,
@@ -460,7 +460,7 @@ impl Showcase {
             fov: Spring::default(),
             slide: Spring::default(),
             target: None,
-            pois: Vec::new(),
+            pois: Arc::from([]),
             current: None,
             recent: VecDeque::with_capacity(RECENT_POIS),
             normal_flips: 0,
@@ -539,8 +539,8 @@ impl Showcase {
     }
 
     /// Replace the POIs available for the current model and restart the cycle.
-    pub fn set_model(&mut self, pois: Vec<FocusPoi>, part_count: u16) {
-        self.pois = pois;
+    pub fn set_model(&mut self, pois: impl Into<Arc<[FocusPoi]>>, part_count: u16) {
+        self.pois = pois.into();
         self.part_count = part_count;
         self.current = None;
         self.target = None;

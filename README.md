@@ -242,8 +242,14 @@ stay separate through attack movement and background subtraction; their positive
 changes combine afterward, preserving attacks hidden by opposite-side decay. The [detector evaluation guide](docs/detector-evaluation.md) documents
 the streaming music-library probe, resolution/gain comparisons, and validation.
 
-Models live in [`assets/models/`](assets/models/). The loader welds shared
-vertices and extracts boundary and crease edges. Model metadata and POI authoring
-are described in the [model specification](assets/models-spec/weapon_visualizer_spec.md).
+Models live in [`assets/models/`](assets/models/). Before the first animation
+update, the loader welds vertices, extracts boundary and crease edges, and prepares
+every model's wireframe, dissolve order, slide mask, POI bindings, and magazine
+preview. Switching reuses this shared data and two animation slots sized for the
+largest model, including motion history and CPU/GPU geometry buffers. This trades
+startup work and memory for cheaper switches. Changing the crease threshold
+refreshes all models immediately; animated projection, randomized captions, and
+viewport-dependent text layout still run during playback. Model metadata and POI
+authoring are described in the [model specification](assets/models-spec/weapon_visualizer_spec.md).
 
 Licensed under [GPL-2.0-only](LICENSE).

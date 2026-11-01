@@ -226,7 +226,7 @@ impl PoiScene {
                 self.key = Some(target.to_owned());
                 let vertices = visualizer.poi_vertices(target);
                 self.content = weapon.and_then(|weapon| {
-                    build_content(weapon, target, comedy_spec, &vertices, stage, rng)
+                    build_content(weapon, target, comedy_spec, vertices, stage, rng)
                 });
                 self.cards = self
                     .content

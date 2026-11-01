@@ -433,19 +433,27 @@ impl Renderer {
             self.uploaded_viewport = Some(viewport);
         }
         let ribbon_count = frame.ribbons.len();
+        let model_count = frame.model_lines.len();
+        let line_count = frame.lines.len();
+        // Reserve for every prepared model before drawing the first frame.
+        // An edge emits at most eight ribbon triangles, including crossings.
+        self.ensure_ribbon_capacity(
+            &device.device,
+            (frame.model_edge_capacity * 8).max(ribbon_count),
+        );
+        self.ensure_line_capacity(
+            &device.device,
+            frame.model_edge_capacity.max(model_count) + line_count.max(2048),
+        );
         if ribbon_count > 0 {
-            self.ensure_ribbon_capacity(&device.device, ribbon_count);
             device
                 .queue
                 .write_buffer(&self.ribbon_buffer, 0, bytemuck::cast_slice(frame.ribbons));
         }
-        let model_count = frame.model_lines.len();
-        let line_count = frame.lines.len();
         let total_lines = model_count + line_count;
         let line_stride = std::mem::size_of::<LineInstance>() as u64;
         let model_bytes = model_count as u64 * line_stride;
         if total_lines > 0 {
-            self.ensure_line_capacity(&device.device, total_lines);
             if model_count > 0 {
                 device.queue.write_buffer(
                     &self.line_buffer,
@@ -850,6 +858,7 @@ mod tests {
                         lines: &[],
                         model_lines: &[],
                         ribbons: &[],
+                        model_edge_capacity: 0,
                         model_composite: ModelComposite::Additive,
                     },
                     Some(&foreground),
@@ -970,6 +979,29 @@ mod tests {
         let mut visualizer = Visualizer::new();
         visualizer.set_samplerate(48_000);
         visualizer.set_model_motion(ModelMotion::Swept);
+        visualizer.load_models();
+        let startup_frame = visualizer.frame();
+        assert!(startup_frame.model_lines.is_empty() && startup_frame.ribbons.is_empty());
+        let mut encoder = device
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        renderer.draw(
+            device,
+            &mut encoder,
+            &background_view,
+            &target_view,
+            Size::new(f64::from(width), f64::from(height)),
+            startup_frame,
+            None,
+            None,
+            1.0,
+            None,
+        );
+        device.queue.submit([encoder.finish()]);
+        assert!(renderer.line_capacity >= startup_frame.model_edge_capacity + 2048);
+        assert!(renderer.ribbon_capacity >= startup_frame.model_edge_capacity * 8);
+        let prepared_line_buffer = renderer.line_buffer.clone();
+        let prepared_ribbon_buffer = renderer.ribbon_buffer.clone();
         let mut at = AudioTime::ZERO;
         for frame in 0..180 {
             let mut input = Vec::with_capacity(800);
@@ -1055,6 +1087,8 @@ mod tests {
             1.0,
             None,
         );
+        assert_eq!(renderer.line_buffer, prepared_line_buffer);
+        assert_eq!(renderer.ribbon_buffer, prepared_ribbon_buffer);
         let row_bytes = width * 4;
         let readback = device.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Visualizer test readback"),

@@ -424,6 +424,7 @@ impl Pipeline {
                 model_lines: &[],
                 ribbons: &[],
                 model_composite: frame.overlay.model_composite,
+                model_edge_capacity: 0,
             }
         } else {
             frame.overlay
@@ -503,8 +504,7 @@ fn select_heaviest(ui: &mut Ui) -> anyhow::Result<(String, usize)> {
         models.navigate(Adjustment::Increase);
     }
     visualizer.scene.show(
-        models.current(),
-        visualizer.crease_threshold,
+        models.current_prepared(),
         visualizer.model_motion,
         0.5,
         &visualizer.style_tuning,

@@ -148,6 +148,7 @@ fn measures_frozen_motion() -> anyhow::Result<()> {
             model_lines: &[],
             ribbons: &[],
             model_composite: ModelComposite::Additive,
+            model_edge_capacity: 0,
         };
         baselines.push(json!({"width":width,"height":height,"timing":timing_json(&gpu.measure(empty, samples)?)}));
         for &motion in &motions {

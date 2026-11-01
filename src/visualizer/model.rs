@@ -4,6 +4,7 @@ use std::{
     collections::{btree_map::Entry, BTreeMap, BTreeSet, VecDeque},
     fs,
     path::Path,
+    sync::Arc,
 };
 
 use anyhow::{ensure, Context};
@@ -12,6 +13,7 @@ use crate::frame_schedule::Adjustment;
 
 use super::{
     geometry::{Vec3, Wireframe},
+    prepared::PreparedModel,
     CreaseThreshold, Rng,
 };
 
@@ -278,6 +280,7 @@ impl EdgeKind {
 /// Every bundled model in catalog order, with a shuffled automatic cycle.
 pub struct ModelSet {
     models: Vec<Model>,
+    prepared: Vec<Arc<PreparedModel>>,
     current: usize,
     /// Model indices left in the current no-repeat cycle.
     bag: VecDeque<usize>,
@@ -301,6 +304,7 @@ impl ModelSet {
         let current = bag.pop_front().expect("the model directory is not empty");
         Ok(Self {
             models,
+            prepared: Vec::new(),
             current,
             bag,
         })
@@ -308,6 +312,34 @@ impl ModelSet {
 
     pub fn current(&self) -> &Model {
         &self.models[self.current]
+    }
+
+    /// Prepare every model before playback, or refresh all crease-dependent data.
+    pub fn prepare(&mut self, crease: CreaseThreshold, catalog: Option<&crate::weapon::Catalog>) {
+        self.prepared = self
+            .models
+            .iter()
+            .map(|model| Arc::new(PreparedModel::new(model, crease, catalog)))
+            .collect();
+    }
+
+    pub fn current_prepared(&self) -> &Arc<PreparedModel> {
+        &self.prepared[self.current]
+    }
+
+    pub fn prepared_models(&self) -> &[Arc<PreparedModel>] {
+        &self.prepared
+    }
+
+    pub fn prepared_capacity(&self) -> (usize, usize) {
+        self.prepared_models()
+            .iter()
+            .fold((0, 0), |(vertices, edges), model| {
+                (
+                    vertices.max(model.wireframe.vertex_count()),
+                    edges.max(model.wireframe.edges().len()),
+                )
+            })
     }
 
     /// Advances to the next model in the shuffled bag. Returns false when
@@ -755,6 +787,98 @@ fn triangle_normal(a: Vec3, b: Vec3, c: Vec3) -> Option<Vec3> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preparation_covers_the_catalog_and_navigation_reuses_it() -> anyhow::Result<()> {
+        let catalog = crate::weapon::Catalog::load()?;
+        let mut models = ModelSet::load(&mut Rng::new(0x5052_4550))?;
+        assert!(models.prepared_models().is_empty());
+        models.prepare(CreaseThreshold::MIN, Some(&catalog));
+        assert_eq!(models.prepared_models().len(), models.models.len());
+        let prepared = models.prepared_models().to_vec();
+        for (model, prepared) in models.models.iter().zip(&prepared) {
+            assert_eq!(&*prepared.name, model.name);
+            assert_eq!(prepared.slide_vertices.len(), model.vertices.len());
+            let expected = model.wireframe(CreaseThreshold::MIN);
+            assert_eq!(prepared.wireframe.edges(), expected.edges());
+            let weapon = catalog.weapons.get(&model.id);
+            let expected_pois = weapon.map_or(0, |weapon| {
+                weapon
+                    .poi
+                    .iter()
+                    .filter(|poi| model.anchor(&poi.anchor.name).is_some())
+                    .count()
+            });
+            assert_eq!(prepared.pois.len(), expected_pois);
+            assert_eq!(prepared.poi_vertices.len(), expected_pois);
+            for focus in prepared.pois.iter() {
+                let vertices = prepared
+                    .poi_vertices
+                    .get(&focus.id)
+                    .context("every prepared POI has vertex candidates")?;
+                assert!(!vertices.is_empty());
+                if focus.anchor.part.is_some() {
+                    let parts = model.node_parts(&focus.name);
+                    let expected: Vec<_> = model
+                        .vertex_parts
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, part)| parts.contains(part).then_some(index as u16))
+                        .collect();
+                    assert_eq!(&**vertices, expected);
+                } else {
+                    assert_eq!(vertices.len(), 1);
+                    let nearest = model.vertices[vertices[0] as usize] - focus.anchor.center;
+                    assert!(model.vertices.iter().all(|vertex| {
+                        (*vertex - focus.anchor.center).length() >= nearest.length()
+                    }));
+                }
+            }
+        }
+        for _ in 0..models.models.len() * 2 {
+            assert!(Arc::ptr_eq(
+                models.current_prepared(),
+                &prepared[models.current]
+            ));
+            models.navigate(Adjustment::Increase);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn crease_refresh_prepares_every_model_and_preserves_poi_candidates() -> anyhow::Result<()> {
+        let catalog = crate::weapon::Catalog::load()?;
+        let mut models = ModelSet::load(&mut Rng::new(0x4352_4541_5345))?;
+        models.prepare(CreaseThreshold::MIN, Some(&catalog));
+        let fine = models.prepared_models().to_vec();
+        models.prepare(CreaseThreshold::MAX, Some(&catalog));
+        let mut removed_edges = false;
+        for ((model, fine), coarse) in models
+            .models
+            .iter()
+            .zip(&fine)
+            .zip(models.prepared_models())
+        {
+            assert!(!Arc::ptr_eq(fine, coarse));
+            assert_eq!(fine.poi_vertices, coarse.poi_vertices);
+            assert_eq!(fine.slide_vertices, coarse.slide_vertices);
+            assert!(fine.wireframe.edges().len() >= coarse.wireframe.edges().len());
+            removed_edges |= fine.wireframe.edges().len() > coarse.wireframe.edges().len();
+            assert_eq!(
+                coarse.wireframe.edges(),
+                model.wireframe(CreaseThreshold::MAX).edges()
+            );
+            if let Some(icon) = &coarse.magazine_icon {
+                assert!(!icon.is_empty());
+                assert!(icon
+                    .iter()
+                    .flatten()
+                    .all(|coordinate| coordinate.is_finite() && coordinate.abs() <= 0.5001));
+            }
+        }
+        assert!(removed_edges);
+        Ok(())
+    }
 
     #[test]
     fn empty_anchor_radius_uses_the_full_scaled_diagonal() -> anyhow::Result<()> {

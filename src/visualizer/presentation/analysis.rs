@@ -12,10 +12,10 @@ use vello::{
 };
 
 use crate::visualizer::{
-    AggressionBands, ArrangementSetting, DebugHistory, DebugSample, Detector, DropStatus,
-    OnsetBinMeter, Parameter, PercussionDecision, PercussionReferencePoint,
-    PercussionReferenceSnapshot, PercussionSetting, RankInterval, SpectralAggression, Visualizer,
-    BAND_COUNT,
+    aggression::AGGRESSION_STIFFNESS_MAX, AggressionBands, ArrangementSetting, DebugHistory,
+    DebugSample, Detector, DropStatus, OnsetBinMeter, Parameter, PercussionDecision,
+    PercussionReferencePoint, PercussionReferenceSnapshot, PercussionSetting, RankInterval,
+    SpectralAggression, Visualizer, BAND_COUNT,
 };
 use crate::{
     text::{BlockAlign, Fonts, Text, TextPaint, TextPlan, UiFace},
@@ -266,7 +266,7 @@ impl AnalysisOverlay {
             ("aggression_lf_handle", "LF", 8.0, UiFace::SemiBold),
             ("aggression_mf_handle", "MF", 8.0, UiFace::SemiBold),
             ("aggression_warm", "0% WARM", 9.0, UiFace::Light),
-            ("aggression_full", "100% AGGRESSIVE", 9.0, UiFace::Light),
+            ("aggression_baseline", "100% / 1x", 9.0, UiFace::Light),
             (
                 "relaxation_hint",
                 "MORE RELAXATION = SOFTER SPRINGS ON WARM SOUND",
@@ -445,6 +445,17 @@ impl AnalysisOverlay {
         ] {
             self.cache(fonts, key, source.to_owned(), size, face);
         }
+        self.cache(
+            fonts,
+            "aggression_full",
+            format!(
+                "{:.0}% / {:.0}x MAX",
+                AGGRESSION_STIFFNESS_MAX * 100.0,
+                AGGRESSION_STIFFNESS_MAX,
+            ),
+            9.0,
+            UiFace::Light,
+        );
         self.cache(
             fonts,
             "aggression_value",
@@ -2953,7 +2964,16 @@ impl AnalysisOverlay {
             None,
             &meter,
         );
-        if !self.no_audio {
+        let baseline_x = meter.x0 + meter.width() / f64::from(AGGRESSION_STIFFNESS_MAX);
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            palette.accent.with_alpha(0.12),
+            None,
+            &Rect::new(baseline_x, meter.y0, meter.x1, meter.y1),
+        );
+        // Clip only the painted bar; the readout retains the raw envelope value.
+        if !self.no_audio && self.aggression.value > 0.0 {
             scene.fill(
                 Fill::NonZero,
                 Affine::IDENTITY,
@@ -2962,36 +2982,39 @@ impl AnalysisOverlay {
                 &Rect::new(
                     meter.x0,
                     meter.y0,
-                    meter.x0 + f64::from(self.aggression.value) * meter.width(),
+                    meter.x0
+                        + f64::from(self.aggression.value / AGGRESSION_STIFFNESS_MAX)
+                            * meter.width(),
                     meter.y1,
-                ),
+                )
+                .intersect(meter),
             );
         }
-        rule(
-            scene,
-            Point::new(meter.center().x, meter.y0 - stage.px(2.0)),
-            Point::new(meter.center().x, meter.y1 + stage.px(2.0)),
-            palette.muted.with_alpha(0.7),
-            stage.px(0.7),
-        );
-        self.label(
-            scene,
-            "aggression_warm",
-            panel,
-            0.0,
-            192.0,
-            stage,
-            palette.muted,
-        );
-        self.label(
-            scene,
-            "aggression_full",
-            panel,
-            panel.width() / stage.unit - 89.0,
-            192.0,
-            stage,
-            palette.muted,
-        );
+        for x in [meter.x0, baseline_x, meter.x1] {
+            rule(
+                scene,
+                Point::new(x, meter.y0 - stage.px(2.0)),
+                Point::new(x, meter.y1 + stage.px(2.0)),
+                palette.muted.with_alpha(0.7),
+                stage.px(0.7),
+            );
+        }
+        for (key, x, anchor) in [
+            ("aggression_warm", meter.x0, 0.0),
+            ("aggression_baseline", baseline_x, 0.5),
+            ("aggression_full", meter.x1, 1.0),
+        ] {
+            let width = self.labels.get(key).map_or(0.0, |label| label.text.width());
+            self.label(
+                scene,
+                key,
+                panel,
+                (x - panel.x0) / stage.unit - width * anchor,
+                192.0,
+                stage,
+                palette.muted,
+            );
+        }
         self.label(
             scene,
             "aggression_lf",

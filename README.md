@@ -45,28 +45,36 @@ state. The right instrument shows regional attack candidates,
 a joint sharpness–energy heatmap and the envelope used for each decision.
 The spectral shape graph also shows **Aggression**: LF is the maximum of the
 selected low bands, MF is the median of the selected mid bands, and
-`aggression = clamp((LF - MF + 1) / 2, 0, 1)` on the graph's −1 to +1 scale.
+`aggression = (LF - MF + 1) / 2` on the graph's −1 to +1 scale.
 Whenever the fast LF envelope exceeds the slow one, their positive separation
 provides a boost: `max((fast - slow) / fast, 0)`, using the LF measurement floor.
 Its strength is multiplied by `clamp(LF - MF + 1, 0, 1)`: no boost when LF is
 1.0 or more below MF, half strength at −0.5, and full strength when LF equals
 or exceeds MF. This compares the actual envelopes, independently of the
-**Bass attack** offset or gap/drop gates. The combined aggression is capped at
-100%; **LF boost** shows the weighted addition. **LF boost gain** beside
+**Bass attack** offset or gap/drop gates. **LF boost** shows the weighted
+addition. **LF boost gain** beside
 **Warm sound relaxation** scales that addition from 0× (off) through 1×
 (the default) to 4×. Spectral attenuation still applies at every gain, and
 the gain saves automatically. The displayed value and spring
 stiffness follow an envelope with immediate rise and a slow exponential fall
 (3-second time constant), so brief bass gaps preserve aggression. It advances
-with the audio and resets when capture restarts.
+with the audio and resets when capture restarts. Shape aggression, amplified
+LF boost and the envelope stay unclamped; the percentage readouts can exceed
+100% or fall below 0%. Above 100%, spring stiffness follows aggression directly:
+150% means 1.5× and 200% means 2×, with a ceiling of 2× the configured stiffness.
+The meter spans 0–200%, marking the 100% baseline and the 2× ceiling.
+Larger raw peaks hold this ceiling for longer as the envelope falls.
 Drag the colored LF/MF boundary handles to select whole bands. LF defaults to
 the lowest four (32–151 Hz), and MF to four bands centered near 590, 870,
 1,280 and 1,890 Hz (485 Hz–2.3 kHz). **Relaxation** controls how much warm sound
 softens the model flip and POI entry, look-at point, orbit and FOV springs.
 At the default 75%, fully warm sound uses 25% of the configured stiffness;
-full aggression preserves it. Zero disables relaxation, and the strongest
-setting keeps at least 5% stiffness so springs continue moving. Damping stays
-at its configured value. The ranges and relaxation amount save automatically.
+100% aggression uses the configured stiffness. Zero disables the warm-sound
+reduction; overdrive above 100% remains active. The strongest relaxation keeps
+at least 5% stiffness so springs continue moving. Damping stays at its configured
+value during relaxation and scales by the square root of the stiffness multiplier
+during overdrive, preserving its damping ratio. The ranges, gain and relaxation
+amount save automatically.
 The energy-loss graph compares the smoothed mix with its learned reference:
 positive dB means quieter, and the solid loss trace must rise above the dashed
 requirement. **Mix loss hold** can arm the gap from this loss alone, without a

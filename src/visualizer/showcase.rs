@@ -5,6 +5,7 @@ use std::{collections::VecDeque, f32::consts::TAU};
 use serde::{Deserialize, Serialize};
 
 use super::{
+    aggression::AGGRESSION_STIFFNESS_MAX,
     computation::validate_value,
     detection::{
         Spring, SPRING_DAMPING_MAX, SPRING_DAMPING_MIN, SPRING_STIFFNESS_MAX, SPRING_STIFFNESS_MIN,
@@ -800,33 +801,32 @@ impl Showcase {
         self.advance_with_stiffness_scale(dt, 1.0);
     }
 
-    /// Relax the camera and POI springs without changing their authored tuning.
-    /// Damping stays fixed so lower stiffness produces a more sluggish response.
+    /// Scale the camera and POI springs without changing their authored tuning.
+    /// Overdrive compensates damping to retain its bounce; relaxation keeps
+    /// damping fixed for a more sluggish response.
     pub fn advance_with_stiffness_scale(&mut self, dt: f32, stiffness_scale: f32) {
         assert!(stiffness_scale.is_finite(), "spring scale must be finite");
-        let stiffness_scale = stiffness_scale.clamp(0.05, 1.0);
+        let stiffness_scale = stiffness_scale.clamp(0.05, AGGRESSION_STIFFNESS_MAX);
+        let damping_scale = stiffness_scale.max(1.0).sqrt();
         let settings = &self.settings;
         let focus_stiffness = settings.focus_stiffness * stiffness_scale;
         let motion_stiffness = settings.motion_stiffness * stiffness_scale;
         let orbit_stiffness = settings.orbit_stiffness * stiffness_scale;
         let dolly_stiffness = settings.dolly_stiffness * stiffness_scale;
-        self.blend
-            .advance(dt, focus_stiffness, settings.focus_damping);
-        self.motion
-            .advance(dt, motion_stiffness, settings.motion_damping);
+        let focus_damping = settings.focus_damping * damping_scale;
+        let motion_damping = settings.motion_damping * damping_scale;
+        let orbit_damping = settings.orbit_damping * damping_scale;
+        let dolly_damping = settings.dolly_damping * damping_scale;
+        self.blend.advance(dt, focus_stiffness, focus_damping);
+        self.motion.advance(dt, motion_stiffness, motion_damping);
         for spring in &mut self.center {
-            spring.advance(dt, focus_stiffness, settings.focus_damping);
+            spring.advance(dt, focus_stiffness, focus_damping);
         }
-        self.radius
-            .advance(dt, focus_stiffness, settings.focus_damping);
-        self.orbit_yaw
-            .advance(dt, orbit_stiffness, settings.orbit_damping);
-        self.orbit_pitch
-            .advance(dt, orbit_stiffness, settings.orbit_damping);
-        self.fov
-            .advance(dt, dolly_stiffness, settings.dolly_damping);
-        self.slide
-            .advance(dt, focus_stiffness, settings.focus_damping);
+        self.radius.advance(dt, focus_stiffness, focus_damping);
+        self.orbit_yaw.advance(dt, orbit_stiffness, orbit_damping);
+        self.orbit_pitch.advance(dt, orbit_stiffness, orbit_damping);
+        self.fov.advance(dt, dolly_stiffness, dolly_damping);
+        self.slide.advance(dt, focus_stiffness, focus_damping);
         if self.mode == ShowcaseMode::Poi
             && !self.entry_settled
             && !self.focus_entry_held
@@ -1637,19 +1637,25 @@ mod tests {
         };
         let mut normal = make_showcase();
         let mut relaxed = make_showcase();
+        let mut overdriven = make_showcase();
         let mut normal_rng = Rng::new(81);
         let mut relaxed_rng = Rng::new(81);
+        let mut overdriven_rng = Rng::new(81);
         normal.enter_focus(&mut normal_rng, 0.75);
         relaxed.enter_focus(&mut relaxed_rng, 0.75);
+        overdriven.enter_focus(&mut overdriven_rng, 0.75);
         for _ in 0..240 {
             normal.advance(1.0 / 60.0);
             relaxed.advance(1.0 / 60.0);
+            overdriven.advance(1.0 / 60.0);
         }
         normal.select_next_poi(&mut normal_rng);
         relaxed.select_next_poi(&mut relaxed_rng);
+        overdriven.select_next_poi(&mut overdriven_rng);
         for _ in 0..6 {
             normal.advance(1.0 / 60.0);
             relaxed.advance_with_stiffness_scale(1.0 / 60.0, 0.25);
+            overdriven.advance_with_stiffness_scale(1.0 / 60.0, 2.0);
         }
         for (normal, relaxed) in normal
             .center
@@ -1663,6 +1669,81 @@ mod tests {
                 "the look-at point and framing must approach a new POI more slowly"
             );
         }
+        for (normal, overdriven) in normal
+            .center
+            .iter()
+            .zip(&overdriven.center)
+            .chain(std::iter::once((&normal.radius, &overdriven.radius)))
+        {
+            assert!(
+                (overdriven.target() - overdriven.value()).abs()
+                    < (normal.target() - normal.value()).abs(),
+                "overdrive moves the look-at point and framing to a new POI faster"
+            );
+        }
+    }
+
+    #[test]
+    fn overdrive_speeds_camera_entry_with_the_same_bounce_and_caps_at_two() {
+        let mut normal = showcase();
+        let mut overdriven = showcase();
+        let mut capped = showcase();
+        let mut faster_clock = showcase();
+        let tuning = normal.settings.clone();
+        for showcase in [&mut normal, &mut overdriven, &mut capped, &mut faster_clock] {
+            assert!(showcase.enter_focus(&mut Rng::new(83), 0.75));
+            // Give each camera spring a known, nonzero transition.
+            showcase.orbit_yaw.set_target(0.4);
+            showcase.orbit_pitch.set_target(-0.25);
+            showcase.fov.set_target(0.6);
+        }
+        let speed = 2.0_f32.sqrt();
+        for _ in 0..32 {
+            normal.advance(1.0 / 480.0);
+            overdriven.advance_with_stiffness_scale(1.0 / 480.0, 2.0);
+            capped.advance_with_stiffness_scale(1.0 / 480.0, 8.0);
+            faster_clock.advance(speed / 480.0);
+        }
+        for (normal, overdriven, capped, faster_clock) in [
+            (
+                &normal.blend,
+                &overdriven.blend,
+                &capped.blend,
+                &faster_clock.blend,
+            ),
+            (
+                &normal.motion,
+                &overdriven.motion,
+                &capped.motion,
+                &faster_clock.motion,
+            ),
+            (
+                &normal.orbit_yaw,
+                &overdriven.orbit_yaw,
+                &capped.orbit_yaw,
+                &faster_clock.orbit_yaw,
+            ),
+            (
+                &normal.orbit_pitch,
+                &overdriven.orbit_pitch,
+                &capped.orbit_pitch,
+                &faster_clock.orbit_pitch,
+            ),
+            (&normal.fov, &overdriven.fov, &capped.fov, &faster_clock.fov),
+        ] {
+            assert!(
+                (overdriven.target() - overdriven.value()).abs()
+                    < (normal.target() - normal.value()).abs(),
+                "overdrive must approach the entry target faster"
+            );
+            assert_eq!(overdriven.value(), capped.value());
+            assert!(
+                (overdriven.value() - faster_clock.value()).abs() < 1e-5,
+                "compensated damping preserves the response at a faster clock"
+            );
+        }
+        assert_eq!(overdriven.settings, tuning);
+        assert_eq!(capped.settings, tuning);
     }
 
     #[test]

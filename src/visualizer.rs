@@ -3414,7 +3414,7 @@ impl Visualizer {
         self.flip.advance(
             dt,
             self.detectors.flip_stiffness * stiffness_scale,
-            self.detectors.flip_damping,
+            self.detectors.flip_damping * stiffness_scale.max(1.0).sqrt(),
         );
         // A selector entry and a held POI entry both wait for the flip to
         // finish upright before they can start. Every mesh-focus effect is
@@ -5249,7 +5249,8 @@ mod tests {
         assert!(
             (quiet.spectral_aggression().value - loud.spectral_aggression().value).abs() < 1e-6
         );
-        assert_eq!(quiet.spectral_aggression().value, 0.0);
+        assert!(quiet.spectral_aggression().value < 0.0);
+        assert_eq!(quiet.spectral_stiffness_scale(), 0.25);
         quiet.reset_audio();
         assert_eq!(quiet.spectral_aggression(), SpectralAggression::default());
     }
@@ -5268,7 +5269,8 @@ mod tests {
             ..Spectrum::default()
         };
         visualizer.observe(spectrum(1.0, 0.01), 0.005);
-        assert_eq!(visualizer.spectral_aggression().value, 1.0);
+        let peak = visualizer.spectral_aggression().value;
+        assert!(peak > 1.0);
         for _ in 0..50 {
             visualizer.observe(spectrum(0.01, 1.0), 0.005);
         }
@@ -5278,14 +5280,17 @@ mod tests {
         );
         let enveloped = visualizer.spectral_aggression();
         assert!(raw.value < 0.2, "bass has disappeared for 250 ms");
-        assert!(enveloped.value > 0.9, "the gap must retain aggression");
+        assert!(
+            enveloped.value > peak * 0.9,
+            "the gap must retain aggression"
+        );
         assert_eq!(enveloped.lf_level, raw.lf_level);
         assert_eq!(enveloped.mf_level, raw.mf_level);
         assert!(visualizer.spectral_stiffness_scale() > 0.925);
         for _ in 0..10 {
             assert_eq!(visualizer.spectral_aggression(), enveloped);
         }
-        visualizer.observe(spectrum(1.0, 0.01), 0.25);
+        visualizer.observe(spectrum(4.0, 0.01), 0.25);
         let risen = visualizer.instantaneous_aggression();
         assert!(risen.value > enveloped.value);
         assert_eq!(visualizer.spectral_aggression().value, risen.value);
@@ -5296,7 +5301,7 @@ mod tests {
             SpectralAggression::default()
         );
         visualizer.observe(spectrum(0.01, 1.0), 0.005);
-        assert_eq!(visualizer.spectral_aggression().value, 0.0);
+        assert!(visualizer.spectral_aggression().value < 0.0);
     }
 
     #[test]
@@ -5341,6 +5346,69 @@ mod tests {
     }
 
     #[test]
+    fn aggression_peaks_above_one_survive_until_the_spring_control_boundary() {
+        let mut visualizer = Visualizer::new();
+        visualizer.set_parameter(Parameter::LfBoostGain, 4.0);
+        let spectrum = |level| Spectrum {
+            linear_bands: [level; BAND_COUNT],
+            rms: 0.2,
+            ..Spectrum::default()
+        };
+        visualizer.observe(spectrum(0.1), 0.01);
+        visualizer.observe(spectrum(1.0), 0.01);
+        let peak = visualizer.spectral_aggression();
+        assert!(peak.lf_boost > 1.0);
+        assert_eq!(peak.value, 0.5 + peak.lf_boost);
+        assert_eq!(visualizer.spectral_stiffness_scale(), 2.0);
+        for _ in 0..25 {
+            visualizer.observe(spectrum(0.1), 0.01);
+        }
+        let held = visualizer.spectral_aggression();
+        assert_eq!(held.lf_boost, 0.0);
+        assert!(held.value > 1.0 && held.value < peak.value);
+        assert_eq!(visualizer.spectral_stiffness_scale(), 2.0);
+        for _ in 0..600 {
+            visualizer.observe(spectrum(0.1), 0.01);
+        }
+        assert!(visualizer.spectral_aggression().value < 1.0);
+        assert!(visualizer.spectral_stiffness_scale() < 1.0);
+    }
+
+    #[test]
+    fn aggression_overdrive_doubles_flip_stiffness_with_damping_compensation() {
+        let mut visualizer = loaded_visualizer();
+        visualizer.set_detector_settings(DetectorSettings {
+            snare_flip_every: 1,
+            ..DetectorSettings::default()
+        });
+        visualizer.aggression_envelope.observe(3.0, 0.0);
+        visualizer.handle_action(Action::Snare, 0.0, 0.75);
+        let tuning = visualizer.tuning();
+        let settings = visualizer.detectors.clone();
+        let mut expected = visualizer.flip;
+        expected.set_target(visualizer.flip_target());
+        expected.advance(
+            0.05,
+            settings.flip_stiffness * 2.0,
+            settings.flip_damping * 2.0_f32.sqrt(),
+        );
+        visualizer.update(
+            AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(0.05)),
+            ShutterFrames::try_from(1.0).unwrap(),
+            0.05,
+            &Palette::from_theme(ThemeId::default()),
+            (1280.0, 720.0),
+            1.0,
+            1.0,
+        );
+        assert_eq!(visualizer.spectral_stiffness_scale(), 2.0);
+        assert_eq!(visualizer.flip.value(), expected.value());
+        assert_eq!(visualizer.flip.velocity(), expected.velocity());
+        assert_eq!(visualizer.tuning(), tuning);
+        assert_eq!(visualizer.detectors, settings);
+    }
+
+    #[test]
     fn lf_boost_gain_amplifies_only_the_envelope_addition() {
         for gain in [0.0, 1.0, 4.0] {
             let mut visualizer = Visualizer::new();
@@ -5382,7 +5450,8 @@ mod tests {
         assert!(status.bass_hit > 0.2, "the LF envelopes have crossed");
         assert!(aggression.lf_level - aggression.mf_level < -1.0);
         assert_eq!(aggression.lf_boost, 0.0);
-        assert_eq!(aggression.value, 0.0);
+        assert!(aggression.value < 0.0);
+        assert_eq!(visualizer.spectral_stiffness_scale(), 0.25);
     }
 
     #[test]
@@ -5423,7 +5492,10 @@ mod tests {
             assert_eq!(visualizer.detectors.flip_stiffness, stiffness);
         }
         assert_eq!(warm.spectral_stiffness_scale(), 0.25);
-        assert_eq!(aggressive.spectral_stiffness_scale(), 1.0);
+        assert_eq!(
+            aggressive.spectral_stiffness_scale(),
+            aggressive.spectral_aggression().value
+        );
         assert!(warm.flip.value() > 0.0);
         assert!(warm.flip.value() < aggressive.flip.value() * 0.5);
         warm.set_parameter(Parameter::SpectralRelaxation, 0.0);

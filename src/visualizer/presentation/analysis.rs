@@ -810,6 +810,7 @@ impl AnalysisOverlay {
             reference.thresholds.filters.min_sharpness,
             reference.thresholds.filters.attack_level,
         ) {
+            (true, true) if reference.thresholds.cloud_enabled => "DASH: FLOOR ENERGY OR SHARPNESS",
             (true, true) => "DASH: TRIGGER FLOORS",
             (true, false) => "DASH: SHARPNESS FLOOR",
             (false, true) => "DASH: ENERGY FLOOR",
@@ -851,15 +852,19 @@ impl AnalysisOverlay {
             || filters.output_prominence
             || filters.mix_rms
             || filters.output_interval;
+        let shaded_features = if reference.thresholds.cloud_enabled {
+            "SHADE: ENERGY OR SHARPNESS FLOORS"
+        } else {
+            "SHADE: SHARPNESS + ENERGY"
+        };
         self.cache(
             fonts,
             "heatmap_gates",
             if other_filters {
-                "SHADE: SHARPNESS + ENERGY ONLY · OTHER ENABLED FILTERS STILL APPLY"
+                format!("{shaded_features} · OTHER ENABLED FILTERS STILL APPLY")
             } else {
-                "SHADE: SHARPNESS + ENERGY · NO OTHER OPTIONAL FILTERS ENABLED"
-            }
-            .to_owned(),
+                format!("{shaded_features} · NO OTHER OPTIONAL FILTERS ENABLED")
+            },
             8.6,
             UiFace::Light,
         );
@@ -874,6 +879,13 @@ impl AnalysisOverlay {
             fonts,
             "heatmap_cloud",
             heatmap_cloud_caption(&reference),
+            8.8,
+            UiFace::SemiBold,
+        );
+        self.cache(
+            fonts,
+            "heatmap_sharpness_cloud",
+            heatmap_sharpness_cloud_caption(&reference),
             8.8,
             UiFace::SemiBold,
         );
@@ -1864,7 +1876,7 @@ impl AnalysisOverlay {
             .heatmap_bounds()
             .is_some_and(|rect| rect.contains(point))
         {
-            return Some("Density counts current learned pairs. The cloud bracket spans energy buckets with enough observations; sparse outliers cannot stretch it. Dynamic cloud floor keeps the chosen top percentage of its height, including louder attacks above the bracket. Filled markers are original triggers; hollow markers were learned only. Faint expired markers no longer affect thresholds. Other enabled filters still apply.");
+            return Some("Density counts current learned pairs. The cloud boundary uses energy rows and sharpness columns with enough observations; sparse outliers cannot stretch it. Dynamic cloud mode accepts the chosen top energy area OR top sharpness area, including attacks beyond either upper bound. The shaded union still obeys enabled input and percentile filters. Filled markers are original triggers; hollow markers were learned only. Faint expired markers no longer affect thresholds. Other enabled filters still apply.");
         }
         None
     }
@@ -2984,21 +2996,20 @@ impl AnalysisOverlay {
             return;
         }
         let thresholds = reference.thresholds;
-        let effective = heatmap_position(
-            plot,
-            &reference,
-            thresholds.sharpness_effective_bound.unwrap_or(0.0),
-            thresholds.energy_effective_bound.unwrap_or(0.0),
-        );
-        // This rectangle describes only the two feature conditions. Original
-        // marker outcomes also include quality, mix RMS, prominence and spacing.
-        scene.fill(
-            Fill::NonZero,
-            Affine::IDENTITY,
-            palette.ink.with_alpha(0.075),
-            None,
-            &Rect::new(effective.x, plot.y0, plot.x1, effective.y),
-        );
+        // The disjoint rectangles shade the floor union at one opacity. Other
+        // independent feature filters clip it before quality/RMS/spacing gates.
+        for area in heatmap_feature_areas(plot, &reference)
+            .into_iter()
+            .flatten()
+        {
+            scene.fill(
+                Fill::NonZero,
+                Affine::IDENTITY,
+                palette.ink.with_alpha(0.075),
+                None,
+                &area,
+            );
+        }
         let peak = reference
             .joint_histogram
             .iter()
@@ -3050,37 +3061,51 @@ impl AnalysisOverlay {
         }
         if let Some(cloud) = heatmap_cloud_bounds(plot, &reference) {
             let color = palette.ink.with_alpha(0.6);
-            for y in [cloud.y0, cloud.y1] {
-                segmented_rule(
-                    scene,
-                    (cloud.x0, y).into(),
-                    (cloud.x1, y).into(),
-                    color,
-                    stage.px(1.0),
-                    stage.px(8.0),
-                    stage.px(4.0),
-                );
-                for x in [cloud.x0, cloud.x1] {
-                    rule(
+            if reference.cloud_boundary.is_some() {
+                for y in [cloud.y0, cloud.y1] {
+                    segmented_rule(
                         scene,
-                        (x, (y - stage.px(4.0)).max(plot.y0)).into(),
-                        (x, (y + stage.px(4.0)).min(plot.y1)).into(),
+                        (cloud.x0, y).into(),
+                        (cloud.x1, y).into(),
                         color,
-                        stage.px(1.2),
+                        stage.px(1.0),
+                        stage.px(8.0),
+                        stage.px(4.0),
                     );
                 }
             }
-            if let Some(label) = self.labels.get("heatmap_cloud") {
-                let y = (cloud.y0 - stage.px(4.0)).max(plot.y0 + stage.px(11.0));
-                let scale = ((plot.width() - stage.px(8.0))
-                    / (label.text.width() * stage.unit).max(1.0))
-                .min(1.0);
-                label.text.draw_left(
-                    scene,
-                    Affine::translate((plot.x0 + stage.px(4.0), y))
-                        * Affine::scale(stage.unit * scale),
-                    palette.ink.with_alpha(0.9),
-                );
+            if reference.sharpness_cloud_boundary.is_some() {
+                for x in [cloud.x0, cloud.x1] {
+                    segmented_rule(
+                        scene,
+                        (x, cloud.y0).into(),
+                        (x, cloud.y1).into(),
+                        color,
+                        stage.px(1.0),
+                        stage.px(8.0),
+                        stage.px(4.0),
+                    );
+                }
+            }
+            for (index, key) in ["heatmap_cloud", "heatmap_sharpness_cloud"]
+                .into_iter()
+                .enumerate()
+            {
+                if let Some(label) = self.labels.get(key) {
+                    let y = (cloud.y0 - stage.px(4.0))
+                        .max(plot.y0 + stage.px(11.0))
+                        .min(plot.y1 - stage.px(14.0))
+                        + stage.px(index as f64 * 11.0);
+                    let scale = ((plot.width() - stage.px(8.0))
+                        / (label.text.width() * stage.unit).max(1.0))
+                    .min(1.0);
+                    label.text.draw_left(
+                        scene,
+                        Affine::translate((plot.x0 + stage.px(4.0), y))
+                            * Affine::scale(stage.unit * scale),
+                        palette.ink.with_alpha(0.9),
+                    );
+                }
             }
         }
         // Admission has an energy floor but no sharpness-percentile condition.
@@ -3099,7 +3124,11 @@ impl AnalysisOverlay {
         let physical = heatmap_position(
             plot,
             &reference,
-            thresholds.min_sharpness,
+            if thresholds.cloud_enabled {
+                thresholds.trigger_sharpness_floor
+            } else {
+                thresholds.min_sharpness
+            },
             thresholds.trigger_energy_floor,
         );
         if thresholds.filters.min_sharpness {
@@ -3475,6 +3504,7 @@ fn decision_caption(reason: crate::visualizer::DecisionReason) -> &'static str {
         R::MixRms => "music too quiet",
         R::SharpnessPercentile => "below recent sharpness cutoff",
         R::EnergyPercentile => "below recent energy cutoff",
+        R::CloudRegion => "below energy and sharpness cloud floors",
         R::Refractory => "too soon after previous trigger",
         R::Capacity => "too many attacks pending",
     }
@@ -3555,6 +3585,7 @@ fn percussion_control_groups() -> [(&'static str, &'static str, &'static [Percus
                 P::MinOutputProminence,
                 P::MinAttackDb,
                 P::CloudTopPercent,
+                P::CloudSharpnessTopPercent,
                 P::CloudMinCount,
                 P::OutputRmsDb,
                 P::SharpnessPercentile,
@@ -3574,11 +3605,105 @@ fn percussion_row_height() -> f64 {
     ((CONTROL_PANEL_HEIGHT - 28.0 - groups.len() as f64 * 18.0 - 10.0) / rows as f64).min(24.0)
 }
 
+fn heatmap_feature_areas(plot: Rect, reference: &PercussionReferenceSnapshot) -> [Option<Rect>; 2] {
+    let thresholds = reference.thresholds;
+    let effective = heatmap_position(
+        plot,
+        reference,
+        thresholds.sharpness_effective_bound.unwrap_or(0.0),
+        thresholds.energy_effective_bound.unwrap_or(0.0),
+    );
+    let base = Rect::new(effective.x, plot.y0, plot.x1, effective.y);
+    let nonempty = |rect: Rect| (rect.width() > 0.0 && rect.height() > 0.0).then_some(rect);
+    if !thresholds.cloud_enabled {
+        return [nonempty(base), None];
+    }
+    let floor = heatmap_position(
+        plot,
+        reference,
+        thresholds.trigger_sharpness_floor,
+        thresholds.trigger_energy_floor,
+    );
+    match (
+        thresholds.filters.attack_level,
+        thresholds.filters.min_sharpness,
+    ) {
+        (false, false) => [nonempty(base), None],
+        (true, false) => [
+            nonempty(Rect::new(base.x0, base.y0, base.x1, base.y1.min(floor.y))),
+            None,
+        ],
+        (false, true) => [
+            nonempty(Rect::new(base.x0.max(floor.x), base.y0, base.x1, base.y1)),
+            None,
+        ],
+        (true, true) => {
+            let energy_bottom = base.y1.min(floor.y);
+            [
+                nonempty(Rect::new(base.x0, base.y0, base.x1, energy_bottom)),
+                nonempty(Rect::new(
+                    base.x0.max(floor.x),
+                    energy_bottom,
+                    base.x1,
+                    base.y1,
+                )),
+            ]
+        }
+    }
+}
+
 fn heatmap_cloud_bounds(plot: Rect, reference: &PercussionReferenceSnapshot) -> Option<Rect> {
-    let cloud = reference.cloud_boundary?;
-    let top = heatmap_position(plot, reference, 0.0, cloud.energy_max).y;
-    let bottom = heatmap_position(plot, reference, 0.0, cloud.energy_min).y;
-    Some(Rect::new(plot.x0, top, plot.x1, bottom))
+    if reference.cloud_boundary.is_none() && reference.sharpness_cloud_boundary.is_none() {
+        return None;
+    }
+    let (top, bottom) = reference
+        .cloud_boundary
+        .map_or((plot.y0, plot.y1), |cloud| {
+            (
+                heatmap_position(plot, reference, 0.0, cloud.energy_max).y,
+                heatmap_position(plot, reference, 0.0, cloud.energy_min).y,
+            )
+        });
+    let (left, right) = reference
+        .sharpness_cloud_boundary
+        .map_or((plot.x0, plot.x1), |cloud| {
+            (
+                heatmap_position(plot, reference, cloud.sharpness_min, 0.0).x,
+                heatmap_position(plot, reference, cloud.sharpness_max, 0.0).x,
+            )
+        });
+    Some(Rect::new(left, top, right, bottom))
+}
+
+fn heatmap_sharpness_cloud_caption(reference: &PercussionReferenceSnapshot) -> String {
+    reference
+        .sharpness_cloud_boundary
+        .map_or_else(String::new, |boundary| {
+            let thresholds = reference.thresholds;
+            let floor = if !thresholds.filters.min_sharpness {
+                "FLOOR OFF".to_owned()
+            } else {
+                format!(
+                    "{} FLOOR {:.3}",
+                    if thresholds.sharpness_cloud_active {
+                        "DYNAMIC"
+                    } else {
+                        "FIXED"
+                    },
+                    thresholds.trigger_sharpness_floor,
+                )
+            };
+            format!(
+                "SHARPNESS CLOUD {:.2}..{:.2} · {floor}{}",
+                boundary.sharpness_min,
+                boundary.sharpness_max,
+                if thresholds.cloud_enabled {
+                    " · ENERGY OR SHARPNESS"
+                } else {
+                    ""
+                },
+            )
+        })
 }
 
 fn heatmap_cloud_caption(reference: &PercussionReferenceSnapshot) -> String {
@@ -4030,7 +4155,7 @@ mod tests {
                 .iter()
                 .filter(|slider| matches!(slider.parameter, Parameter::Percussion(..)))
                 .count(),
-            26
+            27
         );
         let panel = overlay.onset_controls.unwrap().rect;
         assert!(overlay
@@ -4210,6 +4335,112 @@ mod tests {
         reference.thresholds.feature_seconds = 0.024;
         assert!(heatmap_cloud_bounds(plot, &reference).is_none());
         assert_eq!(heatmap_cloud_bounds(plot, &saved), Some(cloud));
+    }
+
+    #[test]
+    fn heatmap_cloud_tracks_both_axes_and_preserves_saved_sharpness_bounds() {
+        let plot = Rect::new(10.0, 20.0, 410.0, 220.0);
+        let mut reference = PercussionReferenceSnapshot::default();
+        reference.thresholds.feature_seconds = 0.044;
+        reference.sharpness_cloud_boundary = Some(crate::visualizer::SharpnessCloudBoundary {
+            sharpness_min: 0.2,
+            sharpness_max: 0.8,
+        });
+        reference.thresholds.trigger_sharpness_floor = 0.65;
+        reference.thresholds.sharpness_cloud_active = true;
+        reference.thresholds.cloud_enabled = true;
+        let sharpness_only = heatmap_cloud_bounds(plot, &reference).unwrap();
+        assert!((sharpness_only.x0 - 90.0).abs() < 1e-5);
+        assert!((sharpness_only.x1 - 330.0).abs() < 1e-5);
+        assert_eq!((sharpness_only.y0, sharpness_only.y1), (plot.y0, plot.y1));
+        reference.cloud_boundary = Some(crate::visualizer::CloudBoundary {
+            energy_min: 0.044 * 1e-6,
+            energy_max: 0.044 * 1e-2,
+        });
+        let saved = reference;
+        let cloud = heatmap_cloud_bounds(plot, &saved).unwrap();
+        assert_eq!((cloud.x0, cloud.x1), (sharpness_only.x0, sharpness_only.x1));
+        assert!((cloud.y0 - 70.0).abs() < 1e-5);
+        assert!((cloud.y1 - 170.0).abs() < 1e-5);
+        let caption = heatmap_sharpness_cloud_caption(&saved);
+        assert!(caption.contains("SHARPNESS CLOUD 0.20..0.80"));
+        assert!(caption.contains("DYNAMIC FLOOR 0.650"));
+        assert!(caption.contains("ENERGY OR SHARPNESS"));
+        reference.sharpness_cloud_boundary = None;
+        reference.thresholds.trigger_sharpness_floor = 0.4;
+        assert_eq!(heatmap_cloud_bounds(plot, &reference).unwrap().x0, plot.x0);
+        assert!(heatmap_sharpness_cloud_caption(&reference).is_empty());
+        assert_eq!(heatmap_cloud_bounds(plot, &saved), Some(cloud));
+        assert_eq!(heatmap_sharpness_cloud_caption(&saved), caption);
+    }
+
+    #[test]
+    fn heatmap_cloud_shades_energy_or_sharpness_and_clips_independent_filters() {
+        let plot = Rect::new(10.0, 20.0, 410.0, 220.0);
+        let mut reference = PercussionReferenceSnapshot::default();
+        reference.thresholds.feature_seconds = 0.044;
+        reference.thresholds.cloud_enabled = true;
+        reference.thresholds.trigger_sharpness_floor = 0.75;
+        reference.thresholds.trigger_energy_floor = 0.044 * 1e-3;
+        let contains = |reference: &PercussionReferenceSnapshot, sharpness, db: f32| {
+            let point =
+                heatmap_position(plot, reference, sharpness, 0.044 * 10.0_f32.powf(db / 10.0));
+            heatmap_feature_areas(plot, reference)
+                .into_iter()
+                .flatten()
+                .any(|area| area.contains(point))
+        };
+        // Each arm of OR passes independently, and the overlap is not required.
+        assert!(contains(&reference, 0.2, -10.0));
+        assert!(contains(&reference, 0.9, -60.0));
+        assert!(contains(&reference, 0.9, -10.0));
+        assert!(!contains(&reference, 0.2, -60.0));
+        let [Some(energy), Some(sharpness)] = heatmap_feature_areas(plot, &reference) else {
+            panic!("both participating axes produce a visible OR region");
+        };
+        assert_eq!(energy.y1, sharpness.y0, "union arms have no darker overlap");
+
+        reference.thresholds.filters.attack_level = false;
+        assert!(
+            !contains(&reference, 0.2, -10.0),
+            "disabled energy is excluded from OR"
+        );
+        assert!(contains(&reference, 0.9, -60.0));
+        reference.thresholds.filters.min_sharpness = false;
+        assert!(
+            contains(&reference, 0.2, -60.0),
+            "both disabled bypass the floor gate"
+        );
+        reference.thresholds.filters.attack_level = true;
+        assert!(contains(&reference, 0.2, -10.0));
+        assert!(
+            !contains(&reference, 0.9, -60.0),
+            "disabled sharpness cannot auto-pass OR"
+        );
+
+        reference.thresholds.filters.min_sharpness = true;
+        reference.thresholds.sharpness_effective_bound = Some(0.5);
+        reference.thresholds.energy_effective_bound = Some(0.044 * 1e-5);
+        assert!(
+            !contains(&reference, 0.2, -10.0),
+            "independent sharpness cutoff clips both arms"
+        );
+        assert!(
+            !contains(&reference, 0.9, -60.0),
+            "independent energy cutoff clips both arms"
+        );
+        assert!(contains(&reference, 0.6, -20.0));
+        assert!(contains(&reference, 0.9, -40.0));
+
+        reference.thresholds.cloud_enabled = false;
+        reference.thresholds.sharpness_effective_bound = Some(0.75);
+        reference.thresholds.energy_effective_bound = Some(0.044 * 1e-3);
+        assert!(!contains(&reference, 0.2, -10.0));
+        assert!(!contains(&reference, 0.9, -60.0));
+        assert!(
+            contains(&reference, 0.9, -10.0),
+            "fixed mode keeps its existing AND area"
+        );
     }
 
     #[test]

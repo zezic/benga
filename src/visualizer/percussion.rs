@@ -67,11 +67,13 @@ pub struct PercussionChannelSettings {
     /// Final contrast floor, separate from the permissive admission floor.
     pub min_output_prominence: f32,
     pub min_attack_db: f32,
-    /// Follow the supported cloud's energy range instead of the fixed floor.
+    /// Follow supported cloud ranges and combine the enabled feature floors with OR.
     pub cloud_enabled: bool,
     /// Accepted height measured down from the cloud top on the log energy axis.
     pub cloud_top_percent: f32,
-    /// Minimum observations in an energy bucket before it extends the cloud.
+    /// Accepted width measured leftward from the sharpest cloud edge.
+    pub cloud_sharpness_top_percent: f32,
+    /// Minimum observations in a marginal bucket before it extends the cloud.
     pub cloud_min_count: usize,
     pub output_rms_db: f32,
     pub sharpness_percentile: f32,
@@ -101,6 +103,7 @@ impl Default for PercussionChannelSettings {
             min_attack_db: -38.0,
             cloud_enabled: false,
             cloud_top_percent: 25.0,
+            cloud_sharpness_top_percent: 25.0,
             cloud_min_count: 3,
             output_rms_db: -27.0,
             sharpness_percentile: 60.0,
@@ -163,6 +166,7 @@ channel_overrides! {
     min_attack_db: f32,
     cloud_enabled: bool,
     cloud_top_percent: f32,
+    cloud_sharpness_top_percent: f32,
     cloud_min_count: usize,
     output_rms_db: f32,
     sharpness_percentile: f32,
@@ -302,6 +306,7 @@ pub enum PercussionSetting {
     MinAttackDb,
     CloudEnabled,
     CloudTopPercent,
+    CloudSharpnessTopPercent,
     CloudMinCount,
     OutputRmsDb,
     SharpnessPercentile,
@@ -314,7 +319,7 @@ pub enum PercussionSetting {
     RecentMarkers,
 }
 impl PercussionSetting {
-    pub const CHANNEL: [Self; 35] = [
+    pub const CHANNEL: [Self; 36] = [
         Self::InputEnergyEnabled,
         Self::InputGrowthEnabled,
         Self::InputProminenceEnabled,
@@ -343,6 +348,7 @@ impl PercussionSetting {
         Self::MinAttackDb,
         Self::CloudEnabled,
         Self::CloudTopPercent,
+        Self::CloudSharpnessTopPercent,
         Self::CloudMinCount,
         Self::OutputRmsDb,
         Self::SharpnessPercentile,
@@ -360,6 +366,7 @@ impl PercussionSetting {
             Self::MinAttackDb,
             Self::CloudEnabled,
             Self::CloudTopPercent,
+            Self::CloudSharpnessTopPercent,
             Self::OutputRmsDb,
             Self::OutputIntervalMs,
         ]
@@ -448,8 +455,9 @@ impl PercussionSetting {
             Self::MinSharpness => "Sharpness floor",
             Self::MinOutputProminence => "Trigger contrast floor",
             Self::MinAttackDb => "Trigger energy floor",
-            Self::CloudEnabled => "Dynamic cloud floor",
-            Self::CloudTopPercent => "Cloud top area",
+            Self::CloudEnabled => "Dynamic cloud filter",
+            Self::CloudTopPercent => "Cloud energy top area",
+            Self::CloudSharpnessTopPercent => "Cloud sharpness top area",
             Self::CloudMinCount => "Cloud bucket support",
             Self::OutputRmsDb => "Mix level floor",
             Self::SharpnessPercentile => "Sharpness percentile",
@@ -476,7 +484,10 @@ impl PercussionSetting {
             Self::AdmissionEnergy => "FS²s",
             Self::AdmissionGrowth => "FS",
             Self::MinAttackDb | Self::OutputRmsDb => "dBFS",
-            Self::SharpnessPercentile | Self::EnergyPercentile | Self::CloudTopPercent => "%",
+            Self::SharpnessPercentile
+            | Self::EnergyPercentile
+            | Self::CloudTopPercent
+            | Self::CloudSharpnessTopPercent => "%",
             Self::MemorySeconds => "s",
             Self::MinReference | Self::RecentMarkers | Self::CloudMinCount => "events",
             Self::FftSize => "samples",
@@ -515,9 +526,10 @@ impl PercussionSetting {
             Self::MinOutputProminence => (0.0, 0.9),
             Self::MinAttackDb => (-65.0, -10.0),
             Self::OutputRmsDb => (-60.0, 0.0),
-            Self::SharpnessPercentile | Self::EnergyPercentile | Self::CloudTopPercent => {
-                (0.0, 100.0)
-            }
+            Self::SharpnessPercentile
+            | Self::EnergyPercentile
+            | Self::CloudTopPercent
+            | Self::CloudSharpnessTopPercent => (0.0, 100.0),
             Self::CloudMinCount => (1.0, REFERENCE_CAPACITY as f32),
             Self::MemorySeconds => (1.0, 60.0),
             Self::MinReference => (1.0, 64.0),
@@ -558,6 +570,7 @@ impl PercussionSetting {
             Self::MinAttackDb => c.min_attack_db,
             Self::CloudEnabled => u8::from(c.cloud_enabled) as f32,
             Self::CloudTopPercent => c.cloud_top_percent,
+            Self::CloudSharpnessTopPercent => c.cloud_sharpness_top_percent,
             Self::CloudMinCount => c.cloud_min_count as f32,
             Self::OutputRmsDb => c.output_rms_db,
             Self::SharpnessPercentile => c.sharpness_percentile,
@@ -612,6 +625,7 @@ impl PercussionSetting {
             Self::MinAttackDb => c.min_attack_db = value,
             Self::CloudEnabled => c.cloud_enabled = value >= 0.5,
             Self::CloudTopPercent => c.cloud_top_percent = value,
+            Self::CloudSharpnessTopPercent => c.cloud_sharpness_top_percent = value,
             Self::CloudMinCount => c.cloud_min_count = value.round() as usize,
             Self::OutputRmsDb => c.output_rms_db = value,
             Self::SharpnessPercentile => c.sharpness_percentile = value,
@@ -656,9 +670,16 @@ pub struct CloudBoundary {
     pub energy_max: f32,
 }
 
+/// Supported sharpness extent of the current learned cloud, in concentration units.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SharpnessCloudBoundary {
+    pub sharpness_min: f32,
+    pub sharpness_max: f32,
+}
+
 /// Saved gate values for the exact reference/configuration used at a decision.
-/// Only the two effective feature bounds are drawable as a 2D acceptance area;
-/// prominence, mix RMS and output interval are additional independent gates.
+/// The effective feature bounds and cloud floors describe the 2D acceptance area;
+/// prominence, mix RMS and output interval remain additional independent gates.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PercussionThresholdSnapshot {
@@ -667,8 +688,13 @@ pub struct PercussionThresholdSnapshot {
     pub min_attack_db: f32,
     /// Resolved trigger floor, including dynamic cloud mode or fixed fallback.
     pub trigger_energy_floor: f32,
+    pub trigger_sharpness_floor: f32,
+    /// Cloud mode combines the enabled feature floors with OR.
+    pub cloud_enabled: bool,
     pub cloud_active: bool,
+    pub sharpness_cloud_active: bool,
     pub cloud_top_percent: f32,
+    pub cloud_sharpness_top_percent: f32,
     pub cloud_min_count: usize,
     pub admission_energy: f32,
     pub admission_growth: f32,
@@ -679,7 +705,9 @@ pub struct PercussionThresholdSnapshot {
     pub feature_seconds: f32,
     pub sharpness_effective_cutoff: f32,
     pub energy_effective_cutoff: f32,
-    /// `None` means every feature gate on that axis is disabled.
+    /// Independent AND constraints on each axis. In cloud mode, the resolved
+    /// trigger floors above form an additional OR region and are excluded here.
+    /// `None` means no independent feature constraint remains on that axis.
     pub sharpness_effective_bound: Option<f32>,
     pub energy_effective_bound: Option<f32>,
     pub sharpness_tolerance: f32,
@@ -715,6 +743,7 @@ pub struct PercussionReferenceSnapshot {
     pub sharpness_cutoff: Option<f32>,
     pub energy_cutoff: Option<f32>,
     pub cloud_boundary: Option<CloudBoundary>,
+    pub sharpness_cloud_boundary: Option<SharpnessCloudBoundary>,
 }
 impl Default for PercussionReferenceSnapshot {
     fn default() -> Self {
@@ -735,6 +764,7 @@ impl Default for PercussionReferenceSnapshot {
             sharpness_cutoff: None,
             energy_cutoff: None,
             cloud_boundary: None,
+            sharpness_cloud_boundary: None,
         }
     }
 }
@@ -769,6 +799,7 @@ pub enum DecisionReason {
     PhysicalSharpness,
     OutputProminence,
     AttackLevel,
+    CloudRegion,
     MixRms,
     SharpnessPercentile,
     EnergyPercentile,
@@ -788,6 +819,7 @@ impl DecisionReason {
             Self::PhysicalSharpness => "below sharpness floor",
             Self::OutputProminence => "below trigger contrast floor",
             Self::AttackLevel => "below trigger energy floor",
+            Self::CloudRegion => "below energy and sharpness cloud floors",
             Self::MixRms => "below mix level floor",
             Self::SharpnessPercentile => "below sharpness cutoff",
             Self::EnergyPercentile => "below energy cutoff",
@@ -960,9 +992,17 @@ mod tests {
             energy_min: 1e-7,
             energy_max: 1e-4,
         });
+        snapshot.sharpness_cloud_boundary = Some(SharpnessCloudBoundary {
+            sharpness_min: 0.2,
+            sharpness_max: 0.8,
+        });
         snapshot.thresholds.trigger_energy_floor = 1e-5;
+        snapshot.thresholds.trigger_sharpness_floor = 0.65;
+        snapshot.thresholds.cloud_enabled = true;
         snapshot.thresholds.cloud_active = true;
+        snapshot.thresholds.sharpness_cloud_active = true;
         snapshot.thresholds.cloud_top_percent = 25.0;
+        snapshot.thresholds.cloud_sharpness_top_percent = 25.0;
         snapshot.thresholds.cloud_min_count = 3;
         let restored: PercussionReferenceSnapshot =
             serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
@@ -980,14 +1020,18 @@ mod tests {
             .iter()
             .all(|channel| !channel.cloud_enabled));
         assert_eq!(settings.channels[0].cloud_top_percent, 25.0);
+        assert_eq!(settings.channels[0].cloud_sharpness_top_percent, 25.0);
         assert_eq!(settings.channels[0].cloud_min_count, 3);
         let fixed_floor = settings.channels[1].min_attack_db;
         PercussionSetting::CloudEnabled.set(&mut settings, 1, 1.0);
         PercussionSetting::CloudTopPercent.set(&mut settings, 1, 40.0);
+        PercussionSetting::CloudSharpnessTopPercent.set(&mut settings, 1, 60.0);
         PercussionSetting::CloudMinCount.set(&mut settings, 1, 4.6);
         assert!(settings.channels[1].cloud_enabled);
         assert!(!settings.channels[0].cloud_enabled);
         assert_eq!(settings.channels[1].cloud_top_percent, 40.0);
+        assert_eq!(settings.channels[1].cloud_sharpness_top_percent, 60.0);
+        assert_eq!(settings.channels[0].cloud_sharpness_top_percent, 25.0);
         assert_eq!(settings.channels[1].cloud_min_count, 5);
         assert_eq!(settings.channels[1].min_attack_db, fixed_floor);
         settings.validate().unwrap();
@@ -995,7 +1039,7 @@ mod tests {
             ron::from_str(&ron::to_string(&settings).unwrap()).unwrap();
         assert_eq!(restored, settings);
         let restored: PercussionSettings = ron::from_str(
-            "(channels:((),(cloud_enabled:true,cloud_top_percent:40.0,cloud_min_count:5),()))",
+            "(channels:((),(cloud_enabled:true,cloud_top_percent:40.0,cloud_sharpness_top_percent:60.0,cloud_min_count:5),()))",
         )
         .unwrap();
         assert_eq!(restored, settings);
@@ -1007,6 +1051,9 @@ mod tests {
             "(channels:((cloud_top_percent:NaN),(),()))",
             "(channels:((cloud_top_percent:-1.0),(),()))",
             "(channels:((cloud_top_percent:101.0),(),()))",
+            "(channels:((cloud_sharpness_top_percent:NaN),(),()))",
+            "(channels:((cloud_sharpness_top_percent:-1.0),(),()))",
+            "(channels:((cloud_sharpness_top_percent:101.0),(),()))",
             "(channels:((cloud_min_count:0),(),()))",
             "(channels:((cloud_min_count:8193),(),()))",
         ] {
@@ -1015,13 +1062,37 @@ mod tests {
         }
         let mut settings = PercussionSettings::default();
         PercussionSetting::CloudTopPercent.set(&mut settings, 0, -10.0);
+        PercussionSetting::CloudSharpnessTopPercent.set(&mut settings, 0, -10.0);
         PercussionSetting::CloudMinCount.set(&mut settings, 0, 0.0);
         assert_eq!(settings.channels[0].cloud_top_percent, 0.0);
+        assert_eq!(settings.channels[0].cloud_sharpness_top_percent, 0.0);
         assert_eq!(settings.channels[0].cloud_min_count, 1);
         PercussionSetting::CloudTopPercent.set(&mut settings, 0, 110.0);
+        PercussionSetting::CloudSharpnessTopPercent.set(&mut settings, 0, 110.0);
         assert_eq!(settings.channels[0].cloud_top_percent, 100.0);
+        assert_eq!(settings.channels[0].cloud_sharpness_top_percent, 100.0);
         PercussionSetting::CloudTopPercent.set(&mut settings, 0, f32::NAN);
+        PercussionSetting::CloudSharpnessTopPercent.set(&mut settings, 0, f32::NAN);
         assert_eq!(settings.channels[0].cloud_top_percent, 100.0);
+        assert_eq!(settings.channels[0].cloud_sharpness_top_percent, 100.0);
+        settings.validate().unwrap();
+    }
+
+    #[test]
+    fn energy_only_saved_cloud_configs_inherit_the_sharpness_area() {
+        let settings: PercussionSettings = ron::from_str(
+            "(channels:((cloud_enabled:true,cloud_top_percent:15.0,cloud_min_count:7),(),()))",
+        )
+        .unwrap();
+        assert!(settings.channels[0].cloud_enabled);
+        assert_eq!(settings.channels[0].cloud_top_percent, 15.0);
+        assert_eq!(settings.channels[0].cloud_sharpness_top_percent, 25.0);
+        assert_eq!(settings.channels[0].cloud_min_count, 7);
+        assert!(!settings.channels[1].cloud_enabled);
+        assert_eq!(
+            PercussionSetting::CloudSharpnessTopPercent.filter_toggle(),
+            None
+        );
         settings.validate().unwrap();
     }
 
@@ -1030,7 +1101,10 @@ mod tests {
         let snapshot: PercussionReferenceSnapshot =
             serde_json::from_str(r#"{"thresholds":{"min_attack_db":-38.0}}"#).unwrap();
         assert_eq!(snapshot.cloud_boundary, None);
+        assert_eq!(snapshot.sharpness_cloud_boundary, None);
+        assert!(!snapshot.thresholds.cloud_enabled);
         assert!(!snapshot.thresholds.cloud_active);
+        assert!(!snapshot.thresholds.sharpness_cloud_active);
         assert_eq!(snapshot.thresholds.min_attack_db, -38.0);
     }
 

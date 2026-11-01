@@ -520,13 +520,28 @@ mod tests {
         let mut population = Population::default();
         for (index, bin) in [17, 17, 17, 9, 9, 9].into_iter().enumerate() {
             population.insert(
-                cloud_observation(bin, index as f64 * 0.1, &settings),
+                Observation {
+                    sharpness: (bin as f32 + 0.5) / HISTOGRAM_BINS as f32,
+                    ..cloud_observation(bin, index as f64 * 0.1, &settings)
+                },
                 &settings,
             );
         }
         let full = population.snapshot(0.5, &settings).cloud_boundary.unwrap();
+        let full_sharpness = population
+            .snapshot(0.5, &settings)
+            .sharpness_cloud_boundary
+            .unwrap();
+        assert_eq!(full_sharpness.sharpness_min, 9.0 / 24.0);
+        assert_eq!(full_sharpness.sharpness_max, 18.0 / 24.0);
         population.expire(1.15, &settings);
         let shrunk = population.snapshot(1.15, &settings).cloud_boundary.unwrap();
+        let shrunk_sharpness = population
+            .snapshot(1.15, &settings)
+            .sharpness_cloud_boundary
+            .unwrap();
+        assert_eq!(shrunk_sharpness.sharpness_min, full_sharpness.sharpness_min);
+        assert_eq!(shrunk_sharpness.sharpness_max, 10.0 / 24.0);
         assert_eq!(shrunk.energy_min, full.energy_min);
         assert_eq!(
             shrunk.energy_max,
@@ -539,10 +554,17 @@ mod tests {
         );
         population.expire(2.0, &settings);
         assert!(population.snapshot(2.0, &settings).cloud_boundary.is_none());
+        assert!(population
+            .snapshot(2.0, &settings)
+            .sharpness_cloud_boundary
+            .is_none());
         for index in 0..REFERENCE_CAPACITY {
             let bin = if index < 3 { 17 } else { 9 };
             population.insert(
-                cloud_observation(bin, index as f64 * 0.001, &settings),
+                Observation {
+                    sharpness: (bin as f32 + 0.5) / HISTOGRAM_BINS as f32,
+                    ..cloud_observation(bin, index as f64 * 0.001, &settings)
+                },
                 &settings,
             );
         }
@@ -550,16 +572,31 @@ mod tests {
             population.snapshot(9.0, &settings).cloud_boundary,
             Some(full)
         );
-        population.insert(cloud_observation(9, 9.0, &settings), &settings);
+        assert_eq!(
+            population.snapshot(9.0, &settings).sharpness_cloud_boundary,
+            Some(full_sharpness)
+        );
+        population.insert(
+            Observation {
+                sharpness: 9.5 / 24.0,
+                ..cloud_observation(9, 9.0, &settings)
+            },
+            &settings,
+        );
         assert_eq!(
             population.snapshot(9.0, &settings).cloud_boundary,
             Some(shrunk)
+        );
+        assert_eq!(
+            population.snapshot(9.0, &settings).sharpness_cloud_boundary,
+            Some(shrunk_sharpness)
         );
     }
 
     #[test]
     fn cloud_floor_uses_preinsertion_reference_and_has_no_upper_energy_limit() {
         let mut settings = permissive_filter_settings().channels[0];
+        settings.filters.min_sharpness = false;
         settings.cloud_enabled = true;
         settings.cloud_min_count = 3;
         settings.cloud_top_percent = 25.0;
@@ -618,17 +655,228 @@ mod tests {
         settings.channels[0].cloud_enabled = true;
         settings.channels[0].cloud_min_count = 1;
         settings.channels[0].cloud_top_percent = 75.0;
+        settings.channels[0].cloud_sharpness_top_percent = 75.0;
         feed_envelope(&mut detector, &settings, 0.2, 0.05, |_| 0.0);
         let live = detector.reference(0);
         assert_eq!(live.count, 1);
         assert!(live.thresholds.cloud_active);
         assert_eq!(detector.channels[0].epoch, epoch);
         assert_eq!(detector.decisions(), &saved);
+        settings.channels[0].cloud_sharpness_top_percent = 10.0;
         settings.channels[0].cloud_min_count = 2;
         feed_envelope(&mut detector, &settings, 0.25, 0.05, |_| 0.0);
         assert_eq!(detector.reference(0).count, 1);
         assert!(!detector.reference(0).thresholds.cloud_active);
         assert_eq!(detector.channels[0].epoch, epoch);
+        assert_eq!(detector.decisions(), &saved);
+    }
+
+    #[test]
+    fn sharpness_cloud_ignores_sparse_tails_and_uses_linear_width() {
+        let mut settings = permissive_filter_settings().channels[0];
+        settings.cloud_enabled = true;
+        settings.cloud_min_count = 3;
+        let mut population = Population::default();
+        for (index, bin) in [2, 9, 9, 9, 17, 17, 17, 22, 22].into_iter().enumerate() {
+            population.insert(
+                Observation {
+                    sharpness: (bin as f32 + 0.5) / HISTOGRAM_BINS as f32,
+                    ..cloud_observation(index + 1, index as f64, &settings)
+                },
+                &settings,
+            );
+        }
+        let saved = population.snapshot(9.0, &settings);
+        assert!(
+            saved.cloud_boundary.is_none(),
+            "sharpness support pools different energy rows"
+        );
+        let cloud = saved.sharpness_cloud_boundary.unwrap();
+        assert_eq!(cloud.sharpness_min, 9.0 / 24.0);
+        assert_eq!(cloud.sharpness_max, 18.0 / 24.0);
+        assert_eq!(saved.thresholds.trigger_sharpness_floor, 15.75 / 24.0);
+        assert!(saved.thresholds.sharpness_cloud_active);
+        assert!(!saved.thresholds.cloud_active);
+        assert_eq!(
+            saved.thresholds.trigger_energy_floor,
+            settings.feature_ms * 0.001 * 10.0_f32.powf(settings.min_attack_db / 10.0)
+        );
+        let mut previous = f32::INFINITY;
+        for percent in 0..=100 {
+            settings.cloud_sharpness_top_percent = percent as f32;
+            let floor = population
+                .snapshot(9.0, &settings)
+                .thresholds
+                .trigger_sharpness_floor;
+            assert!(floor <= previous);
+            if percent == 0 {
+                assert_eq!(floor, cloud.sharpness_max);
+            }
+            if percent == 100 {
+                assert_eq!(floor, cloud.sharpness_min);
+            }
+            previous = floor;
+        }
+        population.insert(
+            Observation {
+                sharpness: 22.5 / 24.0,
+                ..cloud_observation(10, 9.0, &settings)
+            },
+            &settings,
+        );
+        assert_eq!(
+            population
+                .snapshot(9.0, &settings)
+                .sharpness_cloud_boundary
+                .unwrap()
+                .sharpness_max,
+            23.0 / 24.0
+        );
+        assert_eq!(saved.sharpness_cloud_boundary, Some(cloud));
+        settings.cloud_enabled = false;
+        let disabled = population.snapshot(9.0, &settings);
+        assert!(disabled.sharpness_cloud_boundary.is_some());
+        assert!(!disabled.thresholds.sharpness_cloud_active);
+        assert_eq!(
+            disabled.thresholds.trigger_sharpness_floor,
+            settings.min_sharpness
+        );
+    }
+
+    fn channel_with_cloud(settings: &PercussionChannelSettings) -> Channel {
+        let mut channel = Channel::default();
+        for (index, (energy_bin, sharpness_bin)) in
+            [(12, 4), (18, 19)].into_iter().cycle().take(6).enumerate()
+        {
+            channel.population.insert(
+                Observation {
+                    sharpness: (sharpness_bin as f32 + 0.5) / HISTOGRAM_BINS as f32,
+                    ..cloud_observation(energy_bin, 0.5 + index as f64 * 0.01, settings)
+                },
+                settings,
+            );
+        }
+        channel
+    }
+
+    #[test]
+    fn cloud_feature_floors_accept_either_branch_and_reject_only_when_both_fail() {
+        let mut settings = permissive_filter_settings().channels[0];
+        settings.cloud_enabled = true;
+        settings.min_sharpness = 0.7;
+        settings.min_attack_db = -20.0;
+        for (rise, amplitude, energy_pass, sharpness_pass) in [
+            (0.002, 0.01, false, true),
+            (0.024, 0.3, true, false),
+            (0.002, 0.3, true, true),
+            (0.024, 0.01, false, false),
+        ] {
+            let decision = channel_with_cloud(&settings).finish(
+                feature(rise, amplitude, 0.001),
+                0,
+                1.0,
+                &settings,
+            );
+            let thresholds = decision.reference.thresholds;
+            assert!(thresholds.cloud_active && thresholds.sharpness_cloud_active);
+            assert_eq!(
+                decision.energy >= thresholds.trigger_energy_floor,
+                energy_pass
+            );
+            assert_eq!(
+                decision.sharpness >= thresholds.trigger_sharpness_floor,
+                sharpness_pass
+            );
+            assert_eq!(decision.eligible, energy_pass || sharpness_pass);
+            if !decision.eligible {
+                assert_eq!(decision.reason, DecisionReason::CloudRegion);
+            }
+            let static_settings = PercussionChannelSettings {
+                cloud_enabled: false,
+                ..settings
+            };
+            let fixed = channel_with_cloud(&static_settings).finish(
+                feature(rise, amplitude, 0.001),
+                0,
+                1.0,
+                &static_settings,
+            );
+            assert_eq!(
+                fixed.eligible,
+                energy_pass && sharpness_pass,
+                "fixed mode keeps AND"
+            );
+            // Both branches retain their fixed fallback when history is absent.
+            let fallback =
+                Channel::default().finish(feature(rise, amplitude, 0.001), 0, 1.0, &settings);
+            assert!(
+                !fallback.reference.thresholds.cloud_active
+                    && !fallback.reference.thresholds.sharpness_cloud_active
+            );
+            assert_eq!(fallback.eligible, energy_pass || sharpness_pass);
+        }
+        for (energy_enabled, sharpness_enabled) in [(true, false), (false, true), (false, false)] {
+            settings.filters.attack_level = energy_enabled;
+            settings.filters.min_sharpness = sharpness_enabled;
+            for (rise, amplitude, energy_pass, sharpness_pass) in [
+                (0.002, 0.01, false, true),
+                (0.024, 0.3, true, false),
+                (0.024, 0.01, false, false),
+            ] {
+                let decision = channel_with_cloud(&settings).finish(
+                    feature(rise, amplitude, 0.001),
+                    0,
+                    1.0,
+                    &settings,
+                );
+                assert_eq!(
+                    decision.eligible,
+                    (!energy_enabled && !sharpness_enabled)
+                        || (energy_enabled && energy_pass)
+                        || (sharpness_enabled && sharpness_pass),
+                    "disabled branches cannot make OR pass"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sharpness_cloud_uses_preinsertion_bounds_and_does_not_bypass_independent_filters() {
+        let mut settings = permissive_filter_settings().channels[0];
+        settings.cloud_enabled = true;
+        settings.filters.attack_level = false;
+        settings.min_sharpness = 0.9;
+        let mut channel = Channel::default();
+        for index in 0..3 {
+            let decision = channel.finish(
+                feature(0.01, 0.1, 0.001),
+                0,
+                1.0 + index as f64 * 0.01,
+                &settings,
+            );
+            assert!(decision.admitted && !decision.eligible);
+            assert_eq!(decision.reason, DecisionReason::PhysicalSharpness);
+            assert!(decision.reference.sharpness_cloud_boundary.is_none());
+        }
+        let accepted = channel.finish(feature(0.002, 0.01, 0.001), 0, 1.1, &settings);
+        assert!(accepted.eligible);
+        assert!(
+            accepted.sharpness
+                > accepted
+                    .reference
+                    .sharpness_cloud_boundary
+                    .unwrap()
+                    .sharpness_max
+        );
+        settings.filters.mix_rms = true;
+        settings.output_rms_db = 0.0;
+        let rejected = channel.finish(feature(0.002, 0.01, 0.001), 0, 1.2, &settings);
+        assert_eq!(rejected.reason, DecisionReason::MixRms);
+        settings.filters.mix_rms = false;
+        settings.filters.energy_percentile = true;
+        settings.energy_percentile = 100.0;
+        let rejected = channel.finish(feature(0.002, 0.01, 0.001), 0, 1.3, &settings);
+        assert_eq!(rejected.reason, DecisionReason::EnergyPercentile);
     }
 
     #[test]
@@ -1329,6 +1577,16 @@ fn energy_bin_edge(index: usize, horizon: f32) -> f32 {
     let db = -80.0 + 80.0 * index as f32 / HISTOGRAM_BINS as f32;
     horizon * 10.0_f32.powf(db / 10.0)
 }
+fn supported_bin_range(
+    histogram: &[u32; HISTOGRAM_BINS],
+    minimum: usize,
+) -> Option<(usize, usize)> {
+    let supported = |count: &u32| *count as usize >= minimum;
+    Some((
+        histogram.iter().position(supported)?,
+        histogram.iter().rposition(supported)?,
+    ))
+}
 fn remove_value(values: &mut Vec<f32>, value: f32) {
     let index = values
         .binary_search_by(|v| v.total_cmp(&value))
@@ -1354,13 +1612,22 @@ impl Population {
     fn cloud_boundary(&self, settings: &PercussionChannelSettings) -> Option<CloudBoundary> {
         // Marginal energy counts pool all sharpness columns. Sparse tails stay
         // visible and learn normally, but cannot stretch either cloud edge.
-        let supported = |count: &u32| *count as usize >= settings.cloud_min_count;
-        let first = self.energy_histogram.iter().position(supported)?;
-        let last = self.energy_histogram.iter().rposition(supported)?;
+        let (first, last) = supported_bin_range(&self.energy_histogram, settings.cloud_min_count)?;
         let horizon = settings.feature_ms * 0.001;
         Some(CloudBoundary {
             energy_min: energy_bin_edge(first, horizon),
             energy_max: energy_bin_edge(last + 1, horizon),
+        })
+    }
+    fn sharpness_cloud_boundary(
+        &self,
+        settings: &PercussionChannelSettings,
+    ) -> Option<SharpnessCloudBoundary> {
+        let (first, last) =
+            supported_bin_range(&self.sharpness_histogram, settings.cloud_min_count)?;
+        Some(SharpnessCloudBoundary {
+            sharpness_min: first as f32 / HISTOGRAM_BINS as f32,
+            sharpness_max: (last + 1) as f32 / HISTOGRAM_BINS as f32,
         })
     }
     fn remove_oldest(&mut self, horizon: f32) {
@@ -1418,7 +1685,9 @@ impl Population {
         let feature_seconds = settings.feature_ms * 0.001;
         let min_attack_energy = feature_seconds * 10.0_f32.powf(settings.min_attack_db / 10.0);
         let cloud_boundary = self.cloud_boundary(settings);
+        let sharpness_cloud_boundary = self.sharpness_cloud_boundary(settings);
         let cloud_active = settings.cloud_enabled && cloud_boundary.is_some();
+        let sharpness_cloud_active = settings.cloud_enabled && sharpness_cloud_boundary.is_some();
         let trigger_energy_floor = if let Some(cloud) = cloud_boundary.filter(|_| cloud_active) {
             // Interpolate in the map's logarithmic energy coordinate: top 25%
             // accepts the upper quarter of its height, plus everything louder.
@@ -1433,10 +1702,25 @@ impl Population {
         } else {
             min_attack_energy
         };
+        let trigger_sharpness_floor =
+            if let Some(cloud) = sharpness_cloud_boundary.filter(|_| sharpness_cloud_active) {
+                if settings.cloud_sharpness_top_percent == 0.0 {
+                    cloud.sharpness_max
+                } else if settings.cloud_sharpness_top_percent == 100.0 {
+                    cloud.sharpness_min
+                } else {
+                    cloud.sharpness_max
+                        - (cloud.sharpness_max - cloud.sharpness_min)
+                            * settings.cloud_sharpness_top_percent
+                            / 100.0
+                }
+            } else {
+                settings.min_sharpness
+            };
+        // Cloud floors form a union, so they cannot be represented by one
+        // pair of lower bounds. Keep only independent AND constraints here.
         let sharpness_effective_bound = [
-            settings
-                .filters
-                .min_sharpness
+            (settings.filters.min_sharpness && !settings.cloud_enabled)
                 .then_some(settings.min_sharpness),
             sharpness_cutoff.map(|q| q - SHARPNESS_TOLERANCE),
         ]
@@ -1444,9 +1728,7 @@ impl Population {
         .flatten()
         .reduce(f32::max);
         let energy_effective_bound = [
-            settings
-                .filters
-                .attack_level
+            (settings.filters.attack_level && !settings.cloud_enabled)
                 .then_some(trigger_energy_floor),
             settings
                 .filters
@@ -1462,8 +1744,12 @@ impl Population {
             min_sharpness: settings.min_sharpness,
             min_attack_db: settings.min_attack_db,
             trigger_energy_floor,
+            trigger_sharpness_floor,
+            cloud_enabled: settings.cloud_enabled,
             cloud_active,
+            sharpness_cloud_active,
             cloud_top_percent: settings.cloud_top_percent,
+            cloud_sharpness_top_percent: settings.cloud_sharpness_top_percent,
             cloud_min_count: settings.cloud_min_count,
             admission_energy: settings.admission_energy,
             admission_growth: settings.admission_growth,
@@ -1511,6 +1797,7 @@ impl Population {
             energy_histogram: self.energy_histogram,
             joint_histogram: self.joint_histogram,
             cloud_boundary,
+            sharpness_cloud_boundary,
             recent_points,
             recent_count,
             thresholds,
@@ -1890,22 +2177,43 @@ impl Channel {
             * (candidate.energy / candidate.elapsed.max(1e-9))
                 .max(1e-12)
                 .log10();
+        let cloud_rejection = if settings.cloud_enabled {
+            let energy_pass = settings.filters.attack_level
+                && candidate.energy >= reference.thresholds.trigger_energy_floor;
+            let sharpness_pass = settings.filters.min_sharpness
+                && sharpness >= reference.thresholds.trigger_sharpness_floor;
+            match (
+                settings.filters.attack_level,
+                settings.filters.min_sharpness,
+                energy_pass || sharpness_pass,
+            ) {
+                (true, true, false) => Some(DecisionReason::CloudRegion),
+                (true, false, false) => Some(DecisionReason::AttackLevel),
+                (false, true, false) => Some(DecisionReason::PhysicalSharpness),
+                _ => None,
+            }
+        } else {
+            None
+        };
         let mut tolerance_used = false;
         let eligible = if !admitted {
             false
-        } else if settings.filters.min_sharpness && sharpness < settings.min_sharpness {
+        } else if let Some(rejection) = cloud_rejection {
+            reason = rejection;
+            false
+        } else if !settings.cloud_enabled
+            && settings.filters.min_sharpness
+            && sharpness < settings.min_sharpness
+        {
             reason = DecisionReason::PhysicalSharpness;
             false
         } else if settings.filters.output_prominence && prominence < settings.min_output_prominence
         {
             reason = DecisionReason::OutputProminence;
             false
-        } else if settings.filters.attack_level
-            && if reference.thresholds.cloud_active {
-                candidate.energy < reference.thresholds.trigger_energy_floor
-            } else {
-                attack_db < settings.min_attack_db
-            }
+        } else if !settings.cloud_enabled
+            && settings.filters.attack_level
+            && attack_db < settings.min_attack_db
         {
             reason = DecisionReason::AttackLevel;
             false

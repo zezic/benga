@@ -87,16 +87,19 @@ without triggering; older additions outside the reference are dimmed. The marker
 count defaults to 32 and can be changed with the heatmap’s −/+ buttons. Cutoff
 lines and the shaded feature-pass region explain the sharpness/energy checks;
 output prominence, mix RMS and spacing still apply separately.
-The dashed **cloud** bracket tracks the lowest and highest energy buckets with
-enough learned attacks, ignoring sparse tails. Enable the checkbox beside
-**Cloud top area** to let that range set the trigger energy floor. The percentage
-selects the top part of its height on the dB map (25% means the upper quarter);
-attacks above the cloud also pass that floor. **Cloud bucket support** sets the
-minimum count per energy bucket (default 3), pooled across sharpness. Bounds
-grow and shrink as observations enter or leave the reference. Dynamic mode is
-off initially, preserving existing settings, and uses the fixed **Trigger energy
-floor** until a supported bucket exists. Other enabled filters, including the
-energy percentile, can still impose a stricter requirement.
+The dashed **cloud** outline tracks supported energy and sharpness bounds,
+ignoring sparse tails. Enable the checkbox beside **Cloud energy top area** to
+use dynamic floors. Energy top X% selects the upper part of the cloud's height
+on the dB map; **Cloud sharpness top area** selects its sharpest Y% by width.
+Both default to 25%. An attack passes the cloud filter when **energy OR sharpness**
+clears its floor, including values above the cloud. The shade shows this union.
+**Cloud bucket support** sets the minimum count per bucket (default 3), pooling
+the other axis. Bounds grow and shrink as observations enter or leave the
+reference. Dynamic mode starts off. Each axis uses its saved fixed floor until
+supported bounds exist; those fallbacks also combine with OR in cloud mode.
+The **Trigger energy floor** and **Sharpness floor** switches select which
+branches participate; disabling both skips the cloud filter. Other enabled
+filters, including the independent percentiles, can still reject an attack.
 Click its timeline to switch kick, snare, and hat. Previous/next event buttons
 inspect saved decisions with their original reference; **Live** shows the newer
 population. Ranks describe recent regional onsets, not confidence in instrument

@@ -16,10 +16,11 @@ cargo run --release --features gpu-ribbon-prototype --example gpu_ribbon_prototy
 ```
 
 - `1`: current CPU endpoint ribbons.
-- `2`: GPU vertex-colored ribbons (default).
+- `2`: optimized GPU ribbons: shared edge preparation and classified draws (default).
 - `3`: paused temporal reference. Sample count is limited by device memory;
   use sparse fixtures for a denser reference.
 - `4`: GPU ribbons with inverse-bilinear per-pixel coverage.
+- `5`: original GPU prototype before optimization, using the same poses.
 - Left/right arrows: stationary, mild/fast rotation, translation, strong rotation,
   along-edge translation, and direction reversal.
 - Space: pause/resume; comma/period: step backward/forward while paused.
@@ -39,12 +40,13 @@ automatically closes a smoke run.
 
 ```sh
 cargo run --release --features gpu-ribbon-prototype --example gpu_ribbon_prototype -- \
-  --headless --samples 64 --extent 1920x1080,3840x2160 \
-  --output target/gpu-ribbon-prototype
+  --headless --paths original,prepared --samples 96 --warmup 64 \
+  --extent 3840x2160 --merge-passes --float-target \
+  --output target/gpu-ribbon-optimization/final
 ```
 
 This saves timestamp samples, projection checks, dark/light PNGs, and sparse
-128-sample float references. The three methods share geometry, camera, poses,
+128-sample float references. The methods share geometry, camera, poses,
 opacity, resolution and target format. The current path uses the existing
 `push_sweep`; the GPU paths upload static vertices/indices once and then a
 144-byte parameter block per frame.
@@ -85,7 +87,89 @@ and shading. `fixtures.rs` provides deterministic motion, the unchanged CPU
 baseline, and sampled references. `live.rs` is the native comparison window.
 The parent module runs offscreen measurements and readbacks.
 
-## Measured verdict (2026-11-02)
+`prepared.rs` / `prepared.wgsl` now prepare each edge once, emit only active
+triangles, and use separate regular, masked-crossing, partial-body and parallel
+draws. Stable GPU prefix/scatter compaction keeps edge/triangle order consistent
+between frames; it adds no CPU geometry transfer. `background.rs` combines the
+retained background and GPU model into one pass. `baseline.wgsl` freezes the first
+prototype for same-process comparisons.
+
+## Optimization results (2026-11-02)
+
+The optimizations were evaluated in estimated payoff order: replace per-pixel
+crossing solves with triangle lobes; prepare shared edge data and classify draws;
+combine passes; then test tighter bounds and indexed coverage. Intermediate
+variants were measured separately. Crossing geometry alone increased repeated
+vertex setup and regressed several cases; the shared preparation and shader
+specialization are needed together.
+
+Final comparison: Apple M4 / Metal, 69,225-edge model, 3840 × 2160 **Rgba16Float**
+(the viewer's format), 64 warmup frames and 96 single-frame timestamp samples per
+method. Both methods run in the same process with a merged background/model pass.
+The original control uses the frozen initial GPU shader, not the CPU renderer.
+
+| Motion | Original GPU median / p95 | Optimized median / p95 |
+| --- | ---: | ---: |
+| Stationary | 1.54 / 1.67 ms | 1.46 / 1.59 ms |
+| Fast rotation | 4.25 / 4.62 ms | 4.71 / 8.34 ms |
+| Translation | 15.64 / 19.85 ms | 15.15 / 18.98 ms |
+| Along-edge translation | 8.96 / 11.88 ms | 11.99 / 16.09 ms |
+| Strong rotation | 29.16 / 33.79 ms | 7.87 / 11.64 ms |
+| Reversal | 29.08 / 34.62 ms | 22.01 / 25.71 ms |
+
+Strong rotation improved by about 3.7× in this run. Other runs showed the same
+large reduction in this stress case, but ordinary-motion results remain mixed.
+Along-edge translation regressed in the final paired run. GPU scheduling/power
+variation is substantial, so these are local workload measurements, not a promise
+of a universal speedup or sustained application FPS. Shared edge preparation,
+including deterministic compaction, took approximately 0.27–0.78 ms.
+
+The optimized crossing gradients are a geometric/stylized approximation of the
+old inverse-coverage shading. They can change local brightness and shape at
+crossings. Full resolution, the three actual poses and source edges are retained;
+compare viewer keys `2` and `5` to judge the visual tradeoff.
+
+The preparation path launches only 138,450 body triangles at rest, instead of
+issuing 18 vertex invocations for every edge and degenerating the unused wings.
+Regular fragments carry no temporal endpoint geometry or general coverage solve.
+Only partial body edges read attachment data; pure parallel motion has a dedicated
+cap-time shader. CPU frame updates remain 144 bytes.
+
+Atomic append order initially caused tiny frame-to-frame brightness variation in
+dense float blending. Deterministic compaction fixed it: all final repeated dense
+captures were pixel-identical in both dark and light styles. Sparse direct versus
+prepared comparisons matched exactly except one crossing case with a one-level
+8-bit display difference from grouping. Zero-opacity, wholly offscreen, and
+historical-sweep visibility checks passed, and projected history is kept intact.
+
+Lower-priority experiments remain optional:
+
+- `--tight-support` uses conservatively padded hulls. It helped some broad
+  coverage cases but regressed others and changed a few edge pixels. It is
+  **disabled by default** and is not used by the optimized prepared path.
+- `--indexed-coverage` reuses four vertices for each full-coverage quad. All
+  compared images were pixel-identical, but timing results were mixed. It is
+  opt-in; the optimized triangle path already emits its active vertices only.
+- `--paths gpu` retains the direct triangle-generation intermediate for ablation.
+  `--paths original,prepared` compares the original and final paths.
+
+Measurements and validation images are in ignored build output:
+
+- `target/gpu-ribbon-optimization/baseline/`: fresh original-executable baseline.
+- `01-crossing-geometry/`: geometric crossing replacement alone.
+- `02-prepared/`: shared preparation and initial compaction.
+- `03-merged/`: isolated pass-combination comparison.
+- `04-specialized-float/`: specialized draws before deterministic ordering.
+- `05-original-bounds/` and `05-tight-bounds/`: support-bound comparison.
+- `06-final-float/`: final same-process comparison and stable-image checks.
+- `07-indexed-coverage/`: indexed comparison with identical output pixels.
+
+Normal builds remain feature-gated and passed `cargo check --offline`. The native
+surface and GPU shader checks pass. The existing repository-wide formatting check
+has an unrelated pre-existing difference in `percussion_integration_tests.rs`;
+prototype Rust files are formatted separately.
+
+## Initial prototype verdict, before optimization (2026-11-02)
 
 The architecture works: static topology stays on the GPU, and a new projected
 history slot needs only a 144-byte CPU parameter update. On the heaviest default

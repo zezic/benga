@@ -1,5 +1,6 @@
 //! Throwaway GPU experiment: static topology, projected shared-vertex history,
 //! and procedural interval ribbons. This is deliberately separate from playback.
+use super::prepared::PreparedRibbons;
 use vello::wgpu::{self, util::DeviceExt};
 
 use super::super::{
@@ -57,12 +58,18 @@ pub(super) struct GpuRibbons {
     project_bindings: wgpu::BindGroup,
     additive_pipeline: wgpu::RenderPipeline,
     multiply_pipeline: wgpu::RenderPipeline,
+    indexed_additive_pipeline: wgpu::RenderPipeline,
+    indexed_multiply_pipeline: wgpu::RenderPipeline,
+    coverage_indices: wgpu::Buffer,
     fast_additive_pipeline: wgpu::RenderPipeline,
     fast_multiply_pipeline: wgpu::RenderPipeline,
+    baseline_additive_pipeline: wgpu::RenderPipeline,
+    baseline_multiply_pipeline: wgpu::RenderPipeline,
     render_bindings: wgpu::BindGroup,
     pub projected_history: wgpu::Buffer,
     vertex_count: u32,
     edge_count: u32,
+    prepared: PreparedRibbons,
 }
 
 impl GpuRibbons {
@@ -84,6 +91,11 @@ impl GpuRibbons {
             contents: bytemuck::cast_slice(edges),
             usage: wgpu::BufferUsages::STORAGE,
         });
+        let coverage_indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("PROTOTYPE static coverage quad indices"),
+            contents: bytemuck::cast_slice(&[0_u16, 1, 2, 2, 1, 3]),
+            usage: wgpu::BufferUsages::INDEX,
+        });
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PROTOTYPE frame parameters"),
             size: std::mem::size_of::<FrameParams>() as u64,
@@ -98,7 +110,19 @@ impl GpuRibbons {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("PROTOTYPE GPU projected ribbons"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("ribbons.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!(
+                    "{}\n{}",
+                    include_str!("support_hull.wgsl"),
+                    include_str!("ribbons.wgsl")
+                )
+                .into(),
+            ),
+        });
+        // Frozen first prototype for same-process, same-format comparisons.
+        let baseline_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("PROTOTYPE original GPU ribbon baseline"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("baseline.wgsl").into()),
         });
         let buffer_entry = |binding, visibility, ty| wgpu::BindGroupLayoutEntry {
             binding,
@@ -212,18 +236,18 @@ impl GpuRibbons {
                 bind_group_layouts: &[Some(&empty_layout), Some(&render_layout)],
                 immediate_size: 0,
             });
-        let pipeline = |label, vertex_entry, entry, blend| {
+        let pipeline = |module: &wgpu::ShaderModule, label, vertex_entry, entry, blend| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&render_pipeline_layout),
                 vertex: wgpu::VertexState {
-                    module: &shader,
+                    module,
                     entry_point: Some(vertex_entry),
                     compilation_options: Default::default(),
                     buffers: &[],
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &shader,
+                    module,
                     entry_point: Some(entry),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
@@ -240,6 +264,7 @@ impl GpuRibbons {
             })
         };
         let additive_pipeline = pipeline(
+            &shader,
             "PROTOTYPE additive ribbons",
             "ribbon_vertex",
             "ribbon_additive",
@@ -253,6 +278,7 @@ impl GpuRibbons {
             },
         );
         let multiply_pipeline = pipeline(
+            &shader,
             "PROTOTYPE multiplicative ribbons",
             "ribbon_vertex",
             "ribbon_multiply",
@@ -266,6 +292,7 @@ impl GpuRibbons {
             },
         );
         let fast_additive_pipeline = pipeline(
+            &shader,
             "PROTOTYPE vertex-colored additive ribbons",
             "ribbon_fast_vertex",
             "ribbon_fast_additive",
@@ -279,6 +306,7 @@ impl GpuRibbons {
             },
         );
         let fast_multiply_pipeline = pipeline(
+            &shader,
             "PROTOTYPE vertex-colored multiplicative ribbons",
             "ribbon_fast_vertex",
             "ribbon_fast_multiply",
@@ -291,18 +319,76 @@ impl GpuRibbons {
                 alpha: wgpu::BlendComponent::OVER,
             },
         );
+        let additive = wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent::OVER,
+        };
+        let multiply = wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Dst,
+                dst_factor: wgpu::BlendFactor::Zero,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent::OVER,
+        };
+        let baseline_additive_pipeline = pipeline(
+            &baseline_shader,
+            "PROTOTYPE original GPU additive",
+            "ribbon_fast_vertex",
+            "ribbon_fast_additive",
+            additive,
+        );
+        let baseline_multiply_pipeline = pipeline(
+            &baseline_shader,
+            "PROTOTYPE original GPU multiply",
+            "ribbon_fast_vertex",
+            "ribbon_fast_multiply",
+            multiply,
+        );
+        let indexed_additive_pipeline = pipeline(
+            &shader,
+            "PROTOTYPE indexed coverage additive",
+            "ribbon_indexed_vertex",
+            "ribbon_additive",
+            additive,
+        );
+        let indexed_multiply_pipeline = pipeline(
+            &shader,
+            "PROTOTYPE indexed coverage multiply",
+            "ribbon_indexed_vertex",
+            "ribbon_multiply",
+            multiply,
+        );
+        let prepared = PreparedRibbons::new(
+            device,
+            format,
+            &uniforms,
+            &edges,
+            &projected_history,
+            edge_count,
+        );
         Self {
             uniforms,
             project_pipeline,
             project_bindings,
             additive_pipeline,
             multiply_pipeline,
+            indexed_additive_pipeline,
+            indexed_multiply_pipeline,
+            coverage_indices,
             fast_additive_pipeline,
             fast_multiply_pipeline,
+            baseline_additive_pipeline,
+            baseline_multiply_pipeline,
             render_bindings,
             projected_history,
             vertex_count,
             edge_count,
+            prepared,
         }
     }
 
@@ -336,6 +422,20 @@ impl GpuRibbons {
         pass.draw(0..6, 0..self.edge_count * 2);
     }
 
+    pub fn draw_indexed_coverage(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        composite: ModelComposite,
+    ) {
+        pass.set_pipeline(match composite {
+            ModelComposite::Additive => &self.indexed_additive_pipeline,
+            ModelComposite::Multiplicative => &self.indexed_multiply_pipeline,
+        });
+        pass.set_bind_group(1, &self.render_bindings, &[]);
+        pass.set_index_buffer(self.coverage_indices.slice(..), wgpu::IndexFormat::Uint16);
+        pass.draw_indexed(0..6, 0, 0..self.edge_count * 2);
+    }
+
     pub fn draw_fast(&self, pass: &mut wgpu::RenderPass<'_>, composite: ModelComposite) {
         pass.set_pipeline(match composite {
             ModelComposite::Additive => &self.fast_additive_pipeline,
@@ -345,5 +445,30 @@ impl GpuRibbons {
         // One middle body plus two wings. Folded edges use two coverage quads
         // in the first twelve corners, with the last six corners degenerate.
         pass.draw(0..18, 0..self.edge_count);
+    }
+
+    pub fn draw_original(&self, pass: &mut wgpu::RenderPass<'_>, composite: ModelComposite) {
+        pass.set_pipeline(match composite {
+            ModelComposite::Additive => &self.baseline_additive_pipeline,
+            ModelComposite::Multiplicative => &self.baseline_multiply_pipeline,
+        });
+        pass.set_bind_group(1, &self.render_bindings, &[]);
+        pass.draw(0..18, 0..self.edge_count);
+    }
+
+    pub fn encode_prepare(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        timestamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
+    ) {
+        self.prepared.encode(encoder, timestamps);
+    }
+
+    pub fn draw_prepared(&self, pass: &mut wgpu::RenderPass<'_>, composite: ModelComposite) {
+        self.prepared.draw(pass, composite);
+    }
+
+    pub fn prepared_stats(&self) -> &wgpu::Buffer {
+        self.prepared.stats_buffer()
     }
 }

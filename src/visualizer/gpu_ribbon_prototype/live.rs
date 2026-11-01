@@ -21,10 +21,11 @@ use winit::{
 };
 
 use super::{
+    background::GpuBackground,
     fixtures::{self, ModelFixture, MotionCase, Output},
     gpu::{FrameParams, GpuRibbons},
 };
-use crate::visualizer::{geometry::Pose, Frame, ModelComposite, Renderer, RibbonInstance};
+use crate::visualizer::{geometry::Pose, ModelComposite, Renderer, RibbonInstance};
 
 const FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 60);
 const REFERENCE_SAMPLES: usize = 8;
@@ -36,20 +37,22 @@ enum Mode {
     Gpu,
     Reference,
     Coverage,
+    Original,
 }
 
 impl Mode {
     fn label(self) -> &'static str {
         match self {
             Self::Current => "1: current endpoint ribbons",
-            Self::Gpu => "2: GPU fast vertex-colored ribbons",
+            Self::Gpu => "2: optimized GPU prepared ribbons",
             Self::Reference => "3: sampled temporal reference (paused)",
             Self::Coverage => "4: GPU inverse-coverage ribbons",
+            Self::Original => "5: original GPU ribbon prototype",
         }
     }
 
     fn is_gpu(self) -> bool {
-        matches!(self, Self::Gpu | Self::Coverage)
+        matches!(self, Self::Gpu | Self::Coverage | Self::Original)
     }
 }
 
@@ -124,6 +127,7 @@ struct Resources {
     context: RenderContext,
     surface: RenderSurface<'static>,
     background: Background,
+    gpu_background: GpuBackground,
     _accumulation: wgpu::Texture,
     accumulation_view: wgpu::TextureView,
     current: Renderer,
@@ -164,12 +168,14 @@ impl Resources {
         let current = Renderer::new(device, ACCUMULATION_FORMAT);
         let gpu = GpuRibbons::new(device, ACCUMULATION_FORMAT, &model.vertices, &model.edges);
         let background = Background::new(&context, &surface, composite);
+        let gpu_background = GpuBackground::new(device, ACCUMULATION_FORMAT, &background.view);
         let (accumulation, accumulation_view) = Self::accumulation(&context, &surface);
         Ok(Self {
             window,
             context,
             surface,
             background,
+            gpu_background,
             _accumulation: accumulation,
             accumulation_view,
             current,
@@ -212,6 +218,11 @@ impl Resources {
         self.context
             .resize_surface(&mut self.surface, size.width, size.height);
         self.background = Background::new(&self.context, &self.surface, composite);
+        self.gpu_background = GpuBackground::new(
+            &self.context.devices[self.surface.dev_id].device,
+            ACCUMULATION_FORMAT,
+            &self.background.view,
+        );
         let (texture, view) = Self::accumulation(&self.context, &self.surface);
         self._accumulation = texture;
         self.accumulation_view = view;
@@ -278,6 +289,7 @@ struct Viewer {
     failure: Option<anyhow::Error>,
     last_title: Instant,
     exit_at: Option<Instant>,
+    presented_frames: u64,
 }
 
 impl Viewer {
@@ -343,54 +355,51 @@ impl Viewer {
             }
             self.output_dirty = false;
         }
-        let output = self.cached_output.as_ref();
-        let frame = if self.mode.is_gpu() {
-            Frame {
-                lines: &[],
-                model_lines: &[],
-                ribbons: &[],
-                model_composite: self.composite,
-                model_edge_capacity: 0,
-            }
-        } else {
-            output
-                .expect("CPU comparison geometry was prepared")
-                .frame(self.composite)
-        };
         let handle = &resources.context.devices[resources.surface.dev_id];
         let view = texture.texture.create_view(&Default::default());
         let mut encoder = handle.device.create_command_encoder(&Default::default());
-        resources.current.draw(
-            handle,
-            &mut encoder,
-            &resources.background.view,
-            &resources.accumulation_view,
-            Size::new(size.width as f64, size.height as f64),
-            frame,
-            None,
-            None,
-            1.0,
-            None,
-        );
+        if self.mode == Mode::Gpu {
+            resources.gpu.encode_prepare(&mut encoder, None);
+        }
         if self.mode.is_gpu() {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("PROTOTYPE live GPU ribbons"),
+                label: Some("PROTOTYPE retained background and GPU ribbons"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &resources.accumulation_view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
                 ..Default::default()
             });
-            if self.mode == Mode::Gpu {
-                resources.gpu.draw_fast(&mut pass, self.composite);
-            } else {
-                resources.gpu.draw(&mut pass, self.composite);
+            resources.gpu_background.draw(&mut pass);
+            match self.mode {
+                Mode::Gpu => resources.gpu.draw_prepared(&mut pass, self.composite),
+                Mode::Original => resources.gpu.draw_original(&mut pass, self.composite),
+                Mode::Coverage => resources.gpu.draw(&mut pass, self.composite),
+                _ => unreachable!(),
             }
+        } else {
+            let frame = self
+                .cached_output
+                .as_ref()
+                .expect("CPU comparison geometry was prepared")
+                .frame(self.composite);
+            resources.current.draw(
+                handle,
+                &mut encoder,
+                &resources.background.view,
+                &resources.accumulation_view,
+                Size::new(size.width as f64, size.height as f64),
+                frame,
+                None,
+                None,
+                1.0,
+                None,
+            );
         }
         resources.surface.blitter.copy(
             &handle.device,
@@ -402,6 +411,7 @@ impl Viewer {
         let cpu_ms = before.elapsed().as_secs_f64() * 1000.0;
         resources.window.pre_present_notify();
         handle.queue.present(texture);
+        self.presented_frames += 1;
         if reconfigure {
             resources.context.configure_surface(&resources.surface);
         }
@@ -416,7 +426,7 @@ impl Viewer {
                 ModelComposite::Multiplicative => "multiply",
             };
             resources.window.set_title(&format!(
-                "PROTOTYPE | {} | {} | {} / {} edges | frame {:.0}, {paused} | {composite}, opacity {:.3} | CPU {:.2} ms | reference {} samples | 1/2/3/4, arrows, space, B, +/-",
+                "PROTOTYPE | {} | {} | {} / {} edges | frame {:.0}, {paused} | {composite}, opacity {:.3} | CPU {:.2} ms | reference {} samples | 1/2/3/4/5, arrows, space, B, +/-",
                 self.mode.label(), case.name(), self.model.id, self.model.edges.len(),
                 self.frame, self.alpha, cpu_ms, self.reference_samples,
             ));
@@ -431,6 +441,7 @@ impl Viewer {
             KeyCode::Digit1 => self.mode = Mode::Current,
             KeyCode::Digit2 => self.mode = Mode::Gpu,
             KeyCode::Digit4 => self.mode = Mode::Coverage,
+            KeyCode::Digit5 => self.mode = Mode::Original,
             KeyCode::Digit3 => {
                 self.mode = Mode::Reference;
                 self.paused = true;
@@ -477,6 +488,11 @@ impl Viewer {
                 if let Some(resources) = &mut self.resources {
                     resources.background =
                         Background::new(&resources.context, &resources.surface, self.composite);
+                    resources.gpu_background = GpuBackground::new(
+                        &resources.context.devices[resources.surface.dev_id].device,
+                        ACCUMULATION_FORMAT,
+                        &resources.background.view,
+                    );
                 }
             }
             KeyCode::Equal | KeyCode::NumpadAdd => {
@@ -585,7 +601,7 @@ pub(super) fn run(model: ModelFixture, live_seconds: Option<f64>) -> anyhow::Res
         live_seconds.is_none_or(|seconds| seconds.is_finite() && seconds > 0.0),
         "--live-seconds must be finite and positive"
     );
-    eprintln!("GPU ribbon PROTOTYPE: 1=current, 2=GPU fast vertex colors, 3=paused sampled reference, 4=GPU inverse coverage; arrows=motion, space=pause, comma/period=step, R=reset, B=blend, +/-=opacity, Esc=close. CPU title timings are not GPU timings. Reference sampling is bounded by the device's buffer limit.");
+    eprintln!("GPU ribbon PROTOTYPE: 1=current, 2=optimized GPU prepared ribbons, 3=paused sampled reference, 4=GPU inverse coverage, 5=original GPU prototype; arrows=motion, space=pause, comma/period=step, R=reset, B=blend, +/-=opacity, Esc=close. CPU title timings are not GPU timings. Reference sampling is bounded by the device's buffer limit.");
     let event_loop = EventLoop::new()?;
     let alpha = if model.edges.len() <= 2 { 0.9 } else { 0.04 };
     let mut viewer = Viewer {
@@ -605,10 +621,21 @@ pub(super) fn run(model: ModelFixture, live_seconds: Option<f64>) -> anyhow::Res
         failure: None,
         last_title: Instant::now() - Duration::from_secs(1),
         exit_at: live_seconds.map(|seconds| Instant::now() + Duration::from_secs_f64(seconds)),
+        presented_frames: 0,
     };
     event_loop.run_app(&mut viewer)?;
     if let Some(error) = viewer.failure {
         return Err(error);
+    }
+    if live_seconds.is_some() {
+        anyhow::ensure!(
+            viewer.presented_frames > 0,
+            "native smoke run presented no frames"
+        );
+        eprintln!(
+            "Native smoke run presented {} frames",
+            viewer.presented_frames
+        );
     }
     Ok(())
 }

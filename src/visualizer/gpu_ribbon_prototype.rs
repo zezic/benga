@@ -1,9 +1,11 @@
 //! THROWAWAY: static geometry + GPU projected history + two-interval ribbons.
 //! This module is deliberately excluded from normal builds.
 
+mod background;
 mod fixtures;
 mod gpu;
 mod live;
+mod prepared;
 
 use std::{
     fs,
@@ -18,13 +20,16 @@ use serde_json::{json, Value};
 use vello::{kurbo::Size, util::RenderContext, wgpu};
 
 use super::{Frame, ModelComposite, Renderer};
+use background::GpuBackground;
 use fixtures::{ModelFixture, MotionCase, Output};
 use gpu::{FrameParams, GpuRibbons};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RenderPath {
     Current,
+    Original,
     Fast,
+    Prepared,
     Coverage,
 }
 
@@ -35,7 +40,9 @@ impl RenderPath {
     fn name(self) -> &'static str {
         match self {
             Self::Current => "current",
+            Self::Original => "original",
             Self::Fast => "gpu",
+            Self::Prepared => "prepared",
             Self::Coverage => "coverage",
         }
     }
@@ -52,7 +59,13 @@ pub fn run() -> anyhow::Result<()> {
             --model ID                 Model ID, single, or crossing (default: heaviest)\n\
             --extent WIDTHxHEIGHT,...  Default: 1920x1080,3840x2160\n\
             --motions NAME,...         Headless motion filter (includes along_edge_translation)\n\
+            --paths NAME,...           Headless method filter: current,original,gpu,prepared,coverage\n\
+            --merge-passes             Draw background and GPU ribbons in one pass\n\
+            --tight-support            Test smaller conservative coverage bounds\n\
+            --indexed-coverage         Reuse four coverage vertices per quad\n\
+            --float-target             Time/capture Rgba16Float (same as live viewer)\n\
             --samples N                Timestamp samples per method (default: 64)\n\
+            --warmup N                 Warmup frames per method (default: 16)\n\
             --alpha N                  Headless model opacity (default: 0.04)\n\
             --output PATH              Default: target/gpu-ribbon-prototype\n\
             --reference-samples N      Optional full-model float reference (default: 0)\n\
@@ -77,6 +90,8 @@ pub fn run() -> anyhow::Result<()> {
     }
     let samples: usize = value("--samples").unwrap_or("64").parse()?;
     ensure!((1..=1024).contains(&samples), "samples must be 1..=1024");
+    let warmup: usize = value("--warmup").unwrap_or("16").parse()?;
+    ensure!(warmup <= 1024, "warmup must be at most 1024");
     let alpha: f32 = value("--alpha").unwrap_or("0.04").parse()?;
     ensure!(
         alpha.is_finite() && (0.0..=1.0).contains(&alpha),
@@ -110,11 +125,34 @@ pub fn run() -> anyhow::Result<()> {
         })
         .collect();
     ensure!(!motions.is_empty(), "motion filter matched no cases");
+    let merge_passes = args.iter().any(|arg| arg == "--merge-passes");
+    let tight_support = args.iter().any(|arg| arg == "--tight-support");
+    let indexed_coverage = args.iter().any(|arg| arg == "--indexed-coverage");
+    let target_format = if args.iter().any(|arg| arg == "--float-target") {
+        wgpu::TextureFormat::Rgba16Float
+    } else {
+        wgpu::TextureFormat::Bgra8Unorm
+    };
+    let paths: Vec<_> = [
+        RenderPath::Current,
+        RenderPath::Original,
+        RenderPath::Fast,
+        RenderPath::Prepared,
+        RenderPath::Coverage,
+    ]
+    .into_iter()
+    .filter(|path| {
+        value("--paths").is_none_or(|list| list.split(',').any(|name| name == path.name()))
+    })
+    .collect();
+    ensure!(!paths.is_empty(), "method filter matched no paths");
     let mut cases = Vec::new();
     let mut adapters = Vec::new();
     for (width, height) in extents {
-        let mut experiment =
-            Offscreen::new(&model, width, height, wgpu::TextureFormat::Bgra8Unorm)?;
+        let mut experiment = Offscreen::new(&model, width, height, target_format)?;
+        experiment.merge_passes = merge_passes;
+        experiment.tight_support = tight_support;
+        experiment.indexed_coverage = indexed_coverage;
         adapters.push(experiment.adapter());
         for &motion in &motions {
             experiment.seed(&model, motion, 0.0, alpha)?;
@@ -129,8 +167,8 @@ pub fn run() -> anyhow::Result<()> {
                 }
             }
             let mut variants = Vec::new();
-            for prototype in [RenderPath::Current, RenderPath::Fast, RenderPath::Coverage] {
-                for _ in 0..16 {
+            for &prototype in &paths {
+                for _ in 0..warmup {
                     experiment.submit(
                         &output,
                         motion,
@@ -144,6 +182,7 @@ pub fn run() -> anyhow::Result<()> {
                 experiment.wait()?;
                 let mut gpu = Vec::new();
                 let mut compute = Vec::new();
+                let mut prepare = Vec::new();
                 let mut render = Vec::new();
                 let mut cpu = Vec::new();
                 for _ in 0..samples {
@@ -156,7 +195,7 @@ pub fn run() -> anyhow::Result<()> {
                         prototype,
                         true,
                     ));
-                    let stamps = experiment.timestamps(if prototype.is_gpu() { 6 } else { 2 })?;
+                    let stamps = experiment.timestamps(experiment.query_count(prototype))?;
                     let first = stamps.iter().copied().fold(f64::INFINITY, f64::min);
                     let last = stamps.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                     gpu.push(last - first);
@@ -165,44 +204,58 @@ pub fn run() -> anyhow::Result<()> {
                     } else {
                         0.0
                     });
-                    render.push(if prototype.is_gpu() {
-                        stamps[5] - stamps[4]
+                    prepare.push(if prototype == RenderPath::Prepared {
+                        stamps[3] - stamps[2]
                     } else {
-                        stamps[1] - stamps[0]
+                        0.0
                     });
+                    render.push(stamps[stamps.len() - 1] - stamps[stamps.len() - 2]);
                 }
                 let method = prototype.name();
                 eprintln!("{width}x{height} {} {method}: GPU {:.3}/{:.3}ms median/p95; CPU upload/encode {:.3}ms",
                     motion.name(),percentile(&gpu,0.5),percentile(&gpu,0.95),percentile(&cpu,0.5));
-                variants.push(json!({"method":method,"gpu_total_ms":summary(&gpu),"gpu_compute_ms":summary(&compute),
+                variants.push(json!({"method":method,"gpu_total_ms":summary(&gpu),"gpu_compute_ms":summary(&compute),"gpu_edge_prepare_ms":summary(&prepare),
                     "gpu_ribbon_render_ms":summary(&render),"cpu_upload_encode_submit_ms":summary(&cpu),
                     "gpu_samples_ms":gpu,"cpu_samples_ms":cpu,
                     "cpu_generated_ribbon_bytes":if prototype.is_gpu() {0} else {output.ribbons.len()*80},
-                    "triangle_upper_bound":match prototype {RenderPath::Current=>output.ribbons.len(),RenderPath::Fast=>model.edges.len()*6,RenderPath::Coverage=>model.edges.len()*4},
+                    "triangle_upper_bound":match prototype {RenderPath::Current=>output.ribbons.len(),RenderPath::Original|RenderPath::Fast|RenderPath::Prepared=>model.edges.len()*6,RenderPath::Coverage=>model.edges.len()*4},
                 }));
             }
             let mut previews = Vec::new();
+            let mut repeat_checks = Vec::new();
             for (theme, composite) in [
                 ("dark", ModelComposite::Additive),
                 ("light", ModelComposite::Multiplicative),
             ] {
                 experiment.background(composite)?;
-                for prototype in [RenderPath::Current, RenderPath::Fast, RenderPath::Coverage] {
+                for &prototype in &paths {
                     let method = prototype.name();
                     experiment.submit(&output, motion, 0.0, alpha, composite, prototype, false);
                     let pixels = experiment.pixels()?;
+                    if prototype == RenderPath::Prepared {
+                        experiment.submit(&output, motion, 0.0, alpha, composite, prototype, false);
+                        repeat_checks.push(json!({"theme":theme,"metrics":fixtures::image_metrics(&pixels,&experiment.pixels()?)}));
+                    }
                     let name = format!("{width}x{height}-{}-{theme}-{method}.png", motion.name());
                     write_png(&directory.join(&name), width, height, &pixels)?;
                     previews.push(name);
                 }
             }
             experiment.background(ModelComposite::Additive)?;
-            cases.push(json!({"width":width,"height":height,"motion":motion.name(),"projection_check":projection,
+            let stats = if paths.contains(&RenderPath::Prepared) {
+                experiment.prepared_stats()?
+            } else {
+                Value::Null
+            };
+            cases.push(json!({"width":width,"height":height,"motion":motion.name(),"projection_check":projection,"prepared_stats":stats,"prepared_repeat_checks":repeat_checks,
                 "cpu_baseline_projection_and_build_ms":summary(&build),"methods":variants,"previews":previews}));
         }
         if references > 0 {
             let mut float =
                 Offscreen::new(&model, width, height, wgpu::TextureFormat::Rgba16Float)?;
+            float.merge_passes = merge_passes;
+            float.tight_support = tight_support;
+            float.indexed_coverage = indexed_coverage;
             let required = (model.edges.len() * 2 * references).next_power_of_two() as u64 * 80;
             ensure!(required <= u64::from(float.context.devices[float.device_id].device.limits().max_storage_buffer_binding_size),
                 "reference exceeds storage binding limit; reduce --reference-samples or use --model single/crossing");
@@ -212,7 +265,9 @@ pub fn run() -> anyhow::Result<()> {
                 let reference = model.reference(width, height, motion, 0.0, alpha, references);
                 for (name, geometry, prototype) in [
                     ("current", &baseline, RenderPath::Current),
+                    ("original", &baseline, RenderPath::Original),
                     ("gpu", &baseline, RenderPath::Fast),
+                    ("prepared", &baseline, RenderPath::Prepared),
                     ("coverage", &baseline, RenderPath::Coverage),
                     ("reference", &reference, RenderPath::Current),
                 ] {
@@ -246,7 +301,7 @@ pub fn run() -> anyhow::Result<()> {
                 let frame = index as f32 * 0.1;
                 experiment.seed(&model, MotionCase::Reverse, frame, alpha)?;
                 let output = model.baseline(width, height, MotionCase::Reverse, frame, alpha);
-                for prototype in [RenderPath::Current, RenderPath::Fast, RenderPath::Coverage] {
+                for &prototype in &paths {
                     experiment.submit(
                         &output,
                         MotionCase::Reverse,
@@ -266,13 +321,13 @@ pub fn run() -> anyhow::Result<()> {
             }
         }
     }
-    let checks = sparse_checks(&directory)?;
+    let checks = sparse_checks(&directory, merge_passes, tight_support, indexed_coverage)?;
     let report = json!({"prototype":true,"model":model.id,"vertices":model.vertices.len(),"edges":model.edges.len(),
-        "shutter_frames":2,"history_samples":3,"alpha":alpha,"samples":samples,"adapters":adapters,"cases":cases,
-        "methods":{"current":"Unchanged CPU endpoint sweep","gpu":"GPU vertex-colored body and two wings, actual middle pose","coverage":"GPU two-interval inverse bilinear coverage"},
+        "shutter_frames":2,"history_samples":3,"alpha":alpha,"samples":samples,"warmup":warmup,"adapters":adapters,"cases":cases,"merge_passes":merge_passes,"tight_support":tight_support,"indexed_coverage":indexed_coverage,"timing_target_format":format!("{target_format:?}"),
+        "methods":{"current":"Unchanged CPU endpoint sweep","original":"Frozen first GPU prototype shader","gpu":"Direct vertex-generated crossing geometry","prepared":"Shared edge preparation, specialized shaders and deterministic active draw lists","coverage":"GPU two-interval inverse bilinear coverage"},
         "gpu_parameter_upload_bytes_per_frame":std::mem::size_of::<FrameParams>(),
         "gpu_projected_history_bytes":model.vertices.len()*3*16,
-        "sparse_checks":checks,"format":"Bgra8Unorm for timing and dark/light previews; Rgba16Float for temporal references",
+        "sparse_checks":checks,"format":"Timing/previews use timing_target_format; sampled references always use Rgba16Float",
         "timing_scope":"GPU total from compute-pass beginning through final render-pass end; current renderer single pass. GPU prototype includes compute, cached-background draw, ribbon draw and transitions. CPU upload/encode excludes baseline geometry build (reported separately). Single-frame samples wait before Metal timestamp resolve; waits/readback excluded from timestamps. No audio, UI, presentation, or sustained-FPS claim.",
         "quality_scope":"Prototype uses a normalized tent-shutter coverage model; production is a stylized swept-line effect. Brightness and sampled reference therefore differ intentionally. Full resolution; no render-target downscaling.",
     });
@@ -305,6 +360,10 @@ struct Offscreen {
     target_view: wgpu::TextureView,
     renderer: Renderer,
     ribbons: GpuRibbons,
+    background_draw: GpuBackground,
+    merge_passes: bool,
+    tight_support: bool,
+    indexed_coverage: bool,
     queries: wgpu::QuerySet,
     resolve: wgpu::Buffer,
     readback: wgpu::Buffer,
@@ -360,15 +419,16 @@ impl Offscreen {
         let target_view = target.create_view(&Default::default());
         let renderer = Renderer::new(device, format);
         let ribbons = GpuRibbons::new(device, format, &model.vertices, &model.edges);
+        let background_draw = GpuBackground::new(device, format, &background_view);
         let queries = device.create_query_set(&wgpu::QuerySetDescriptor {
             label: Some("Prototype pass timings"),
             ty: wgpu::QueryType::Timestamp,
-            count: 6,
+            count: 8,
         });
         let buffer = |label, usage| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
-                size: 48,
+                size: 64,
                 usage,
                 mapped_at_creation: false,
             })
@@ -393,6 +453,10 @@ impl Offscreen {
             target_view,
             renderer,
             ribbons,
+            background_draw,
+            merge_passes: false,
+            tight_support: false,
+            indexed_coverage: false,
             queries,
             resolve,
             readback,
@@ -458,16 +522,15 @@ impl Offscreen {
     ) -> anyhow::Result<()> {
         let handle = &self.context.devices[self.device_id];
         for slot in 0..3 {
-            self.ribbons.update(
-                &handle.queue,
-                FrameParams::new(
-                    self.width,
-                    self.height,
-                    motion.pose_at(frame - 2.0 + slot as f32, self.height),
-                    slot,
-                    alpha,
-                ),
+            let mut params = FrameParams::new(
+                self.width,
+                self.height,
+                motion.pose_at(frame - 2.0 + slot as f32, self.height),
+                slot,
+                alpha,
             );
+            params.history[3] = u32::from(self.tight_support);
+            self.ribbons.update(&handle.queue, params);
             let mut encoder = handle.device.create_command_encoder(&Default::default());
             self.ribbons.encode_project(&mut encoder, None);
             handle.queue.submit([encoder.finish()]);
@@ -488,16 +551,15 @@ impl Offscreen {
         let handle = &self.context.devices[self.device_id];
         let mut encoder = handle.device.create_command_encoder(&Default::default());
         if prototype.is_gpu() {
-            self.ribbons.update(
-                &handle.queue,
-                FrameParams::new(
-                    self.width,
-                    self.height,
-                    motion.pose_at(frame, self.height),
-                    2,
-                    alpha,
-                ),
+            let mut params = FrameParams::new(
+                self.width,
+                self.height,
+                motion.pose_at(frame, self.height),
+                2,
+                alpha,
             );
+            params.history[3] = u32::from(self.tight_support);
+            self.ribbons.update(&handle.queue, params);
             self.ribbons.encode_project(
                 &mut encoder,
                 timed.then_some(wgpu::ComputePassTimestampWrites {
@@ -507,12 +569,26 @@ impl Offscreen {
                 }),
             );
         }
-        if timed {
-            self.renderer.benchmark_timestamps(
-                &self.queries,
-                if prototype.is_gpu() { 2 } else { 0 },
-                if prototype.is_gpu() { 3 } else { 1 },
+        if prototype == RenderPath::Prepared {
+            self.ribbons.encode_prepare(
+                &mut encoder,
+                timed.then_some(wgpu::ComputePassTimestampWrites {
+                    query_set: &self.queries,
+                    beginning_of_pass_write_index: Some(2),
+                    end_of_pass_write_index: Some(3),
+                }),
             );
+        }
+        let background_pair = if prototype == RenderPath::Prepared {
+            4
+        } else if prototype.is_gpu() {
+            2
+        } else {
+            0
+        };
+        if timed && !(prototype.is_gpu() && self.merge_passes) {
+            self.renderer
+                .benchmark_timestamps(&self.queries, background_pair, background_pair + 1);
         }
         let geometry = if prototype.is_gpu() {
             Frame {
@@ -525,19 +601,22 @@ impl Offscreen {
         } else {
             output.frame(composite)
         };
-        self.renderer.draw(
-            handle,
-            &mut encoder,
-            &self.background_view,
-            &self.target_view,
-            Size::new(self.width as f64, self.height as f64),
-            geometry,
-            None,
-            None,
-            1.0,
-            None,
-        );
+        if !(prototype.is_gpu() && self.merge_passes) {
+            self.renderer.draw(
+                handle,
+                &mut encoder,
+                &self.background_view,
+                &self.target_view,
+                Size::new(self.width as f64, self.height as f64),
+                geometry,
+                None,
+                None,
+                1.0,
+                None,
+            );
+        }
         if prototype.is_gpu() {
+            let render_pair = background_pair + if self.merge_passes { 0 } else { 2 };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Prototype GPU ribbons"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -545,25 +624,59 @@ impl Offscreen {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
+                        load: if self.merge_passes {
+                            wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                        } else {
+                            wgpu::LoadOp::Load
+                        },
                         store: wgpu::StoreOp::Store,
                     },
                 })],
                 timestamp_writes: timed.then_some(wgpu::RenderPassTimestampWrites {
                     query_set: &self.queries,
-                    beginning_of_pass_write_index: Some(4),
-                    end_of_pass_write_index: Some(5),
+                    beginning_of_pass_write_index: Some(render_pair),
+                    end_of_pass_write_index: Some(render_pair + 1),
                 }),
                 ..Default::default()
             });
-            if prototype == RenderPath::Fast {
-                self.ribbons.draw_fast(&mut pass, composite);
-            } else {
-                self.ribbons.draw(&mut pass, composite);
+            if self.merge_passes {
+                self.background_draw.draw(&mut pass);
+            }
+            match prototype {
+                RenderPath::Fast => self.ribbons.draw_fast(&mut pass, composite),
+                RenderPath::Original => self.ribbons.draw_original(&mut pass, composite),
+                RenderPath::Prepared => self.ribbons.draw_prepared(&mut pass, composite),
+                RenderPath::Coverage if self.indexed_coverage => {
+                    self.ribbons.draw_indexed_coverage(&mut pass, composite)
+                }
+                _ => self.ribbons.draw(&mut pass, composite),
             }
         }
         handle.queue.submit([encoder.finish()]);
         before.elapsed().as_secs_f64() * 1000.0
+    }
+    fn query_count(&self, path: RenderPath) -> u32 {
+        if !path.is_gpu() {
+            2
+        } else {
+            4 + if path == RenderPath::Prepared { 2 } else { 0 }
+                + if self.merge_passes { 0 } else { 2 }
+        }
+    }
+    fn prepared_stats(&self) -> anyhow::Result<Value> {
+        let bytes = self.read_buffer(
+            self.ribbons.prepared_stats(),
+            (prepared::STATS_WORDS * 4) as u64,
+        )?;
+        let words: Vec<u32> = bytes
+            .chunks_exact(4)
+            .map(|b| u32::from_ne_bytes(b.try_into().unwrap()))
+            .collect();
+        Ok(
+            json!({"triangle_instances":words[1],"parallel_interval_instances":words[5],"input_edges":words[8],"culled_edges":words[9],
+            "body_triangles":words[10],"ordinary_wing_triangles":words[11],"masked_crossing_triangles":words[12],"parallel_edges":words[13],"culled_triangles":words[14],
+            "regular_draw_triangles":words[17],"masked_draw_triangles":words[21],"partial_body_draw_triangles":words[25]}),
+        )
     }
     fn timestamps(&self, count: u32) -> anyhow::Result<Vec<f64>> {
         self.wait()?; // Metal sampling must complete before encoding resolve.
@@ -736,11 +849,19 @@ fn write_png(path: &Path, width: u32, height: u32, pixels: &[u8]) -> anyhow::Res
     Ok(())
 }
 
-fn sparse_checks(directory: &Path) -> anyhow::Result<Vec<Value>> {
+fn sparse_checks(
+    directory: &Path,
+    merge_passes: bool,
+    tight_support: bool,
+    indexed_coverage: bool,
+) -> anyhow::Result<Vec<Value>> {
     let mut results = Vec::new();
     for model in [ModelFixture::single_edge(), ModelFixture::crossing_edges()] {
         let (width, height) = (960, 540);
         let mut renderer = Offscreen::new(&model, width, height, wgpu::TextureFormat::Rgba16Float)?;
+        renderer.merge_passes = merge_passes;
+        renderer.tight_support = tight_support;
+        renderer.indexed_coverage = indexed_coverage;
         for motion in [
             MotionCase::Still,
             MotionCase::Translate,
@@ -754,9 +875,11 @@ fn sparse_checks(directory: &Path) -> anyhow::Result<Vec<Value>> {
             let baseline = model.baseline(width, height, motion, 0.0, alpha);
             let reference = model.reference(width, height, motion, 0.0, alpha, 128);
             let mut images = Vec::new();
+            let mut repeat = Value::Null;
             for (name, output, prototype) in [
                 ("current", &baseline, RenderPath::Current),
                 ("gpu", &baseline, RenderPath::Fast),
+                ("prepared", &baseline, RenderPath::Prepared),
                 ("coverage", &baseline, RenderPath::Coverage),
                 ("reference", &reference, RenderPath::Current),
             ] {
@@ -770,6 +893,18 @@ fn sparse_checks(directory: &Path) -> anyhow::Result<Vec<Value>> {
                     false,
                 );
                 let pixels = renderer.pixels()?;
+                if prototype == RenderPath::Prepared {
+                    renderer.submit(
+                        output,
+                        motion,
+                        0.0,
+                        alpha,
+                        ModelComposite::Additive,
+                        prototype,
+                        false,
+                    );
+                    repeat = fixtures::image_metrics(&pixels, &renderer.pixels()?);
+                }
                 write_png(
                     &directory.join(format!("{}-{}-{name}.png", model.id, motion.name())),
                     width,
@@ -779,10 +914,62 @@ fn sparse_checks(directory: &Path) -> anyhow::Result<Vec<Value>> {
                 images.push(pixels);
             }
             results.push(
-                json!({"model":model.id,"motion":motion.name(),"projection":projection,
-                "current_vs_reference":fixtures::image_metrics(&images[0],&images[3]),
-                "gpu_vs_reference":fixtures::image_metrics(&images[1],&images[3]),
-                "coverage_vs_reference":fixtures::image_metrics(&images[2],&images[3])}),
+                json!({"model":model.id,"motion":motion.name(),"projection":projection,"prepared_repeat":repeat,
+                "current_vs_reference":fixtures::image_metrics(&images[0],&images[4]),
+                "gpu_vs_reference":fixtures::image_metrics(&images[1],&images[4]),
+                "prepared_vs_reference":fixtures::image_metrics(&images[2],&images[4]),
+                "prepared_vs_direct":fixtures::image_metrics(&images[2],&images[1]),
+                "coverage_vs_reference":fixtures::image_metrics(&images[3],&images[4])}),
+            );
+        }
+        for (check, frame, alpha) in [("zero_alpha", 0.0, 0.0), ("fully_offscreen", 12.0, 0.8)] {
+            let motion = MotionCase::AlongEdge;
+            renderer.seed(&model, motion, frame, alpha)?;
+            let output = model.baseline(width, height, motion, frame, alpha);
+            renderer.submit(
+                &output,
+                motion,
+                frame,
+                alpha,
+                ModelComposite::Additive,
+                RenderPath::Prepared,
+                false,
+            );
+            let stats = renderer.prepared_stats()?;
+            ensure!(
+                stats["triangle_instances"] == 0 && stats["parallel_interval_instances"] == 0,
+                "culling check failed: {check}: {stats}"
+            );
+            ensure!(
+                renderer
+                    .pixels()?
+                    .chunks_exact(4)
+                    .all(|pixel| pixel[..3] == [5, 5, 5]),
+                "culled geometry changed pixels: {check}"
+            );
+            results.push(json!({"model":model.id,"check":check,"stats":stats}));
+        }
+        if model.id == "synthetic_single_edge" {
+            let motion = MotionCase::AlongEdge;
+            let frame = 9.5;
+            renderer.seed(&model, motion, frame, 0.8)?;
+            let output = model.baseline(width, height, motion, frame, 0.8);
+            renderer.submit(
+                &output,
+                motion,
+                frame,
+                0.8,
+                ModelComposite::Additive,
+                RenderPath::Prepared,
+                false,
+            );
+            let stats = renderer.prepared_stats()?;
+            ensure!(
+                stats["parallel_interval_instances"].as_u64().unwrap() > 0,
+                "culling lost a historical swept interval"
+            );
+            results.push(
+                json!({"model":model.id,"check":"historical_sweep_reenters_view","stats":stats}),
             );
         }
     }

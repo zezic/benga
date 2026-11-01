@@ -2496,7 +2496,7 @@ impl AnalysisOverlay {
             let mut path = BezPath::new();
             for (index, value) in shape.iter().enumerate() {
                 let point = Point::new(
-                    plot.x0 + (index as f64 + 0.5) / shape.len() as f64 * plot.width(),
+                    plot.x0 + index as f64 / (shape.len() - 1) as f64 * plot.width(),
                     baseline - f64::from(value.clamp(-1.0, 1.0)) * plot.height() * 0.5,
                 );
                 if index == 0 {

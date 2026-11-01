@@ -807,10 +807,9 @@ impl AnalysisOverlay {
             "SOLID: PERCENTILE CUTS"
         };
         let output_floors = match (
-            reference.thresholds.filters.min_sharpness,
-            reference.thresholds.filters.attack_level,
+            reference.thresholds.sharpness_floor_enabled(),
+            reference.thresholds.energy_floor_enabled(),
         ) {
-            (true, true) if reference.thresholds.cloud_enabled => "DASH: FLOOR ENERGY OR SHARPNESS",
             (true, true) => "DASH: TRIGGER FLOORS",
             (true, false) => "DASH: SHARPNESS FLOOR",
             (false, true) => "DASH: ENERGY FLOOR",
@@ -853,7 +852,15 @@ impl AnalysisOverlay {
             || filters.mix_rms
             || filters.output_interval;
         let shaded_features = if reference.thresholds.cloud_enabled {
-            "SHADE: ENERGY OR SHARPNESS FLOORS"
+            match (
+                reference.thresholds.energy_floor_enabled(),
+                reference.thresholds.sharpness_floor_enabled(),
+            ) {
+                (true, true) => "SHADE: ENERGY OR SHARPNESS FLOORS",
+                (true, false) => "SHADE: CLOUD ENERGY FLOOR",
+                (false, true) => "SHADE: CLOUD SHARPNESS FLOOR",
+                (false, false) => "CLOUD FLOORS OFF",
+            }
         } else {
             "SHADE: SHARPNESS + ENERGY"
         };
@@ -887,6 +894,13 @@ impl AnalysisOverlay {
             "heatmap_sharpness_cloud",
             heatmap_sharpness_cloud_caption(&reference),
             8.8,
+            UiFace::SemiBold,
+        );
+        self.cache(
+            fonts,
+            "heatmap_sharpness_threshold",
+            heatmap_sharpness_threshold_caption(&reference),
+            9.5,
             UiFace::SemiBold,
         );
         let resolution = self
@@ -3090,6 +3104,7 @@ impl AnalysisOverlay {
             for (index, key) in ["heatmap_cloud", "heatmap_sharpness_cloud"]
                 .into_iter()
                 .enumerate()
+                .filter(|(index, _)| *index == 0 || !thresholds.cloud_enabled)
             {
                 if let Some(label) = self.labels.get(key) {
                     let y = (cloud.y0 - stage.px(4.0))
@@ -3131,7 +3146,7 @@ impl AnalysisOverlay {
             },
             thresholds.trigger_energy_floor,
         );
-        if thresholds.filters.min_sharpness {
+        if thresholds.sharpness_floor_enabled() {
             segmented_rule(
                 scene,
                 (physical.x, plot.y0).into(),
@@ -3142,7 +3157,7 @@ impl AnalysisOverlay {
                 stage.px(3.0),
             );
         }
-        if thresholds.filters.attack_level {
+        if thresholds.energy_floor_enabled() {
             segmented_rule(
                 scene,
                 (plot.x0, physical.y).into(),
@@ -3232,6 +3247,52 @@ impl AnalysisOverlay {
             palette.muted.with_alpha(0.45),
             None,
             &plot,
+        );
+        self.draw_heatmap_sharpness_threshold_label(scene, plot, &reference, stage, palette);
+    }
+
+    fn draw_heatmap_sharpness_threshold_label(
+        &self,
+        scene: &mut Scene,
+        plot: Rect,
+        reference: &PercussionReferenceSnapshot,
+        stage: &Stage,
+        palette: ScenePalette,
+    ) {
+        let Some(guide) = heatmap_sharpness_threshold_guide(plot, reference) else {
+            return;
+        };
+        let background = if palette.ink.components[..3].iter().sum::<f32>() > 1.5 {
+            Color::BLACK
+        } else {
+            Color::WHITE
+        };
+        let Some(label) = self.labels.get("heatmap_sharpness_threshold") else {
+            return;
+        };
+        let scale =
+            ((plot.width() - stage.px(8.0)) / (label.text.width() * stage.unit).max(1.0)).min(1.0);
+        let unit = stage.unit * scale;
+        let width = label.text.width() * unit;
+        let x = (guide.p1.x + stage.px(4.0)).min(plot.x1 - width - stage.px(4.0));
+        let baseline = plot.y1 - stage.px(5.0);
+        let bounds = Rect::new(
+            x - unit * 2.0,
+            baseline - unit * 10.0,
+            x + width + unit * 2.0,
+            baseline + unit * 3.0,
+        );
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            background.with_alpha(0.92),
+            None,
+            &bounds,
+        );
+        label.text.draw_left(
+            scene,
+            Affine::translate((x, baseline)) * Affine::scale(unit),
+            palette.ink.with_alpha(0.9),
         );
     }
 
@@ -3625,8 +3686,8 @@ fn heatmap_feature_areas(plot: Rect, reference: &PercussionReferenceSnapshot) ->
         thresholds.trigger_energy_floor,
     );
     match (
-        thresholds.filters.attack_level,
-        thresholds.filters.min_sharpness,
+        thresholds.energy_floor_enabled(),
+        thresholds.sharpness_floor_enabled(),
     ) {
         (false, false) => [nonempty(base), None],
         (true, false) => [
@@ -3649,6 +3710,32 @@ fn heatmap_feature_areas(plot: Rect, reference: &PercussionReferenceSnapshot) ->
                 )),
             ]
         }
+    }
+}
+
+fn heatmap_sharpness_threshold_guide(
+    plot: Rect,
+    reference: &PercussionReferenceSnapshot,
+) -> Option<Line> {
+    let thresholds = reference.thresholds;
+    if !thresholds.cloud_enabled || !thresholds.sharpness_floor_enabled() {
+        return None;
+    }
+    let corner = heatmap_position(
+        plot,
+        reference,
+        thresholds.trigger_sharpness_floor,
+        thresholds.trigger_energy_floor,
+    );
+    Some(Line::new((corner.x, plot.y0), (corner.x, plot.y1)))
+}
+
+fn heatmap_sharpness_threshold_caption(reference: &PercussionReferenceSnapshot) -> String {
+    let thresholds = reference.thresholds;
+    if thresholds.cloud_enabled && thresholds.sharpness_floor_enabled() {
+        format!("SHARPNESS ≥ {:.3}", thresholds.trigger_sharpness_floor)
+    } else {
+        String::new()
     }
 }
 
@@ -3680,7 +3767,7 @@ fn heatmap_sharpness_cloud_caption(reference: &PercussionReferenceSnapshot) -> S
         .sharpness_cloud_boundary
         .map_or_else(String::new, |boundary| {
             let thresholds = reference.thresholds;
-            let floor = if !thresholds.filters.min_sharpness {
+            let floor = if !thresholds.sharpness_floor_enabled() {
                 "FLOOR OFF".to_owned()
             } else {
                 format!(
@@ -3697,7 +3784,7 @@ fn heatmap_sharpness_cloud_caption(reference: &PercussionReferenceSnapshot) -> S
                 "SHARPNESS CLOUD {:.2}..{:.2} · {floor}{}",
                 boundary.sharpness_min,
                 boundary.sharpness_max,
-                if thresholds.cloud_enabled {
+                if thresholds.cloud_energy_enabled && thresholds.cloud_sharpness_enabled {
                     " · ENERGY OR SHARPNESS"
                 } else {
                     ""
@@ -3712,7 +3799,7 @@ fn heatmap_cloud_caption(reference: &PercussionReferenceSnapshot) -> String {
         .map_or_else(String::new, |boundary| {
             let thresholds = reference.thresholds;
             let duration = thresholds.feature_seconds;
-            let floor = if !thresholds.filters.attack_level {
+            let floor = if !thresholds.energy_floor_enabled() {
                 "FLOOR OFF".to_owned()
             } else {
                 format!(
@@ -4196,7 +4283,7 @@ mod tests {
                     .map(|(toggle, _, rect)| (slider.parameter, toggle, rect.center()))
             })
             .collect::<Vec<_>>();
-        assert_eq!(switches.len(), 12);
+        assert_eq!(switches.len(), 13);
         for (scalar, toggle, center) in switches {
             let value = visualizer.parameter_value(scalar);
             let original_enabled = visualizer.parameter_value(toggle);
@@ -4349,6 +4436,8 @@ mod tests {
         reference.thresholds.trigger_sharpness_floor = 0.65;
         reference.thresholds.sharpness_cloud_active = true;
         reference.thresholds.cloud_enabled = true;
+        reference.thresholds.cloud_energy_enabled = true;
+        reference.thresholds.cloud_sharpness_enabled = true;
         let sharpness_only = heatmap_cloud_bounds(plot, &reference).unwrap();
         assert!((sharpness_only.x0 - 90.0).abs() < 1e-5);
         assert!((sharpness_only.x1 - 330.0).abs() < 1e-5);
@@ -4380,6 +4469,8 @@ mod tests {
         let mut reference = PercussionReferenceSnapshot::default();
         reference.thresholds.feature_seconds = 0.044;
         reference.thresholds.cloud_enabled = true;
+        reference.thresholds.cloud_energy_enabled = true;
+        reference.thresholds.cloud_sharpness_enabled = true;
         reference.thresholds.trigger_sharpness_floor = 0.75;
         reference.thresholds.trigger_energy_floor = 0.044 * 1e-3;
         let contains = |reference: &PercussionReferenceSnapshot, sharpness, db: f32| {
@@ -4400,25 +4491,25 @@ mod tests {
         };
         assert_eq!(energy.y1, sharpness.y0, "union arms have no darker overlap");
 
-        reference.thresholds.filters.attack_level = false;
+        reference.thresholds.cloud_energy_enabled = false;
         assert!(
             !contains(&reference, 0.2, -10.0),
             "disabled energy is excluded from OR"
         );
         assert!(contains(&reference, 0.9, -60.0));
-        reference.thresholds.filters.min_sharpness = false;
+        reference.thresholds.cloud_sharpness_enabled = false;
         assert!(
             contains(&reference, 0.2, -60.0),
             "both disabled bypass the floor gate"
         );
-        reference.thresholds.filters.attack_level = true;
+        reference.thresholds.cloud_energy_enabled = true;
         assert!(contains(&reference, 0.2, -10.0));
         assert!(
             !contains(&reference, 0.9, -60.0),
             "disabled sharpness cannot auto-pass OR"
         );
 
-        reference.thresholds.filters.min_sharpness = true;
+        reference.thresholds.cloud_sharpness_enabled = true;
         reference.thresholds.sharpness_effective_bound = Some(0.5);
         reference.thresholds.energy_effective_bound = Some(0.044 * 1e-5);
         assert!(
@@ -4441,6 +4532,54 @@ mod tests {
             contains(&reference, 0.9, -10.0),
             "fixed mode keeps its existing AND area"
         );
+    }
+
+    #[test]
+    fn heatmap_sharpness_threshold_spans_plot_and_keeps_saved_fallback() {
+        let plot = Rect::new(10.0, 20.0, 410.0, 220.0);
+        let mut reference = PercussionReferenceSnapshot::default();
+        reference.thresholds.feature_seconds = 0.044;
+        reference.thresholds.cloud_enabled = true;
+        reference.thresholds.cloud_energy_enabled = true;
+        reference.thresholds.cloud_sharpness_enabled = true;
+        reference.thresholds.trigger_sharpness_floor = 0.75;
+        reference.thresholds.trigger_energy_floor = 0.044 * 1e-3;
+        assert!(reference.cloud_boundary.is_none());
+        assert!(reference.sharpness_cloud_boundary.is_none());
+        let saved = reference;
+        let guide = heatmap_sharpness_threshold_guide(plot, &saved).unwrap();
+        assert!((guide.p0.x - 310.0).abs() < 1e-5);
+        assert_eq!(guide.p0.y, plot.y0);
+        assert_eq!(guide.p1.y, plot.y1);
+        let areas = heatmap_feature_areas(plot, &saved);
+        let midpoint = guide.p0.midpoint(guide.p1);
+        assert!(areas
+            .iter()
+            .flatten()
+            .any(|area| area.contains(midpoint + (1.0, 0.0))));
+        assert!(!areas
+            .iter()
+            .flatten()
+            .any(|area| area.contains(midpoint - (1.0, 0.0))));
+        assert_eq!(
+            heatmap_sharpness_threshold_caption(&saved),
+            "SHARPNESS ≥ 0.750"
+        );
+        reference.thresholds.cloud_sharpness_enabled = false;
+        assert!(heatmap_sharpness_threshold_guide(plot, &reference).is_none());
+        assert!(heatmap_sharpness_threshold_caption(&reference).is_empty());
+        reference.thresholds.cloud_sharpness_enabled = true;
+        reference.thresholds.cloud_energy_enabled = false;
+        assert_eq!(
+            heatmap_sharpness_threshold_guide(plot, &reference)
+                .unwrap()
+                .p0
+                .y,
+            plot.y0
+        );
+        reference.thresholds.cloud_enabled = false;
+        assert!(heatmap_sharpness_threshold_guide(plot, &reference).is_none());
+        assert_eq!(heatmap_sharpness_threshold_guide(plot, &saved), Some(guide));
     }
 
     #[test]

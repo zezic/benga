@@ -201,8 +201,8 @@ including time and capacity evictions. Sparse observations still learn and stay
 visible. One supported bucket retains its full height/width; an unsupported axis
 uses its fixed fallback even when the other axis has supported bounds.
 
-Enable the checkbox beside **Cloud energy top area** to use both cloud floors.
-Its X% sets `max_db - (max_db - min_db) * X / 100`, converted back to attack
+Each cloud axis has an independent checkbox beside its percentage control.
+**Cloud energy top area** X% sets `max_db - (max_db - min_db) * X / 100`, converted back to attack
 energy using the feature horizon. **Cloud sharpness top area** sets
 `max_sharpness - (max_sharpness - min_sharpness) * Y / 100`. Both default to 25%.
 These are fractions of the displayed logarithmic energy height and linear
@@ -211,17 +211,23 @@ edge; 100% admits the full supported span. Equality and values above either
 upper edge pass that branch; neither axis imposes an upper limit.
 
 In cloud mode the trigger floors combine with **OR**: energy at/above its floor
-or sharpness at/above its floor is sufficient for this gate. The energy and
-sharpness floor switches choose the participating branches. A disabled branch
-does not automatically satisfy OR; with both disabled, the gate is skipped.
+or sharpness at/above its floor is sufficient for this gate. The cloud energy
+and cloud sharpness checkboxes choose the participating branches directly;
+neither requires the legacy fixed-floor checkbox. A disabled cloud branch does
+not automatically satisfy OR.
 Before an axis has support its fixed floor participates as a fallback, still
-using OR. Mode defaults to off, retaining the original AND of enabled fixed
-floors. Input quality, output prominence, mix level, independent percentiles,
+using OR. Both cloud checkboxes default to off; when both are off, the original
+AND of enabled fixed floors applies. Their legacy switches affect this fixed
+mode only. Input quality, output prominence, mix level, independent percentiles,
 and spacing remain separate requirements. Support is independent of percentile
 warmup. Mode, percentage and support edits preserve history and pending attacks.
 
-The map outlines both supported spans, draws the resolved floors and shades
-their OR union intersected with independent input-energy and percentile bounds.
+The map outlines both supported spans, shades their OR union intersected with
+independent input-energy and percentile bounds. Energy retains its original
+full-width dashed threshold guide. Sharpness uses a matching full-height dashed
+vertical guide and a numeric label. Both use the same neutral ink, line width,
+opacity and dash pattern.
+Resolved fallback cutoffs remain visible before supported bounds exist.
 Each decision captures its pre-insertion cloud spans, floors and Boolean mode,
 so historical inspection preserves the original area as live data changes.
 

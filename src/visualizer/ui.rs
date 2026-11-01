@@ -3108,6 +3108,8 @@ mod tests {
             ("analysis", 1920, 1080, false, false),
             ("history", 1920, 1080, false, false),
             ("heatmap", 1920, 1080, false, false),
+            ("cloud-threshold", 1920, 1080, false, false),
+            ("cloud-threshold-light", 1920, 1080, false, false),
             ("expired", 1920, 1080, false, false),
             ("disabled", 1920, 1080, false, false),
             ("checkbox", 1920, 1080, false, false),
@@ -3130,6 +3132,19 @@ mod tests {
                 continue;
             }
             let mut config = Config::default();
+            if name.starts_with("cloud-threshold") {
+                for channel in &mut config.detectors.percussion.channels {
+                    channel.cloud_enabled = true;
+                    channel.cloud_sharpness_enabled = true;
+                    channel.cloud_top_percent = 25.0;
+                    channel.cloud_sharpness_top_percent = 40.0;
+                    channel.cloud_min_count = 2;
+                    channel.filters.attack_level = false;
+                    channel.filters.min_sharpness = false;
+                    channel.filters.energy_percentile = false;
+                    channel.filters.sharpness_percentile = false;
+                }
+            }
             if name.starts_with("energy-loss") {
                 for setting in [
                     ArrangementSetting::MixLossDb,
@@ -3175,6 +3190,7 @@ mod tests {
             if [
                 "light",
                 "light-hover",
+                "cloud-threshold-light",
                 "energy-loss-light",
                 "gap-timing-light",
                 "lf-envelopes-light",
@@ -3425,10 +3441,17 @@ mod tests {
                         ui.click_controls_at(&view, point, now);
                         ui.set_pointer(Some(point));
                     }
-                    if ["heatmap", "expired"].contains(&name) && frame == 1 {
+                    if (["heatmap", "expired"].contains(&name)
+                        || name.starts_with("cloud-threshold"))
+                        && frame == 1
+                    {
                         for _ in 0..2 {
                             let graph = ui.presentation.analysis_graph_bounds().unwrap().center();
                             ui.click_controls_at(&view, graph, now);
+                        }
+                        if name.starts_with("cloud-threshold") {
+                            ui.set_pointer(Some(Point::ORIGIN));
+                            ui.set_pointer(None);
                         }
                     }
                     if name == "expired" && frame == 540 {
@@ -3487,6 +3510,11 @@ mod tests {
                     2,
                     "both diagnostic instruments remain visible in {name}"
                 );
+            }
+            if name.starts_with("cloud-threshold") {
+                let reference = ui.visualizer.percussion_reference(2);
+                assert!(reference.thresholds.cloud_active);
+                assert!(reference.thresholds.sharpness_cloud_active);
             }
             if name.starts_with("energy-loss") {
                 let status = ui.visualizer.debug_snapshot();

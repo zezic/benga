@@ -88,18 +88,22 @@ count defaults to 32 and can be changed with the heatmap’s −/+ buttons. Cuto
 lines and the shaded feature-pass region explain the sharpness/energy checks;
 output prominence, mix RMS and spacing still apply separately.
 The dashed **cloud** outline tracks supported energy and sharpness bounds,
-ignoring sparse tails. Enable the checkbox beside **Cloud energy top area** to
-use dynamic floors. Energy top X% selects the upper part of the cloud's height
+ignoring sparse tails. Each cloud percentage has its own checkbox: enable
+**Cloud energy top area**, **Cloud sharpness top area**, or both. Energy top X%
+selects the upper part of the cloud's height
 on the dB map; **Cloud sharpness top area** selects its sharpest Y% by width.
 Both default to 25%. An attack passes the cloud filter when **energy OR sharpness**
-clears its floor, including values above the cloud. The shade shows this union.
+clears its floor, including values above the cloud. The shade shows this union;
+energy and sharpness use matching dashed threshold guides across the full plot
+width and height, with a numeric sharpness label on the map.
 **Cloud bucket support** sets the minimum count per bucket (default 3), pooling
 the other axis. Bounds grow and shrink as observations enter or leave the
 reference. Dynamic mode starts off. Each axis uses its saved fixed floor until
 supported bounds exist; those fallbacks also combine with OR in cloud mode.
-The **Trigger energy floor** and **Sharpness floor** switches select which
-branches participate; disabling both skips the cloud filter. Other enabled
-filters, including the independent percentiles, can still reject an attack.
+The cloud checkboxes work directly, independently of the fixed **Trigger energy
+floor** and **Sharpness floor** switches. With both cloud checkboxes off, those
+fixed filters apply as before. Other enabled filters, including the independent
+percentiles, can still reject an attack.
 Click its timeline to switch kick, snare, and hat. Previous/next event buttons
 inspect saved decisions with their original reference; **Live** shows the newer
 population. Ranks describe recent regional onsets, not confidence in instrument

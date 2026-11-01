@@ -11,7 +11,7 @@ const FFT_SIZE: usize = 1024;
 const HOP_SIZE: usize = 256;
 const MIN_FREQUENCY: f32 = 32.0;
 const MAX_FREQUENCY: f32 = 16_000.0;
-const BASS_BANDS: usize = 4;
+const BASS_BANDS: usize = 3;
 const TREBLE_BANDS: usize = 4;
 
 /// One physical FFT bin as seen by a selected percussion detector.

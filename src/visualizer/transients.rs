@@ -632,6 +632,14 @@ mod tests {
         assert!(quiet.admitted && !quiet.eligible);
         assert_eq!(quiet.reason, DecisionReason::AttackLevel);
         settings.filters.attack_level = false;
+        assert_eq!(
+            channel
+                .finish(feature(0.002, 0.02, 0.001), 0, 1.4, &settings)
+                .reason,
+            DecisionReason::AttackLevel,
+            "the fixed floor switch does not disable the cloud floor"
+        );
+        settings.cloud_enabled = false;
         assert!(
             channel
                 .finish(feature(0.002, 0.02, 0.001), 0, 1.4, &settings)
@@ -653,6 +661,7 @@ mod tests {
         let saved = detector.decisions().clone();
         let epoch = detector.channels[0].epoch;
         settings.channels[0].cloud_enabled = true;
+        settings.channels[0].cloud_sharpness_enabled = true;
         settings.channels[0].cloud_min_count = 1;
         settings.channels[0].cloud_top_percent = 75.0;
         settings.channels[0].cloud_sharpness_top_percent = 75.0;
@@ -660,13 +669,17 @@ mod tests {
         let live = detector.reference(0);
         assert_eq!(live.count, 1);
         assert!(live.thresholds.cloud_active);
+        assert!(live.thresholds.sharpness_cloud_active);
         assert_eq!(detector.channels[0].epoch, epoch);
         assert_eq!(detector.decisions(), &saved);
         settings.channels[0].cloud_sharpness_top_percent = 10.0;
+        settings.channels[0].cloud_enabled = false;
         settings.channels[0].cloud_min_count = 2;
         feed_envelope(&mut detector, &settings, 0.25, 0.05, |_| 0.0);
         assert_eq!(detector.reference(0).count, 1);
         assert!(!detector.reference(0).thresholds.cloud_active);
+        assert!(detector.reference(0).thresholds.cloud_enabled);
+        assert!(detector.reference(0).thresholds.cloud_sharpness_enabled);
         assert_eq!(detector.channels[0].epoch, epoch);
         assert_eq!(detector.decisions(), &saved);
     }
@@ -674,7 +687,7 @@ mod tests {
     #[test]
     fn sharpness_cloud_ignores_sparse_tails_and_uses_linear_width() {
         let mut settings = permissive_filter_settings().channels[0];
-        settings.cloud_enabled = true;
+        settings.cloud_sharpness_enabled = true;
         settings.cloud_min_count = 3;
         let mut population = Population::default();
         for (index, bin) in [2, 9, 9, 9, 17, 17, 17, 22, 22].into_iter().enumerate() {
@@ -733,7 +746,7 @@ mod tests {
             23.0 / 24.0
         );
         assert_eq!(saved.sharpness_cloud_boundary, Some(cloud));
-        settings.cloud_enabled = false;
+        settings.cloud_sharpness_enabled = false;
         let disabled = population.snapshot(9.0, &settings);
         assert!(disabled.sharpness_cloud_boundary.is_some());
         assert!(!disabled.thresholds.sharpness_cloud_active);
@@ -763,6 +776,7 @@ mod tests {
     fn cloud_feature_floors_accept_either_branch_and_reject_only_when_both_fail() {
         let mut settings = permissive_filter_settings().channels[0];
         settings.cloud_enabled = true;
+        settings.cloud_sharpness_enabled = true;
         settings.min_sharpness = 0.7;
         settings.min_attack_db = -20.0;
         for (rise, amplitude, energy_pass, sharpness_pass) in [
@@ -793,6 +807,7 @@ mod tests {
             }
             let static_settings = PercussionChannelSettings {
                 cloud_enabled: false,
+                cloud_sharpness_enabled: false,
                 ..settings
             };
             let fixed = channel_with_cloud(&static_settings).finish(
@@ -815,9 +830,11 @@ mod tests {
             );
             assert_eq!(fallback.eligible, energy_pass || sharpness_pass);
         }
+        settings.filters.attack_level = false;
+        settings.filters.min_sharpness = false;
         for (energy_enabled, sharpness_enabled) in [(true, false), (false, true), (false, false)] {
-            settings.filters.attack_level = energy_enabled;
-            settings.filters.min_sharpness = sharpness_enabled;
+            settings.cloud_enabled = energy_enabled;
+            settings.cloud_sharpness_enabled = sharpness_enabled;
             for (rise, amplitude, energy_pass, sharpness_pass) in [
                 (0.002, 0.01, false, true),
                 (0.024, 0.3, true, false),
@@ -843,8 +860,9 @@ mod tests {
     #[test]
     fn sharpness_cloud_uses_preinsertion_bounds_and_does_not_bypass_independent_filters() {
         let mut settings = permissive_filter_settings().channels[0];
-        settings.cloud_enabled = true;
+        settings.cloud_sharpness_enabled = true;
         settings.filters.attack_level = false;
+        settings.filters.min_sharpness = false;
         settings.min_sharpness = 0.9;
         let mut channel = Channel::default();
         for index in 0..3 {
@@ -877,6 +895,49 @@ mod tests {
         settings.energy_percentile = 100.0;
         let rejected = channel.finish(feature(0.002, 0.01, 0.001), 0, 1.3, &settings);
         assert_eq!(rejected.reason, DecisionReason::EnergyPercentile);
+    }
+
+    #[test]
+    fn sharpness_cloud_toggle_and_percentage_work_without_energy_or_fixed_floor_switches() {
+        let mut settings = permissive_filter_settings();
+        settings.channels[0].filters.attack_level = false;
+        settings.channels[0].filters.min_sharpness = false;
+        settings.channels[0].min_attack_db = -10.0;
+        settings.channels[0].min_sharpness = 0.9;
+        PercussionSetting::CloudSharpnessEnabled.set(&mut settings, 0, 1.0);
+        for (percent, expected) in [(0.0, false), (100.0, true)] {
+            PercussionSetting::CloudSharpnessTopPercent.set(&mut settings, 0, percent);
+            let channel_settings = &settings.channels[0];
+            let decision = channel_with_cloud(channel_settings).finish(
+                feature(0.01, 0.1, 0.001),
+                0,
+                1.0,
+                channel_settings,
+            );
+            let thresholds = decision.reference.thresholds;
+            assert!(thresholds.cloud_enabled && thresholds.cloud_sharpness_enabled);
+            assert!(!thresholds.cloud_energy_enabled);
+            assert!(!thresholds.cloud_active && thresholds.sharpness_cloud_active);
+            assert!(!thresholds.filters.attack_level && !thresholds.filters.min_sharpness);
+            assert!(decision.energy < thresholds.trigger_energy_floor);
+            assert_eq!(
+                decision.eligible, expected,
+                "sharpness area {percent}% must take effect directly"
+            );
+            if !expected {
+                assert_eq!(decision.reason, DecisionReason::PhysicalSharpness);
+            }
+        }
+        PercussionSetting::CloudSharpnessEnabled.set(&mut settings, 0, 0.0);
+        settings.channels[0].filters.min_sharpness = true;
+        let restored_fixed = channel_with_cloud(&settings.channels[0]).finish(
+            feature(0.01, 0.1, 0.001),
+            0,
+            1.0,
+            &settings.channels[0],
+        );
+        assert!(!restored_fixed.reference.thresholds.cloud_enabled);
+        assert_eq!(restored_fixed.reason, DecisionReason::PhysicalSharpness);
     }
 
     #[test]
@@ -1686,8 +1747,10 @@ impl Population {
         let min_attack_energy = feature_seconds * 10.0_f32.powf(settings.min_attack_db / 10.0);
         let cloud_boundary = self.cloud_boundary(settings);
         let sharpness_cloud_boundary = self.sharpness_cloud_boundary(settings);
+        let cloud_mode = settings.cloud_enabled || settings.cloud_sharpness_enabled;
         let cloud_active = settings.cloud_enabled && cloud_boundary.is_some();
-        let sharpness_cloud_active = settings.cloud_enabled && sharpness_cloud_boundary.is_some();
+        let sharpness_cloud_active =
+            settings.cloud_sharpness_enabled && sharpness_cloud_boundary.is_some();
         let trigger_energy_floor = if let Some(cloud) = cloud_boundary.filter(|_| cloud_active) {
             // Interpolate in the map's logarithmic energy coordinate: top 25%
             // accepts the upper quarter of its height, plus everything louder.
@@ -1720,16 +1783,14 @@ impl Population {
         // Cloud floors form a union, so they cannot be represented by one
         // pair of lower bounds. Keep only independent AND constraints here.
         let sharpness_effective_bound = [
-            (settings.filters.min_sharpness && !settings.cloud_enabled)
-                .then_some(settings.min_sharpness),
+            (settings.filters.min_sharpness && !cloud_mode).then_some(settings.min_sharpness),
             sharpness_cutoff.map(|q| q - SHARPNESS_TOLERANCE),
         ]
         .into_iter()
         .flatten()
         .reduce(f32::max);
         let energy_effective_bound = [
-            (settings.filters.attack_level && !settings.cloud_enabled)
-                .then_some(trigger_energy_floor),
+            (settings.filters.attack_level && !cloud_mode).then_some(trigger_energy_floor),
             settings
                 .filters
                 .input_energy
@@ -1745,7 +1806,9 @@ impl Population {
             min_attack_db: settings.min_attack_db,
             trigger_energy_floor,
             trigger_sharpness_floor,
-            cloud_enabled: settings.cloud_enabled,
+            cloud_enabled: cloud_mode,
+            cloud_energy_enabled: settings.cloud_enabled,
+            cloud_sharpness_enabled: settings.cloud_sharpness_enabled,
             cloud_active,
             sharpness_cloud_active,
             cloud_top_percent: settings.cloud_top_percent,
@@ -2177,14 +2240,15 @@ impl Channel {
             * (candidate.energy / candidate.elapsed.max(1e-9))
                 .max(1e-12)
                 .log10();
-        let cloud_rejection = if settings.cloud_enabled {
-            let energy_pass = settings.filters.attack_level
+        let cloud_mode = settings.cloud_enabled || settings.cloud_sharpness_enabled;
+        let cloud_rejection = if cloud_mode {
+            let energy_pass = settings.cloud_enabled
                 && candidate.energy >= reference.thresholds.trigger_energy_floor;
-            let sharpness_pass = settings.filters.min_sharpness
+            let sharpness_pass = settings.cloud_sharpness_enabled
                 && sharpness >= reference.thresholds.trigger_sharpness_floor;
             match (
-                settings.filters.attack_level,
-                settings.filters.min_sharpness,
+                settings.cloud_enabled,
+                settings.cloud_sharpness_enabled,
                 energy_pass || sharpness_pass,
             ) {
                 (true, true, false) => Some(DecisionReason::CloudRegion),
@@ -2201,7 +2265,7 @@ impl Channel {
         } else if let Some(rejection) = cloud_rejection {
             reason = rejection;
             false
-        } else if !settings.cloud_enabled
+        } else if !cloud_mode
             && settings.filters.min_sharpness
             && sharpness < settings.min_sharpness
         {
@@ -2211,9 +2275,7 @@ impl Channel {
         {
             reason = DecisionReason::OutputProminence;
             false
-        } else if !settings.cloud_enabled
-            && settings.filters.attack_level
-            && attack_db < settings.min_attack_db
+        } else if !cloud_mode && settings.filters.attack_level && attack_db < settings.min_attack_db
         {
             reason = DecisionReason::AttackLevel;
             false

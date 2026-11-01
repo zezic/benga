@@ -1,0 +1,172 @@
+{
+  "change": "Joint sharpness-energy heatmap and visible pipeline controls",
+  "heatmap_bins": [
+    24,
+    24
+  ],
+  "recent_additions": {
+    "default": 32,
+    "minimum": 4,
+    "maximum": 64,
+    "survives_reference_expiry": true,
+    "expired_markers_count_toward_reference": false
+  },
+  "controls": {
+    "visible_pipeline_rows": 24,
+    "independent_filter_switches": 11,
+    "plain_hover_help": true,
+    "disabled_values_preserved": true,
+    "all_filters_enabled_by_default": true
+  },
+  "mechanics": {
+    "input_filter_percentile_checks": false,
+    "trigger_percentile_checks": "Both enabled marginal sharpness/energy cutoffs from the preceding paired population",
+    "decision_before_current_pair_insert": true,
+    "learns_trigger_rejected_inputs": true,
+    "heatmap_density_is_not_a_joint_classifier": true
+  },
+  "project_checks": {
+    "library_passed": 423,
+    "binary_passed": 26,
+    "library_ignored": 26,
+    "binary_ignored": 1,
+    "focused_heatmap_ui_passed": 11,
+    "hover_help_tests_passed": 2,
+    "release_build": "passed",
+    "format_and_diff_checks": "passed"
+  },
+  "native_previews": {
+    "directory": "/tmp/benga-heatmap-ui",
+    "reviewed": [
+      "normal",
+      "light",
+      "tall",
+      "history",
+      "heatmap",
+      "disabled",
+      "checkbox",
+      "analysis",
+      "expired"
+    ]
+  },
+  "default_behavior_comparison": {
+    "before_sha256": "01c040d5103e97fb18b047c47c7cd169ba47d6463a8f3e4add345d7300b5dece",
+    "heatmap_sha256": "adb912cd44c1596593ff0acbef0b1cb3fbd7944d932233b3d74cb5c18e95e066",
+    "track": "James Shinra - Gritti.ogg",
+    "seconds_per_run": 20,
+    "reason_label_renaming_only": {
+      "below admission energy": "below input energy floor",
+      "negligible new growth": "insufficient input rise",
+      "insufficient new prominence": "below input contrast floor",
+      "below physical sharpness": "below sharpness floor",
+      "below output prominence": "below trigger contrast floor",
+      "below absolute attack level": "below trigger energy floor",
+      "below output mix RMS": "below mix level floor",
+      "output interval": "trigger spacing"
+    },
+    "runs": [
+      {
+        "sample_rate": 44100,
+        "gain_db": 0,
+        "counts": {
+          "kick": 26,
+          "snare": 25,
+          "hat": 8,
+          "drop": 1
+        },
+        "same_event_times_counts_and_gate_reasons": true
+      },
+      {
+        "sample_rate": 44100,
+        "gain_db": -6,
+        "counts": {
+          "kick": 26,
+          "snare": 26,
+          "hat": 8,
+          "drop": 1
+        },
+        "same_event_times_counts_and_gate_reasons": true
+      },
+      {
+        "sample_rate": 44100,
+        "gain_db": -18,
+        "counts": {
+          "kick": 26,
+          "snare": 0,
+          "hat": 0,
+          "drop": 1
+        },
+        "same_event_times_counts_and_gate_reasons": true
+      },
+      {
+        "sample_rate": 48000,
+        "gain_db": 0,
+        "counts": {
+          "kick": 27,
+          "snare": 29,
+          "hat": 6,
+          "drop": 1
+        },
+        "same_event_times_counts_and_gate_reasons": true
+      },
+      {
+        "sample_rate": 48000,
+        "gain_db": -6,
+        "counts": {
+          "kick": 27,
+          "snare": 27,
+          "hat": 5,
+          "drop": 1
+        },
+        "same_event_times_counts_and_gate_reasons": true
+      },
+      {
+        "sample_rate": 48000,
+        "gain_db": -18,
+        "counts": {
+          "kick": 27,
+          "snare": 0,
+          "hat": 0,
+          "drop": 1
+        },
+        "same_event_times_counts_and_gate_reasons": true
+      },
+      {
+        "sample_rate": 96000,
+        "gain_db": 0,
+        "counts": {
+          "kick": 27,
+          "snare": 29,
+          "hat": 6,
+          "drop": 1
+        },
+        "same_event_times_counts_and_gate_reasons": true
+      },
+      {
+        "sample_rate": 96000,
+        "gain_db": -6,
+        "counts": {
+          "kick": 27,
+          "snare": 27,
+          "hat": 5,
+          "drop": 1
+        },
+        "same_event_times_counts_and_gate_reasons": true
+      },
+      {
+        "sample_rate": 96000,
+        "gain_db": -18,
+        "counts": {
+          "kick": 27,
+          "snare": 0,
+          "hat": 0,
+          "drop": 1
+        },
+        "same_event_times_counts_and_gate_reasons": true
+      }
+    ],
+    "claim": "Default event telemetry, candidate/admitted counts, event RMS and feature completion delay summaries agree exactly; joint display metadata and optional filter switches are new."
+  },
+  "known_project_lint_status": "Clippy still reports existing approximate-constant errors in showcase.rs; new controls/backend tests pass.",
+  "historical_views": "Historical joint counts, recent additions and filter switches remain frozen; Live suppresses candidate crosses from incompatible feature epochs."
+}

@@ -895,6 +895,20 @@ fn detector_extension_text(
     if detector == Detector::Drop {
         return drop_extension_text(snapshot, visualizer);
     }
+    if let Some(channel) = detector.percussion_index() {
+        let reference = visualizer.percussion_reference(channel);
+        let latest = visualizer
+            .percussion_decisions()
+            .iter()
+            .rev()
+            .find(|d| d.channel == channel);
+        return (
+            format!("{} · ADAPTIVE ONSET POPULATION", detector.name()),
+            latest.map_or_else(|| "Waiting for a complete regional attack".to_owned(), |d|
+                format!("{} · concentration {:.2} · early energy {:.2e} FS²s", d.reason.label(), d.sharpness, d.energy)),
+            format!("{} paired observations · ranks compare earlier regional onsets; instrument identity is ambiguous", reference.count),
+        );
+    }
     let trigger = trigger_snapshot(snapshot, detector);
     let onset = onset_flux_snapshot(snapshot, detector);
     let hits = match detector {
@@ -903,14 +917,12 @@ fn detector_extension_text(
         Detector::Hat => snapshot.hat_hits,
         _ => 0,
     };
-    let gate = if detector == Detector::Snare {
-        format!(
-            "  RMS GATE {:.0} dB",
-            visualizer.detector_settings().snare_min_rms_db
-        )
-    } else {
-        String::new()
-    };
+    let gate = format!(
+        "  VALIDATION {}  AREA {:.0}%  SHARP {:.0}%",
+        if onset.mix_gate { "OPEN" } else { "CLOSED" },
+        onset.coverage * 100.0,
+        onset.sharpness * 100.0,
+    );
     (
         format!("{} TRIGGER  {}", detector.name(), trigger_state(&trigger)),
         format!(
@@ -977,28 +989,28 @@ fn flux_extension_text(
 
 fn drop_extension_text(
     snapshot: &DebugSnapshot,
-    visualizer: &Visualizer,
+    _visualizer: &Visualizer,
 ) -> (String, String, String) {
-    let settings = visualizer.detector_settings();
     let trigger = snapshot.drop_onset;
     let status = snapshot.drop_status;
     (
         format!("DROP TRIGGER  {}", trigger_state(&trigger)),
         format!(
-            "RMS {:.1}  ENV {:.1}  GATE {:.0} dB",
-            status.rms_db, status.envelope_db, settings.drop_gap_threshold
+            "RMS {:.1} dBFS  CHANGE {:+.1} dB  TRENDS {:.2}",
+            status.rms_db, status.energy_delta_db, status.trend_change
         ),
         format!(
-            "{}  ONSET {:.3}/{:.3}  HITS {}  LAST {:.2}",
+            "{}  SHAPE {:.2}  TRENDS {:.2}  BASS {:.2}/{:.2}  HITS {}",
             if trigger.armed {
                 "GATE ARMED"
             } else {
-                "GATE OPEN"
+                "TRACKING"
             },
-            status.onset.smoothed,
-            status.onset.threshold,
+            status.shape_distance,
+            status.trend_change,
+            status.bass_hit,
+            status.hit_threshold,
             snapshot.drop_hits,
-            trigger.power
         ),
     )
 }
@@ -1066,11 +1078,6 @@ pub(super) enum TreeAction {
     AddExtra(MixPoint),
     RemoveExtra(ExtraRef),
     ToggleAdaptive(EnvelopeTarget),
-    ClearPattern(Detector),
-    TogglePatternOverlay,
-    TogglePatternPreview,
-    TogglePatternPause,
-    TogglePatternSuppression,
 }
 
 #[derive(Clone, Copy)]
@@ -1373,23 +1380,8 @@ pub(super) fn tree_layout(
         action_rows.len(),
         row_height,
     );
-    let kernel_targets: Vec<DropKernel> = match target {
-        Some(TreeTarget::Detector(Detector::Drop)) => DropKernel::ALL.to_vec(),
-        _ => Vec::new(),
-    };
-    let kernels = kernel_banks(
-        parameter_panel,
-        &sliders,
-        &action_rows,
-        scale,
-        &kernel_targets,
-    );
-    let temporal = match target {
-        Some(TreeTarget::Detector(detector @ (Detector::Kick | Detector::Snare))) => {
-            temporal_bank(parameter_panel, &sliders, &action_rows, scale, detector)
-        }
-        _ => None,
-    };
+    let kernels = Vec::new();
+    let temporal = None;
     TreeLayout {
         rect,
         rows,
@@ -1402,58 +1394,6 @@ pub(super) fn tree_layout(
         parameter_title,
         parameter_panel,
     }
-}
-
-fn temporal_bank(
-    panel: Rect,
-    sliders: &[SliderRow],
-    actions: &[ActionRow],
-    scale: f64,
-    detector: Detector,
-) -> Option<TemporalBank> {
-    let top = parameter_content_top(panel, sliders, actions, scale);
-    let available = panel.y1 - top;
-    if available < 70.0 * scale {
-        return None;
-    }
-    let button_height = 11.0 * scale;
-    let gap = 2.0 * scale;
-    let offset_height = 8.0 * scale;
-    let button_width = (panel.width() - 4.0 * 3.0 * scale) / 5.0;
-    let button = |index: usize, action: TreeAction| ActionRow {
-        action,
-        rect: Rect::new(
-            panel.x0 + index as f64 * (button_width + 3.0 * scale),
-            top + scale,
-            panel.x0 + index as f64 * (button_width + 3.0 * scale) + button_width,
-            top + button_height,
-        ),
-    };
-    let clear = button(0, TreeAction::ClearPattern(detector));
-    let overlay = button(1, TreeAction::TogglePatternOverlay);
-    let preview = button(2, TreeAction::TogglePatternPreview);
-    let pause = button(3, TreeAction::TogglePatternPause);
-    let suppress = button(4, TreeAction::TogglePatternSuppression);
-    let offset = Rect::new(panel.x0, panel.y1 - offset_height, panel.x1, panel.y1);
-    let canvas = Rect::new(
-        panel.x0,
-        top + button_height + gap,
-        panel.x1,
-        offset.y0 - gap,
-    );
-    if canvas.height() < 24.0 * scale {
-        return None;
-    }
-    Some(TemporalBank {
-        detector,
-        canvas,
-        clear,
-        overlay,
-        preview,
-        pause,
-        suppress,
-        offset,
-    })
 }
 
 fn parameter_content_top(
@@ -1487,42 +1427,6 @@ fn flux_bank(
         rect: Rect::new(panel.x0, top + label_height, panel.x1, bottom),
         selected,
     })
-}
-
-fn kernel_banks(
-    panel: Rect,
-    sliders: &[SliderRow],
-    actions: &[ActionRow],
-    scale: f64,
-    targets: &[DropKernel],
-) -> Vec<KernelBank> {
-    if targets.is_empty() {
-        return Vec::new();
-    }
-    let label_height = 9.0 * scale;
-    let gap = 3.0 * scale;
-    let top = parameter_content_top(panel, sliders, actions, scale);
-    let available = panel.y1 - top;
-    let count = targets.len() as f64;
-    let per_bank = (available - gap * (count - 1.0)) / count;
-    if per_bank <= label_height + 8.0 * scale {
-        return Vec::new();
-    }
-    let label_width = (panel.width() * 0.34).clamp(38.0 * scale, 132.0 * scale);
-    let value_width = 42.0 * scale;
-    let left = panel.x0 + label_width;
-    let right = panel.x1 - value_width;
-    targets
-        .iter()
-        .enumerate()
-        .map(|(index, &kernel)| {
-            let bank_top = top + index as f64 * (per_bank + gap);
-            KernelBank {
-                kernel,
-                rect: Rect::new(left, bank_top + label_height, right, bank_top + per_bank),
-            }
-        })
-        .collect()
 }
 
 fn parameter_content(
@@ -2158,13 +2062,7 @@ pub(super) fn hat_analyzer_layout(view: &View, text_scale: VisualizerTextScale) 
         0,
         TREE_PARAM_ROW * scale,
     );
-    let temporal = temporal_bank(
-        parameter_panel,
-        &sliders,
-        &action_rows,
-        scale,
-        Detector::Hat,
-    );
+    let temporal = None;
     TreeLayout {
         rect,
         rows: Vec::new(),
@@ -2174,7 +2072,7 @@ pub(super) fn hat_analyzer_layout(view: &View, text_scale: VisualizerTextScale) 
         temporal,
         flux_bank: None,
         onset_graphs: None,
-        parameter_title: "ONSET & PATTERN".to_owned(),
+        parameter_title: "SHARP HIGH-BAND ATTACK".to_owned(),
         parameter_panel,
     }
 }
@@ -2617,11 +2515,6 @@ fn action_label(action: TreeAction, visualizer: &Visualizer) -> String {
                 envelope_shape(target, visualizer).is_some_and(|shape| shape.is_adaptive());
             format!("AUTO REFS: {}", if adaptive { "ON" } else { "OFF" })
         }
-        TreeAction::ClearPattern(_) => "CLEAR PATTERN".to_owned(),
-        TreeAction::TogglePatternOverlay => "TOGGLE KERNEL OVERLAY".to_owned(),
-        TreeAction::TogglePatternPreview => "TOGGLE KERNEL PREVIEW".to_owned(),
-        TreeAction::TogglePatternPause => "TOGGLE SPECTROGRAM PAUSE".to_owned(),
-        TreeAction::TogglePatternSuppression => "TOGGLE SUPPRESSION KERNEL".to_owned(),
     }
 }
 
@@ -3857,12 +3750,14 @@ enum GraphSource {
     Property(Property),
     /// RMS level and its smoothed envelope, both in dBFS.
     DropLevel,
+    /// Positive loss from the learned mix reference and its required loss, in dB.
+    DropEnergyLoss,
     /// Whether the RMS envelope currently permits a drop.
     DropEligible,
     /// Composite onset flux with its adaptive threshold.
     DetectorOnsetFlux(Detector),
-    /// Inverted-kernel flux the detector subtracts, drawn below the onset graph.
-    DetectorSuppression(Detector),
+    /// Attack area/sharpness, or arrangement shape/trend movement.
+    DetectorAttackProperties(Detector),
 }
 
 /// What the extension pane is diagnosing. A detector selected in the tree
@@ -3981,15 +3876,14 @@ impl GraphSource {
                 | Self::Power
                 | Self::Bass
                 | Self::DropLevel
+                | Self::DropEnergyLoss
                 | Self::DetectorOnsetFlux(_)
-                | Self::DetectorSuppression(_)
+                | Self::DetectorAttackProperties(_)
         )
     }
 
-    /// Suppression grows downward from the top of its rect, away from the
-    /// onset graph above it.
     fn inverted(self) -> bool {
-        matches!(self, Self::DetectorSuppression(_))
+        false
     }
 
     fn range(self, graph_max: Option<GraphMax>) -> (f32, f32) {
@@ -3998,7 +3892,9 @@ impl GraphSource {
             Self::BandOnset(_) => (0.0, 1.0),
             Self::Onset(_) | Self::DropEligible => (0.0, 1.0),
             Self::DropLevel => (DROP_GAP_THRESHOLD_MIN, DROP_GAP_THRESHOLD_MAX),
-            Self::DetectorOnsetFlux(_) | Self::DetectorSuppression(_) => (0.0, 0.25),
+            Self::DropEnergyLoss => (-1.0, 12.0),
+            Self::DetectorOnsetFlux(Detector::Drop) => (-80.0, 0.0),
+            Self::DetectorOnsetFlux(_) | Self::DetectorAttackProperties(_) => (0.0, 1.5),
             Self::Kick => (0.0, 1.5),
             Self::Property(property) => {
                 let (low, high) = property.range();
@@ -4024,18 +3920,17 @@ impl GraphSource {
             Self::Kick => palette.vivid(0),
             Self::Property(property) => palette.vivid(property.index()),
             Self::DropLevel => palette.vivid(4),
-            Self::DetectorOnsetFlux(Detector::Kick) | Self::DetectorSuppression(Detector::Kick) => {
-                palette.vivid(0)
-            }
+            Self::DropEnergyLoss => palette.vivid(4),
+            Self::DetectorOnsetFlux(Detector::Kick)
+            | Self::DetectorAttackProperties(Detector::Kick) => palette.vivid(0),
             Self::DetectorOnsetFlux(Detector::Snare)
-            | Self::DetectorSuppression(Detector::Snare) => palette.vivid(2),
-            Self::DetectorOnsetFlux(Detector::Hat) | Self::DetectorSuppression(Detector::Hat) => {
-                palette.vivid(11)
-            }
+            | Self::DetectorAttackProperties(Detector::Snare) => palette.vivid(2),
+            Self::DetectorOnsetFlux(Detector::Hat)
+            | Self::DetectorAttackProperties(Detector::Hat) => palette.vivid(11),
             Self::DetectorOnsetFlux(Detector::Drop)
             | Self::DetectorOnsetFlux(Detector::Flux)
-            | Self::DetectorSuppression(Detector::Drop)
-            | Self::DetectorSuppression(Detector::Flux) => palette.vivid(9),
+            | Self::DetectorAttackProperties(Detector::Drop)
+            | Self::DetectorAttackProperties(Detector::Flux) => palette.vivid(9),
         }
     }
 
@@ -4075,7 +3970,23 @@ impl GraphSource {
                 "RMS {:.1}  ENV {:.1} dB",
                 snapshot.drop_status.rms_db, snapshot.drop_status.envelope_db
             ),
+            Self::DropEnergyLoss => format!(
+                "LOSS {:+.2} / >{:.2} dB  {}",
+                -snapshot.drop_status.energy_delta_db,
+                snapshot.drop_status.mix_loss_threshold_db,
+                if -snapshot.drop_status.energy_delta_db
+                    > snapshot.drop_status.mix_loss_threshold_db
+                {
+                    "ENERGY PASS"
+                } else {
+                    "WAIT"
+                }
+            ),
             Self::DropEligible => format!("ELIG {}", u8::from(snapshot.drop_onset.armed)),
+            Self::DetectorOnsetFlux(Detector::Drop) => format!(
+                "LF FAST {:.1}  SLOW {:.1} dB",
+                snapshot.drop_status.bass_fast_db, snapshot.drop_status.bass_slow_db
+            ),
             Self::DetectorOnsetFlux(detector) => {
                 let onset = onset_flux_snapshot(snapshot, detector);
                 format!(
@@ -4084,9 +3995,16 @@ impl GraphSource {
                     reference_text(onset.reference)
                 )
             }
-            Self::DetectorSuppression(detector) => {
+            Self::DetectorAttackProperties(detector) => {
                 let onset = onset_flux_snapshot(snapshot, detector);
-                format!("SUP {:.3}", onset.suppressed)
+                if detector == Detector::Drop {
+                    format!(
+                        "SHAPE {:.2}  TRENDS {:.2}",
+                        snapshot.drop_status.shape_distance, snapshot.drop_status.trend_change
+                    )
+                } else {
+                    format!("ATTACK CONCENTRATION {:.2}", onset.sharpness)
+                }
             }
         }
     }
@@ -4094,10 +4012,15 @@ impl GraphSource {
     /// Short captions for graphs that only exist in the drop detector view.
     fn detector_usage(self) -> Option<&'static str> {
         match self {
-            Self::DropLevel => Some("rms + envelope, gate"),
+            Self::DropLevel => Some("rms + envelope"),
+            Self::DropEnergyLoss => Some("solid: loss / pale: required; above passes"),
             Self::DropEligible => Some("latched gap"),
-            Self::DetectorOnsetFlux(_) => Some("flux, reference, threshold"),
-            Self::DetectorSuppression(_) => Some("suppression"),
+            Self::DetectorOnsetFlux(Detector::Drop) => {
+                Some("fast solid / slow dot / required fast dash")
+            }
+            Self::DetectorOnsetFlux(_) => Some("regional attack concentration + cutoff"),
+            Self::DetectorAttackProperties(Detector::Drop) => Some("shape distance + trend change"),
+            Self::DetectorAttackProperties(_) => Some("observed growth concentration"),
             _ => None,
         }
     }
@@ -4132,17 +4055,33 @@ impl GraphSource {
             } else {
                 sample.drop_status.envelope_db
             }),
+            Self::DropEnergyLoss => Some(if raw {
+                sample.drop_status.mix_loss_threshold_db
+            } else {
+                -sample.drop_status.energy_delta_db
+            }),
             Self::DropEligible => (!raw).then_some(if sample.drop_onset.armed { 1.0 } else { 0.0 }),
+            Self::DetectorOnsetFlux(Detector::Drop) => Some(if raw {
+                sample.drop_status.bass_slow_db
+            } else {
+                sample.drop_status.bass_fast_db
+            }),
             Self::DetectorOnsetFlux(detector) => {
                 let onset = onset_flux_sample(sample, detector);
                 Some(if raw { onset.flux } else { onset.smoothed })
             }
-            Self::DetectorSuppression(detector) => {
+            Self::DetectorAttackProperties(detector) => {
                 let onset = onset_flux_sample(sample, detector);
-                Some(if raw {
-                    onset.inhibition
+                Some(if detector == Detector::Drop {
+                    if raw {
+                        sample.drop_status.shape_distance
+                    } else {
+                        sample.drop_status.trend_change
+                    }
+                } else if raw {
+                    onset.coverage
                 } else {
-                    onset.suppressed
+                    onset.sharpness
                 })
             }
         }
@@ -4160,9 +4099,10 @@ impl GraphSource {
             | Self::Onset(_)
             | Self::Property(_)
             | Self::DropLevel
+            | Self::DropEnergyLoss
             | Self::DropEligible
             | Self::DetectorOnsetFlux(_)
-            | Self::DetectorSuppression(_) => None,
+            | Self::DetectorAttackProperties(_) => None,
         }
     }
 }
@@ -4182,22 +4122,23 @@ fn detector_graph_sources(detector: Detector, flux_band: usize) -> Vec<GraphSour
             GraphSource::DropLevel,
             GraphSource::DropEligible,
             GraphSource::DetectorOnsetFlux(Detector::Drop),
-            GraphSource::DetectorSuppression(Detector::Drop),
+            GraphSource::DetectorAttackProperties(Detector::Drop),
+            GraphSource::DropEnergyLoss,
             GraphSource::Onset(Detector::Drop),
         ],
         Detector::Kick => vec![
             GraphSource::DetectorOnsetFlux(Detector::Kick),
-            GraphSource::DetectorSuppression(Detector::Kick),
+            GraphSource::DetectorAttackProperties(Detector::Kick),
             GraphSource::Onset(Detector::Kick),
         ],
         Detector::Snare => vec![
             GraphSource::DetectorOnsetFlux(Detector::Snare),
-            GraphSource::DetectorSuppression(Detector::Snare),
+            GraphSource::DetectorAttackProperties(Detector::Snare),
             GraphSource::Onset(Detector::Snare),
         ],
         Detector::Hat => vec![
             GraphSource::DetectorOnsetFlux(Detector::Hat),
-            GraphSource::DetectorSuppression(Detector::Hat),
+            GraphSource::DetectorAttackProperties(Detector::Hat),
             GraphSource::Onset(Detector::Hat),
         ],
         Detector::Flux => vec![
@@ -4311,13 +4252,13 @@ fn extension_graph_cells(
     }
     if let InspectorFocus::Detector(detector) = focus {
         let onset = GraphSource::DetectorOnsetFlux(detector);
-        let suppression = GraphSource::DetectorSuppression(detector);
+        let properties = GraphSource::DetectorAttackProperties(detector);
         let mut others = Vec::with_capacity(graphs.len());
         let mut has_onset = false;
         for source in graphs {
             if source == onset {
                 has_onset = true;
-            } else if source != suppression {
+            } else if source != properties {
                 others.push(source);
             }
         }
@@ -4341,7 +4282,7 @@ fn extension_graph_cells(
         };
         let mut cells = Vec::with_capacity(total);
         cells.push((onset, cell(0, 0)));
-        cells.push((suppression, cell(1, 0)));
+        cells.push((properties, cell(1, 0)));
         let second_row = columns - 1;
         for (index, source) in others.into_iter().enumerate() {
             let (row, column) = if index < second_row {
@@ -4490,9 +4431,10 @@ fn graph_usage_for_focus(
             GraphSource::Kick
             | GraphSource::Property(_)
             | GraphSource::DropLevel
+            | GraphSource::DropEnergyLoss
             | GraphSource::DropEligible
             | GraphSource::DetectorOnsetFlux(_)
-            | GraphSource::DetectorSuppression(_) => "",
+            | GraphSource::DetectorAttackProperties(_) => "",
         },
         DebugSelection::Property(property) => match source {
             GraphSource::Property(_) => "resulting value",
@@ -4534,9 +4476,10 @@ fn graph_usage_for_focus(
                 _ => "feeds the property",
             },
             GraphSource::DropLevel
+            | GraphSource::DropEnergyLoss
             | GraphSource::DropEligible
             | GraphSource::DetectorOnsetFlux(_)
-            | GraphSource::DetectorSuppression(_) => "",
+            | GraphSource::DetectorAttackProperties(_) => "",
         },
         DebugSelection::Flux | DebugSelection::Hat | DebugSelection::Scene => "",
     }
@@ -4560,9 +4503,10 @@ fn graph_usage_text(
         | GraphSource::BandOnset(_)
         | GraphSource::Onset(_)
         | GraphSource::DropLevel
+        | GraphSource::DropEnergyLoss
         | GraphSource::DropEligible
         | GraphSource::DetectorOnsetFlux(_)
-        | GraphSource::DetectorSuppression(_) => return usage.to_owned(),
+        | GraphSource::DetectorAttackProperties(_) => return usage.to_owned(),
         GraphSource::BandRole(component) => Input::Band(component),
         GraphSource::Power => Input::Power,
         GraphSource::Bass => Input::Bass,
@@ -4692,8 +4636,26 @@ fn draw_graph(
     if plot.height() < 2.0 * scale {
         return;
     }
-    let range = source.range(graph_max);
-    let baseline_y = if source.inverted() {
+    if source == GraphSource::DetectorOnsetFlux(Detector::Drop) {
+        draw_drop_lf_envelopes(fonts, scene, history, plot, color, palette, scale);
+        return;
+    }
+    let range = if source == GraphSource::DropEnergyLoss {
+        history
+            .samples()
+            .fold((-1.0_f32, 1.0_f32), |(low, high), sample| {
+                let loss = -sample.drop_status.energy_delta_db;
+                (
+                    low.min(loss.floor()),
+                    high.max((loss.max(sample.drop_status.mix_loss_threshold_db) * 1.1).ceil()),
+                )
+            })
+    } else {
+        source.range(graph_max)
+    };
+    let baseline_y = if source == GraphSource::DropEnergyLoss {
+        map_level(plot, range, 0.0)
+    } else if source.inverted() {
         plot.y0
     } else {
         plot.center().y
@@ -4708,16 +4670,23 @@ fn draw_graph(
             Point::new(plot.x1, baseline_y),
         ),
     );
-    let settings = visualizer.detector_settings();
-    if let GraphSource::DropLevel = source {
-        draw_level_line(
-            scene,
-            plot,
-            range,
-            settings.drop_gap_threshold,
-            color.with_alpha(0.45),
-            scale,
-        );
+    if source == GraphSource::DropEnergyLoss {
+        for (value, y) in [(range.1, plot.y0 + 4.0 * scale), (0.0, baseline_y)] {
+            let label = fit(
+                fonts,
+                &format!("{value:.0} dB"),
+                (6.0 * scale) as f32,
+                UiFace::Light,
+                plot.width() * 0.25,
+            );
+            draw_left_center(
+                scene,
+                &label,
+                plot.x0 + 1.0 * scale,
+                y,
+                palette.neutral[1].with_alpha(0.7),
+            );
+        }
     }
     if let GraphSource::DetectorOnsetFlux(detector) = source {
         draw_trace(
@@ -4854,6 +4823,84 @@ fn draw_graph_max_buttons(
             rect.center().x - label.width() * 0.5,
             rect.center().y,
             text,
+        );
+    }
+}
+
+fn draw_drop_lf_envelopes(
+    fonts: &mut Fonts,
+    scene: &mut Scene,
+    history: &DebugHistory,
+    plot: Rect,
+    color: Color,
+    palette: Palette,
+    scale: f64,
+) {
+    let Some((first, last)) = history.span() else {
+        return;
+    };
+    if last <= first {
+        return;
+    }
+    let (low, high) = history
+        .samples()
+        .flat_map(|sample| {
+            [
+                sample.drop_status.bass_fast_db,
+                sample.drop_status.bass_slow_db,
+                sample.drop_status.bass_onset_threshold_db,
+            ]
+        })
+        .fold((0.0_f32, -80.0_f32), |(low, high), db| {
+            (low.min(db), high.max(db))
+        });
+    let low = (((low - 3.0) / 6.0).floor() * 6.0).max(-80.0);
+    let high = (((high + 3.0) / 6.0).ceil() * 6.0).max(low + 12.0);
+    let range = (low, high);
+    let traces: [(fn(&DebugSample) -> f32, Color, Stroke); 3] = [
+        (
+            |s| s.drop_status.bass_fast_db,
+            color,
+            Stroke::new(1.2 * scale),
+        ),
+        (
+            |s| s.drop_status.bass_slow_db,
+            palette.neutral[1].with_alpha(0.75),
+            Stroke::new(0.9 * scale).with_dashes(0.0, [scale, 2.0 * scale]),
+        ),
+        (
+            |s| s.drop_status.bass_onset_threshold_db,
+            color.with_alpha(0.65),
+            Stroke::new(0.9 * scale).with_dashes(0.0, [4.0 * scale, 3.0 * scale]),
+        ),
+    ];
+    for (value, color, stroke) in traces {
+        let mut path = BezPath::new();
+        for (index, sample) in history.samples().enumerate() {
+            let x = plot.x0 + f64::from((sample.at - first) / (last - first)) * plot.width();
+            let point = Point::new(x, map_level(plot, range, value(sample)));
+            if index == 0 {
+                path.move_to(point);
+            } else {
+                path.line_to(point);
+            }
+        }
+        scene.stroke(&stroke, Affine::IDENTITY, color, None, &path);
+    }
+    for (db, y) in [(high, plot.y0 + 4.0 * scale), (low, plot.y1 - 3.0 * scale)] {
+        let label = fit(
+            fonts,
+            &format!("{db:.0} dB"),
+            (6.0 * scale) as f32,
+            UiFace::Light,
+            plot.width() * 0.25,
+        );
+        draw_left_center(
+            scene,
+            &label,
+            plot.x0 + scale,
+            y,
+            palette.neutral[1].with_alpha(0.7),
         );
     }
 }
@@ -5105,7 +5152,7 @@ impl TimelineTrack {
             Self::Kick => "KICK",
             Self::Snare => "SNARE",
             Self::Hat => "HAT",
-            Self::DropGap => "DROP LVL+ARM",
+            Self::DropGap => "GAP dB+ARM",
             Self::DropTrigger => "DROP TRIGGER",
         }
     }
@@ -5248,7 +5295,7 @@ pub(super) fn draw_timeline(
     view: &View,
     hotkey_width: f64,
     history: &DebugHistory,
-    drop_gap_threshold: f32,
+    _drop_gap_threshold: f32,
     palette: Palette,
     colors: ThemeColors,
     text_scale: VisualizerTextScale,
@@ -5313,15 +5360,7 @@ pub(super) fn draw_timeline(
                     scale,
                 );
             } else {
-                draw_timeline_drop_gap(
-                    scene,
-                    history,
-                    window,
-                    lane,
-                    drop_gap_threshold,
-                    palette,
-                    scale,
-                );
+                draw_timeline_drop_gap(scene, history, window, lane, palette, scale);
             }
         }
     }
@@ -5361,13 +5400,12 @@ fn draw_timeline_drop_gap(
     history: &DebugHistory,
     window: TimelineWindow,
     lane: Rect,
-    threshold: f32,
     palette: Palette,
     scale: f64,
 ) {
     let eligibility = palette.vivid(8);
     let level = palette.vivid(4);
-    let range = (DROP_GAP_THRESHOLD_MIN, DROP_GAP_THRESHOLD_MAX);
+    let range = (-18.0, 6.0);
 
     // The latch fills the lane while it is armed. One rectangle per continuous
     // run keeps the fill solid without seams.
@@ -5400,20 +5438,11 @@ fn draw_timeline_drop_gap(
         }
     }
 
-    draw_level_line(
-        scene,
-        lane,
-        range,
-        threshold,
-        palette.neutral[1].with_alpha(0.35),
-        scale,
-    );
-
     let mut trace = BezPath::new();
     let mut started = false;
     for sample in history.samples() {
         let x = window.x(lane, sample.at);
-        let y = map_level(lane, range, sample.drop_status.envelope_db);
+        let y = map_level(lane, range, sample.drop_status.energy_delta_db);
         if started {
             trace.line_to(Point::new(x, y));
         } else {
@@ -5444,24 +5473,6 @@ fn map_level_axis(plot: Rect, range: (f32, f32), value: f32, inverted: bool) -> 
     } else {
         plot.y1 - f64::from(normalized) * plot.height()
     }
-}
-
-fn draw_level_line(
-    scene: &mut Scene,
-    plot: Rect,
-    range: (f32, f32),
-    value: f32,
-    color: Color,
-    scale: f64,
-) {
-    let y = map_level(plot, range, value);
-    scene.stroke(
-        &Stroke::new(0.8 * scale),
-        Affine::IDENTITY,
-        color,
-        None,
-        &Line::new(Point::new(plot.x0, y), Point::new(plot.x1, y)),
-    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5655,6 +5666,7 @@ fn dependency_label(dependency: Dependency, routing: &BandRouting) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::visualizer::FluxSetting;
 
     /// Layout tests describe geometry at the reference chrome scale, not the
     /// factory text-size preference.
@@ -5759,6 +5771,7 @@ mod tests {
 
     #[test]
     fn detector_controls_live_in_the_tree_parameter_panel() {
+        use crate::visualizer::ArrangementSetting;
         let view = View::fit(Size::new(1280.0, 440.0));
         let text_scale = reference_scale();
         let tree = tree_layout(
@@ -5768,22 +5781,20 @@ mod tests {
             Some(TreeTarget::Detector(Detector::Drop)),
             &Mixer::default(),
         );
-        assert_eq!(tree.sliders.len(), 10);
-        assert!(tree
+        assert_eq!(tree.sliders.len(), ArrangementSetting::ALL.len() + 3);
+        for setting in ArrangementSetting::ALL {
+            assert!(tree
+                .sliders
+                .iter()
+                .any(|slider| slider.parameter == Parameter::Arrangement(setting)));
+        }
+        assert!(!tree
             .sliders
             .iter()
             .any(|slider| slider.parameter == Parameter::DropGapThreshold));
-        assert_eq!(tree.kernels.len(), 1);
-        let bank = tree.kernels[0];
-        let band = 8;
-        let point = Point::new(
-            bank.rect.x0 + (band as f64 + 0.5) * bank.rect.width() / BAND_COUNT as f64,
-            bank.rect.center().y,
-        );
-        assert_eq!(
-            tree.kernel_at(point)
-                .map(|(kernel, _, band)| (kernel, band)),
-            Some((DropKernel::Onset, band))
+        assert!(
+            tree.kernels.is_empty(),
+            "shape tracking has no template kernel"
         );
         assert_eq!(
             tree.sliders
@@ -5832,9 +5843,10 @@ mod tests {
         let graphs = detector_graph_sources(Detector::Drop, 0);
         for expected in [
             GraphSource::DropLevel,
+            GraphSource::DropEnergyLoss,
             GraphSource::DropEligible,
             GraphSource::DetectorOnsetFlux(Detector::Drop),
-            GraphSource::DetectorSuppression(Detector::Drop),
+            GraphSource::DetectorAttackProperties(Detector::Drop),
             GraphSource::Onset(Detector::Drop),
         ] {
             assert!(graphs.contains(&expected), "missing {expected:?}");
@@ -5848,7 +5860,7 @@ mod tests {
         for detector in [Detector::Kick, Detector::Snare] {
             let graphs = detector_graph_sources(detector, 0);
             assert!(graphs.contains(&GraphSource::DetectorOnsetFlux(detector)));
-            assert!(graphs.contains(&GraphSource::DetectorSuppression(detector)));
+            assert!(graphs.contains(&GraphSource::DetectorAttackProperties(detector)));
             assert!(graphs.contains(&GraphSource::Onset(detector)));
             for source in graphs {
                 assert!(!graph_usage(selection, source).is_empty());
@@ -5861,11 +5873,11 @@ mod tests {
         assert_eq!(GraphSource::DropEligible.range(None), (0.0, 1.0));
         assert_eq!(
             GraphSource::DetectorOnsetFlux(Detector::Drop).range(None),
-            (0.0, 0.25)
+            (-80.0, 0.0)
         );
         assert_eq!(
-            GraphSource::DetectorSuppression(Detector::Drop).range(None),
-            (0.0, 0.25)
+            GraphSource::DetectorAttackProperties(Detector::Drop).range(None),
+            (0.0, 1.5)
         );
     }
 
@@ -5908,7 +5920,7 @@ mod tests {
             assert_eq!(cells.len(), detector_graph_sources(detector, 0).len());
             for source in [
                 GraphSource::DetectorOnsetFlux(detector),
-                GraphSource::DetectorSuppression(detector),
+                GraphSource::DetectorAttackProperties(detector),
             ] {
                 assert!(cells.iter().any(|(candidate, _)| *candidate == source));
             }
@@ -5946,7 +5958,7 @@ mod tests {
     }
 
     #[test]
-    fn detector_focus_stacks_suppression_below_the_onset_graph() {
+    fn detector_focus_stacks_attack_properties_below_the_onset_graph() {
         let view = View::fit(Size::new(1280.0, 440.0));
         let text_scale = reference_scale();
         let visualizer = Visualizer::new();
@@ -5966,12 +5978,12 @@ mod tests {
                     .expect("detector graph cell")
             };
             let onset = find(GraphSource::DetectorOnsetFlux(detector));
-            let suppression = find(GraphSource::DetectorSuppression(detector));
-            assert_eq!(suppression.x0, onset.x0);
-            assert_eq!(suppression.x1, onset.x1);
-            assert!(suppression.y0 > onset.y1);
-            assert!((suppression.height() - onset.height()).abs() < 1e-6);
-            assert!(GraphSource::DetectorSuppression(detector).inverted());
+            let properties = find(GraphSource::DetectorAttackProperties(detector));
+            assert_eq!(properties.x0, onset.x0);
+            assert_eq!(properties.x1, onset.x1);
+            assert!(properties.y0 > onset.y1);
+            assert!((properties.height() - onset.height()).abs() < 1e-6);
+            assert!(!GraphSource::DetectorAttackProperties(detector).inverted());
             assert!(!GraphSource::DetectorOnsetFlux(detector).inverted());
         }
     }
@@ -5987,22 +5999,17 @@ mod tests {
     }
 
     #[test]
-    fn phase_detector_focus_headers_report_their_onset_flux() {
+    fn percussion_focus_headers_describe_the_event_population() {
         let visualizer = Visualizer::new();
         let snapshot = visualizer.debug_snapshot();
         for detector in [Detector::Kick, Detector::Snare, Detector::Hat] {
             let (heading, description, dependencies) =
                 detector_extension_text(detector, &snapshot, &visualizer);
-            assert!(heading.ends_with("IDLE"));
+            assert!(heading.contains("ADAPTIVE ONSET POPULATION"));
             assert!(heading.starts_with(detector.name()));
-            assert!(description.contains("ONSET FLUX"));
-            assert!(description.contains("REF"));
-            assert!(description.contains("THR"));
-            assert_eq!(
-                dependencies.contains("RMS GATE"),
-                detector == Detector::Snare,
-                "{detector:?} gate text"
-            );
+            assert!(description.contains("Waiting for a complete regional attack"));
+            assert!(dependencies.contains("0 paired observations"));
+            assert!(dependencies.contains("instrument identity is ambiguous"));
         }
     }
 
@@ -6013,14 +6020,16 @@ mod tests {
         let (heading, description, dependencies) = drop_extension_text(&snapshot, &visualizer);
         assert_eq!(heading, "DROP TRIGGER  IDLE");
         assert!(description.contains("RMS"));
-        assert!(description.contains("ENV"));
-        assert!(description.contains("GATE -21 dB"));
-        assert!(dependencies.contains("OPEN"));
-        assert!(dependencies.contains("ONSET"));
+        assert!(description.contains("CHANGE"));
+        assert!(description.contains("TRENDS"));
+        assert!(!description.contains("CEILING"));
+        assert!(dependencies.contains("TRACKING"));
+        assert!(dependencies.contains("SHAPE"));
+        assert!(dependencies.contains("BASS"));
     }
 
     #[test]
-    fn kick_and_snare_expose_temporal_pattern_editors() {
+    fn instrument_controls_expose_sharp_attacks_without_temporal_editors() {
         let view = View::fit(Size::new(1280.0, 440.0));
         let text_scale = reference_scale();
         for detector in [Detector::Kick, Detector::Snare] {
@@ -6031,22 +6040,17 @@ mod tests {
                 Some(TreeTarget::Detector(detector)),
                 &Mixer::default(),
             );
-            assert!(
-                tree.kernels.is_empty(),
-                "kick and snare use temporal templates"
-            );
-            let temporal = tree.temporal.expect("the temporal pattern editor");
-            assert_eq!(temporal.detector, detector);
-            assert!(temporal.canvas.height() > 0.0);
-            assert!(temporal.offset.height() > 0.0);
-            assert_eq!(
-                tree.action_center(TreeAction::ClearPattern(detector)),
-                Some(temporal.clear.rect.center())
-            );
-            assert_eq!(
-                tree.action_center(TreeAction::TogglePatternOverlay),
-                Some(temporal.overlay.rect.center())
-            );
+            assert!(tree.kernels.is_empty());
+            assert!(tree.temporal.is_none());
+            assert!(!tree.sliders.iter().any(|slider| matches!(
+                slider.parameter,
+                Parameter::PatternArea(_)
+                    | Parameter::OnsetSuppression(_)
+                    | Parameter::OnsetFlux(
+                        _,
+                        FluxSetting::Attack | FluxSetting::Release | FluxSetting::PreGain
+                    )
+            )));
         }
     }
 
@@ -6116,12 +6120,14 @@ mod tests {
             .any(|source| matches!(source, GraphSource::Onset(_))));
 
         let low_band = graph_sources(DebugSelection::Band(0), &visualizer);
-        assert!(low_band.contains(&GraphSource::Onset(Detector::Kick)));
+        assert!(!low_band.contains(&GraphSource::Onset(Detector::Kick)));
         assert!(!low_band.contains(&GraphSource::Onset(Detector::Snare)));
-        let snare_band = graph_sources(DebugSelection::Band(5), &visualizer);
+        let body_band = graph_sources(DebugSelection::Band(3), &visualizer);
+        assert!(body_band.contains(&GraphSource::Onset(Detector::Kick)));
+        let snare_band = graph_sources(DebugSelection::Band(7), &visualizer);
         assert!(snare_band.contains(&GraphSource::Onset(Detector::Snare)));
-        let high_band = graph_sources(DebugSelection::Band(8), &visualizer);
-        assert!(high_band.contains(&GraphSource::Onset(Detector::Kick)));
+        let high_band = graph_sources(DebugSelection::Band(13), &visualizer);
+        assert!(!high_band.contains(&GraphSource::Onset(Detector::Kick)));
         assert!(high_band.contains(&GraphSource::Onset(Detector::Snare)));
     }
 
@@ -6189,13 +6195,14 @@ mod tests {
         let routing = visualizer.routing();
         let detectors = visualizer.detector_settings();
         assert_eq!(band_route(Property::Pulse, 0, &visualizer), "V");
-        assert_eq!(band_route(Property::Kick, 0, &visualizer), "K");
+        assert_eq!(band_route(Property::Kick, 0, &visualizer), "");
+        assert_eq!(band_route(Property::Kick, 3, &visualizer), "K");
         assert_eq!(band_route(Property::Crossfade, 0, &visualizer), "D");
         assert_eq!(band_route(Property::Crossfade, 4, &visualizer), "D");
-        assert_eq!(band_route(Property::Flip, 5, &visualizer), "S");
+        assert_eq!(band_route(Property::Flip, 7, &visualizer), "S");
         assert_eq!(band_route(Property::Spin, 2, &visualizer), "V");
         assert_eq!(band_route(Property::Spin, 5, &visualizer), "");
-        assert!(Property::Kick.depends_on_band(5, routing, &detectors));
+        assert!(Property::Kick.depends_on_band(4, routing, &detectors));
         assert!(!Property::Flip.depends_on_band(1, routing, &detectors));
     }
 

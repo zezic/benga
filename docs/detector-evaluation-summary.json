@@ -1,0 +1,405 @@
+{
+  "schema_version": 1,
+  "evaluated_on": "2026-10-31",
+  "interpretation": "Causal unlabeled replay: event counts and timing proxies, not precision or recall.",
+  "corpus": {
+    "selected_files": 1066,
+    "sample_rate": 48000,
+    "gain_db": -6
+  },
+  "original": {
+    "probe_sha256": "09d33908408f76a0900eab0c833191f9bd0816ae87be18dd7208a26f5a214d21",
+    "valid_runs": 1028,
+    "decode_errors": 38,
+    "audio_seconds": 209953.17399215698,
+    "counts": {
+      "kick": 252689,
+      "snare": 245366,
+      "hat": 657507,
+      "drop": 18006
+    },
+    "per_track_median_events_per_second": {
+      "kick": 1.0815139412879944,
+      "snare": 1.1599420309066772,
+      "hat": 3.097790479660034,
+      "drop": 0.04933895170688629
+    },
+    "per_track_max_events_per_second": {
+      "kick": 3.560784339904785,
+      "snare": 2.4002835750579834,
+      "hat": 8.244163513183594,
+      "drop": 1.0713545083999634
+    },
+    "tracks_without_events": {
+      "kick": 0,
+      "snare": 0,
+      "hat": 7,
+      "drop": 13
+    }
+  },
+  "replacement": {
+    "probe_sha256": "6e71d1085130e362b314194b298753be2ecac686732ac43092c339df9e3ead90",
+    "valid_runs": 1028,
+    "decode_errors": 38,
+    "audio_seconds": 209953.17399215698,
+    "counts": {
+      "kick": 476835,
+      "snare": 121698,
+      "hat": 459419,
+      "drop": 1972
+    },
+    "per_track_median_events_per_second": {
+      "kick": 2.005319595336914,
+      "snare": 0.39318330585956573,
+      "hat": 2.125144600868225,
+      "drop": 0.007388185476884246
+    },
+    "per_track_max_events_per_second": {
+      "kick": 7.383572578430176,
+      "snare": 3.338714361190796,
+      "hat": 6.836846351623535,
+      "drop": 0.06201550364494324
+    },
+    "tracks_without_events": {
+      "kick": 0,
+      "snare": 26,
+      "hat": 4,
+      "drop": 278
+    },
+    "event_rms_db_min": {
+      "kick": -26.999984741210938,
+      "snare": -23.989782333374023,
+      "hat": -26.9981746673584,
+      "drop": -25.994712829589844
+    }
+  },
+  "gain_and_sample_rate_matrix": [
+    {
+      "gain_db": -30,
+      "sample_rate": 44100,
+      "valid_runs": 23,
+      "counts": {
+        "kick": 0,
+        "snare": 0,
+        "hat": 0,
+        "drop": 0
+      }
+    },
+    {
+      "gain_db": -30,
+      "sample_rate": 48000,
+      "valid_runs": 23,
+      "counts": {
+        "kick": 0,
+        "snare": 0,
+        "hat": 0,
+        "drop": 0
+      }
+    },
+    {
+      "gain_db": -30,
+      "sample_rate": 96000,
+      "valid_runs": 23,
+      "counts": {
+        "kick": 0,
+        "snare": 0,
+        "hat": 0,
+        "drop": 0
+      }
+    },
+    {
+      "gain_db": -18,
+      "sample_rate": 44100,
+      "valid_runs": 23,
+      "counts": {
+        "kick": 4852,
+        "snare": 301,
+        "hat": 3349,
+        "drop": 20
+      }
+    },
+    {
+      "gain_db": -18,
+      "sample_rate": 48000,
+      "valid_runs": 23,
+      "counts": {
+        "kick": 4875,
+        "snare": 292,
+        "hat": 3270,
+        "drop": 20
+      }
+    },
+    {
+      "gain_db": -18,
+      "sample_rate": 96000,
+      "valid_runs": 23,
+      "counts": {
+        "kick": 4876,
+        "snare": 292,
+        "hat": 3273,
+        "drop": 20
+      }
+    },
+    {
+      "gain_db": -6,
+      "sample_rate": 44100,
+      "valid_runs": 23,
+      "counts": {
+        "kick": 12032,
+        "snare": 4377,
+        "hat": 13277,
+        "drop": 36
+      }
+    },
+    {
+      "gain_db": -6,
+      "sample_rate": 48000,
+      "valid_runs": 23,
+      "counts": {
+        "kick": 12696,
+        "snare": 4377,
+        "hat": 13174,
+        "drop": 36
+      }
+    },
+    {
+      "gain_db": -6,
+      "sample_rate": 96000,
+      "valid_runs": 23,
+      "counts": {
+        "kick": 12696,
+        "snare": 4378,
+        "hat": 13177,
+        "drop": 36
+      }
+    },
+    {
+      "gain_db": 0,
+      "sample_rate": 44100,
+      "valid_runs": 23,
+      "counts": {
+        "kick": 12605,
+        "snare": 5437,
+        "hat": 14463,
+        "drop": 37
+      }
+    },
+    {
+      "gain_db": 0,
+      "sample_rate": 48000,
+      "valid_runs": 23,
+      "counts": {
+        "kick": 13369,
+        "snare": 5438,
+        "hat": 14337,
+        "drop": 36
+      }
+    },
+    {
+      "gain_db": 0,
+      "sample_rate": 96000,
+      "valid_runs": 23,
+      "counts": {
+        "kick": 13370,
+        "snare": 5438,
+        "hat": 14338,
+        "drop": 36
+      }
+    }
+  ],
+  "fft_matrix": [
+    {
+      "fft_size": 512,
+      "sample_rate": 48000,
+      "window_ms": 10.666666666666666,
+      "valid_runs": 23,
+      "counts": {
+        "kick": 26365,
+        "snare": 3000,
+        "hat": 10258,
+        "drop": 37
+      }
+    },
+    {
+      "fft_size": 1024,
+      "sample_rate": 48000,
+      "window_ms": 21.333333333333332,
+      "valid_runs": 23,
+      "counts": {
+        "kick": 12696,
+        "snare": 4377,
+        "hat": 13174,
+        "drop": 36
+      }
+    },
+    {
+      "fft_size": 2048,
+      "sample_rate": 48000,
+      "window_ms": 42.666666666666664,
+      "valid_runs": 23,
+      "counts": {
+        "kick": 4445,
+        "snare": 3380,
+        "hat": 10448,
+        "drop": 33
+      }
+    }
+  ],
+  "callback_partition_check": {
+    "track_seconds": 90,
+    "results": [
+      {
+        "block_frames": 137,
+        "analysis_hops": 16872,
+        "counts": {
+          "kick": 553,
+          "snare": 48,
+          "hat": 147,
+          "drop": 0
+        }
+      },
+      {
+        "block_frames": 256,
+        "analysis_hops": 16872,
+        "counts": {
+          "kick": 553,
+          "snare": 48,
+          "hat": 147,
+          "drop": 0
+        }
+      },
+      {
+        "block_frames": 4096,
+        "analysis_hops": 16872,
+        "counts": {
+          "kick": 553,
+          "snare": 48,
+          "hat": 147,
+          "drop": 0
+        }
+      },
+      {
+        "block_frames": 8192,
+        "analysis_hops": 16872,
+        "counts": {
+          "kick": 553,
+          "snare": 48,
+          "hat": 147,
+          "drop": 0
+        }
+      }
+    ]
+  },
+  "continuous_playlist": {
+    "probe_sha256": "6e71d1085130e362b314194b298753be2ecac686732ac43092c339df9e3ead90",
+    "selected_files": 25,
+    "valid_segments": 24,
+    "decode_errors": 1,
+    "duration": 5352.26318359375,
+    "contains_partial_failed_decode": false,
+    "counts": {
+      "kick": 12828,
+      "snare": 4428,
+      "hat": 13622,
+      "drop": 60
+    }
+  },
+  "illustrative_tracks": [
+    {
+      "track": "Caribou - Odessa.ogg",
+      "duration": 315.5853271484375,
+      "original": {
+        "kick": 551,
+        "snare": 538,
+        "hat": 1700,
+        "drop": 30
+      },
+      "replacement": {
+        "kick": 1898,
+        "snare": 103,
+        "hat": 493,
+        "drop": 0
+      }
+    },
+    {
+      "track": "Kraftwerk - It's More Fun to Compute - 2009 Remaster.ogg",
+      "duration": 256.4666748046875,
+      "original": {
+        "kick": 325,
+        "snare": 378,
+        "hat": 726,
+        "drop": 148
+      },
+      "replacement": {
+        "kick": 889,
+        "snare": 191,
+        "hat": 519,
+        "drop": 0
+      }
+    },
+    {
+      "track": "Current Value - Droppin'.ogg",
+      "duration": 409.6266784667969,
+      "original": {
+        "kick": 960,
+        "snare": 463,
+        "hat": 2069,
+        "drop": 3
+      },
+      "replacement": {
+        "kick": 1048,
+        "snare": 1085,
+        "hat": 1905,
+        "drop": 2
+      }
+    },
+    {
+      "track": "Tom VR - Acheless - Edit.ogg",
+      "duration": 295.3864440917969,
+      "original": {
+        "kick": 128,
+        "snare": 335,
+        "hat": 778,
+        "drop": 28
+      },
+      "replacement": {
+        "kick": 470,
+        "snare": 678,
+        "hat": 1233,
+        "drop": 1
+      }
+    },
+    {
+      "track": "Gridlok - Mass Transit.ogg",
+      "duration": 322.8666687011719,
+      "original": {
+        "kick": 866,
+        "snare": 557,
+        "hat": 1841,
+        "drop": 4
+      },
+      "replacement": {
+        "kick": 1254,
+        "snare": 580,
+        "hat": 1893,
+        "drop": 1
+      }
+    },
+    {
+      "track": "meat computer - dissolving into chaos.ogg",
+      "duration": 148.6451873779297,
+      "original": {
+        "kick": 88,
+        "snare": 142,
+        "hat": 788,
+        "drop": 1
+      },
+      "replacement": {
+        "kick": 308,
+        "snare": 112,
+        "hat": 759,
+        "drop": 1
+      }
+    }
+  ]
+}

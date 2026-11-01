@@ -1,5 +1,7 @@
 //! Spectrum-driven pseudo-3D model visualizer.
 
+mod analysis_help;
+mod arrangement;
 #[cfg(test)]
 mod benchmark;
 mod computation;
@@ -8,11 +10,20 @@ mod debug;
 mod detection;
 mod geometry;
 mod model;
+mod percussion;
+#[cfg(test)]
+mod percussion_acceptance_tests;
+#[cfg(test)]
+mod percussion_integration_tests;
+mod percussion_spectrum;
+#[cfg(test)]
+mod percussion_stereo_tests;
 mod presentation;
 mod renderer;
 mod showcase;
 mod spectrum;
 mod splash;
+mod transients;
 mod transition;
 mod ui;
 
@@ -24,19 +35,23 @@ pub use computation::{
     TreeTarget,
 };
 pub use detection::{
-    BandOnsetSettings, DetectorSettings, DropKernel, DropKernels, DropStatus, FluxSettings,
-    OnsetFluxStatus, PatternKernel, PatternLayer, QuakeDirection, TemporalPattern, TriggerStatus,
-    ABL_AMOUNT_MIN, ABL_GAIN_MAX, ABL_GAIN_MIN, CHOKE_MAX, CHOKE_MIN, DROP_GAP_THRESHOLD_MAX,
-    DROP_GAP_THRESHOLD_MIN, EXCESS_ATTACK_MAX, EXCESS_ATTACK_MIN, EXCESS_CAP_MAX, EXCESS_CAP_MIN,
-    EXCESS_FLOOR_MAX, EXCESS_FLOOR_MIN, EXCESS_RELEASE_MAX, EXCESS_RELEASE_MIN, FLUX_ATTACK_MAX,
-    FLUX_ATTACK_MIN, FLUX_AVERAGE_MAX, FLUX_AVERAGE_MIN, FLUX_INTERVAL_MAX, FLUX_INTERVAL_MIN,
-    FLUX_PRE_GAIN_MAX, FLUX_PRE_GAIN_MIN, FLUX_RELEASE_MAX, FLUX_RELEASE_MIN, FLUX_SENSITIVITY_MAX,
-    FLUX_SENSITIVITY_MIN, FLUX_SUPPRESSION_MAX, FLUX_SUPPRESSION_MIN, FLUX_THRESHOLD_MIN,
-    ONSET_THRESHOLD_MAX, QUAKE_FACTOR_MAX, QUAKE_FACTOR_MIN, SEQUENCE_EVERY_MAX,
-    SEQUENCE_EVERY_MIN, SNARE_RMS_GATE_DEFAULT_DB, SNARE_RMS_GATE_MAX_DB, SNARE_RMS_GATE_MIN_DB,
-    SPRING_DAMPING_MAX, SPRING_DAMPING_MIN, SPRING_STIFFNESS_MAX, SPRING_STIFFNESS_MIN,
+    ArrangementSetting, ArrangementSettings, BandOnsetSettings, BinAddress, BinGainPoint,
+    DetectorSettings, DropKernel, DropKernels, DropStatus, FluxSettings, FrequencyGainProfile,
+    OnsetFluxStatus, PatternKernel, PatternLayer, PercussionBinGains, QuakeDirection,
+    TemporalPattern, TriggerStatus, ABL_AMOUNT_MIN, ABL_GAIN_MAX, ABL_GAIN_MIN, CHOKE_MAX,
+    CHOKE_MIN, DROP_GAP_THRESHOLD_MAX, DROP_GAP_THRESHOLD_MIN, EXCESS_ATTACK_MAX,
+    EXCESS_ATTACK_MIN, EXCESS_CAP_MAX, EXCESS_CAP_MIN, EXCESS_FLOOR_MAX, EXCESS_FLOOR_MIN,
+    EXCESS_RELEASE_MAX, EXCESS_RELEASE_MIN, FLUX_ATTACK_MAX, FLUX_ATTACK_MIN, FLUX_AVERAGE_MAX,
+    FLUX_AVERAGE_MIN, FLUX_INTERVAL_MAX, FLUX_INTERVAL_MIN, FLUX_PRE_GAIN_MAX, FLUX_PRE_GAIN_MIN,
+    FLUX_RELEASE_MAX, FLUX_RELEASE_MIN, FLUX_SENSITIVITY_MAX, FLUX_SENSITIVITY_MIN,
+    FLUX_SUPPRESSION_MAX, FLUX_SUPPRESSION_MIN, FLUX_THRESHOLD_MIN, ONSET_THRESHOLD_MAX,
+    QUAKE_FACTOR_MAX, QUAKE_FACTOR_MIN, SEQUENCE_EVERY_MAX, SEQUENCE_EVERY_MIN,
+    SNARE_RMS_GATE_DEFAULT_DB, SNARE_RMS_GATE_MAX_DB, SNARE_RMS_GATE_MIN_DB, SPRING_DAMPING_MAX,
+    SPRING_DAMPING_MIN, SPRING_STIFFNESS_MAX, SPRING_STIFFNESS_MIN,
 };
 use detection::{OnsetBank, QuakeSequence, Spring};
+pub use percussion::*;
+use percussion_spectrum::{PercussionAnalyzer, PercussionFrame};
 pub use showcase::ShowcaseSettings;
 use showcase::{FocusPoi, Showcase, ShowcaseFrame};
 
@@ -61,7 +76,7 @@ use geometry::{
     soft_saturate, wrap_angle, Camera, DepthOpacity, FocusProjection, Pose, Projected,
     ScreenBounds, Vec2, Vec3, Wireframe,
 };
-pub use spectrum::{RelativeExcessSettings, BAND_COUNT};
+pub use spectrum::{OnsetBinMeter, RelativeExcessSettings, BAND_COUNT};
 use spectrum::{Spectrum, SpectrumAnalyzer};
 
 pub use controls::{ControlAction, Dial};
@@ -1444,6 +1459,9 @@ enum Models {
 
 pub struct Visualizer {
     analyzer: SpectrumAnalyzer,
+    percussion_analyzer: PercussionAnalyzer,
+    percussion_frame: PercussionFrame,
+    audio_gain: Option<f32>,
     bands: [Envelope; BAND_COUNT],
     power: Envelope,
     bass: Envelope,
@@ -1509,6 +1527,9 @@ impl Visualizer {
         let showcase = Showcase::new(tuning.showcase.clone());
         let mut visualizer = Self {
             analyzer: SpectrumAnalyzer::new(48_000),
+            percussion_analyzer: PercussionAnalyzer::new(48_000),
+            percussion_frame: PercussionFrame::default(),
+            audio_gain: None,
             bands: inputs
                 .bands
                 .map(|input| Envelope::new(input.attack, input.release)),
@@ -1787,12 +1808,28 @@ impl Visualizer {
 
     pub fn set_samplerate(&mut self, samplerate: usize) {
         self.analyzer.set_samplerate(samplerate);
+        self.percussion_analyzer = PercussionAnalyzer::new(samplerate);
+        self.percussion_analyzer
+            .set_settings(&self.detectors.percussion);
+        self.percussion_analyzer
+            .set_bin_gains(&self.detectors.bin_gains);
+        self.reset_audio();
+    }
+
+    /// Compare causal analysis resolutions in the offline detector probe.
+    /// Changing resolution starts a fresh audio timeline.
+    pub fn set_analysis_fft_size(&mut self, size: usize) {
+        self.analyzer = SpectrumAnalyzer::with_fft_size(self.analyzer.samplerate(), size);
+        self.analyzer.set_relative_excess(self.detectors.excess);
         self.reset_audio();
     }
 
     /// Discard temporal history after capture restarts.
     pub fn reset_audio(&mut self) {
         self.analyzer.reset();
+        self.percussion_analyzer.reset();
+        self.percussion_frame = PercussionFrame::default();
+        self.audio_gain = None;
         self.reset_analysis();
         self.pending_actions.clear();
         self.scene.reset_temporal();
@@ -1824,12 +1861,25 @@ impl Visualizer {
         self.onsets.reset();
     }
 
-    /// Raw stereo frames feed the mono spectrum analyzer at the sample rate.
+    /// Stereo energy feeds the short-window analyzer at the capture sample rate.
     pub fn consume_buf(&mut self, buf: &[[f32; 2]], gain: f32) {
+        if !gain.is_finite() {
+            return;
+        }
+        if self.audio_gain.is_some_and(|previous| previous != gain) {
+            self.percussion_analyzer.reset_features();
+            self.onsets.reset_percussion();
+        }
+        self.audio_gain = Some(gain);
         let hop = self.analyzer.hop_seconds();
         for frame in buf {
-            let mono = (frame[0] + frame[1]) * 0.5 * gain;
-            if let Some(spectrum) = self.analyzer.push(mono) {
+            let input = [frame[0] * gain, frame[1] * gain];
+            if let Some(percussion) = self.percussion_analyzer.push_stereo(input) {
+                let events = self.onsets.observe_percussion(&percussion, &self.detectors);
+                self.percussion_frame = percussion;
+                self.emit_detector_events(events);
+            }
+            if let Some(spectrum) = self.analyzer.push_stereo(input) {
                 self.observe(spectrum, hop);
             }
         }
@@ -1857,6 +1907,10 @@ impl Visualizer {
         let events = self
             .onsets
             .observe(&spectrum, &band_abdr, &band_abl, &self.detectors, hop);
+        self.emit_detector_events(events);
+    }
+
+    fn emit_detector_events(&mut self, events: detection::DetectorEvents) {
         if events.gap_entry {
             self.push_action(Action::GapEntry);
         }
@@ -2196,11 +2250,53 @@ impl Visualizer {
         self.detectors.clone()
     }
 
+    /// Per-bin input and attack meters for the selected percussion detector.
+    pub fn onset_bins(&self, detector: Detector) -> &[OnsetBinMeter] {
+        detector
+            .percussion_index()
+            .map_or(&[], |channel| self.percussion_analyzer.meters(channel))
+    }
+
+    pub fn reset_onset_bins(&mut self, detector: Detector) {
+        if let Some(channel) = detector.percussion_index() {
+            self.detectors.bin_gains.reset(channel);
+            self.percussion_analyzer
+                .set_bin_gains(&self.detectors.bin_gains);
+        }
+    }
+
     pub fn set_detector_settings(&mut self, settings: DetectorSettings) {
         self.detectors = settings
             .validate()
             .expect("detector settings are validated before they reach the visualizer");
         self.analyzer.set_relative_excess(self.detectors.excess);
+        self.percussion_analyzer
+            .set_settings(&self.detectors.percussion);
+        self.percussion_analyzer
+            .set_bin_gains(&self.detectors.bin_gains);
+    }
+
+    pub fn percussion_decisions(&self) -> &VecDeque<PercussionDecision> {
+        self.onsets.percussion_decisions()
+    }
+    pub fn percussion_reference(&self, channel: usize) -> PercussionReferenceSnapshot {
+        self.onsets.percussion_reference(channel)
+    }
+    pub fn percussion_audio_time(&self) -> f64 {
+        debug_assert_eq!(
+            self.analyzer.samplerate(),
+            self.percussion_analyzer.samplerate()
+        );
+        self.percussion_analyzer.audio_time()
+    }
+    pub fn percussion_support_seconds(&self) -> [f32; 3] {
+        self.percussion_frame.window_seconds
+    }
+    pub fn percussion_bin_hz(&self) -> [f32; 3] {
+        self.percussion_frame.bin_hz
+    }
+    pub fn percussion_channel_status(&self, channel: usize) -> PercussionChannelStatus {
+        self.onsets.percussion_channel_status(channel)
     }
 
     pub fn set_drop_kernel_band(&mut self, kernel: DropKernel, band: usize, value: f32) {
@@ -2515,6 +2611,12 @@ impl Visualizer {
     /// Current value of one adjustable computation parameter.
     pub fn parameter_value(&self, parameter: Parameter) -> f32 {
         match parameter {
+            Parameter::Percussion(detector, setting) => setting.get(
+                &self.detectors.percussion,
+                detector
+                    .percussion_index()
+                    .expect("percussion controls require an instrument"),
+            ),
             Parameter::PatternArea(detector) => match detector {
                 Detector::Kick => self.detectors.kick_pattern.effective,
                 Detector::Snare => self.detectors.snare_pattern.effective,
@@ -2533,6 +2635,14 @@ impl Visualizer {
             Parameter::ExcessFloor => self.detectors.excess.floor,
             Parameter::ExcessCap => self.detectors.excess.cap,
             Parameter::OnsetFlux(detector, setting) => self.onset_flux_value(detector, setting),
+            Parameter::OnsetBinGain(detector, address) => {
+                detector.percussion_index().map_or(1.0, |channel| {
+                    self.detectors.bin_gains.value(channel, address)
+                })
+            }
+            Parameter::KickLowHz => self.detectors.kick_low_hz,
+            Parameter::KickHighHz => self.detectors.kick_high_hz,
+            Parameter::Arrangement(setting) => self.detectors.arrangement.value(setting),
             Parameter::OnsetSuppression(detector) => self.onset_suppression(detector),
             Parameter::KickSnareChoke => self.detectors.kick_snare_choke,
             Parameter::KickDropChoke => self.detectors.kick_drop_choke,
@@ -2614,9 +2724,43 @@ impl Visualizer {
 
     /// Applies one slider value, clamped to the parameter's declared range.
     pub fn set_parameter(&mut self, parameter: Parameter, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
         let (minimum, maximum) = parameter.range();
         let value = value.clamp(minimum, maximum);
         match parameter {
+            Parameter::Percussion(detector, setting) => {
+                setting.set(
+                    &mut self.detectors.percussion,
+                    detector
+                        .percussion_index()
+                        .expect("percussion controls require an instrument"),
+                    value,
+                );
+                self.percussion_analyzer
+                    .set_settings(&self.detectors.percussion);
+            }
+            Parameter::OnsetBinGain(detector, address) => {
+                if let Some(channel) = detector.percussion_index() {
+                    self.detectors.bin_gains.set_bin(channel, address, value);
+                    self.percussion_analyzer
+                        .set_bin_gains(&self.detectors.bin_gains);
+                }
+            }
+            Parameter::KickLowHz => {
+                if value.is_finite() {
+                    self.detectors.kick_low_hz = value
+                        .min(self.detectors.kick_high_hz - detection::KICK_FREQUENCY_MIN_WIDTH_HZ);
+                }
+            }
+            Parameter::KickHighHz => {
+                if value.is_finite() {
+                    self.detectors.kick_high_hz = value
+                        .max(self.detectors.kick_low_hz + detection::KICK_FREQUENCY_MIN_WIDTH_HZ);
+                }
+            }
+            Parameter::Arrangement(setting) => self.detectors.arrangement.set(setting, value),
             Parameter::PatternArea(detector) => {
                 let pattern = match detector {
                     Detector::Kick => &mut self.detectors.kick_pattern,
@@ -5029,19 +5173,20 @@ mod tests {
         assert_eq!(detectors.excess.background_release, 0.200);
         assert_eq!(detectors.excess.floor, 0.010);
         assert_eq!(detectors.excess.cap, 1.0);
-        assert!(detectors.kick_contains(0));
-        assert!(detectors.kick_contains(15));
-        assert!(detectors.snare_contains(4));
-        assert!(!detectors.snare_contains(15));
+        assert!(!detectors.kick_contains(0));
+        assert!(detectors.kick_contains(4));
+        assert!(!detectors.kick_contains(15));
+        assert!(detectors.snare_contains(8));
+        assert!(detectors.snare_contains(15));
         assert!(!detectors.snare_contains(1));
-        assert_eq!(detectors.kick_onset_min_interval, 0.15654644);
+        assert_eq!(detectors.kick_onset_min_interval, 0.09);
         assert_eq!(detectors.kick_onset_pre_gain, 0.2977303);
         assert_eq!(detectors.kick_onset_suppression, 0.0);
         assert_eq!(detectors.snare_onset_attack, 0.001);
         assert_eq!(detectors.snare_onset_pre_gain, 1.0054638);
         assert_eq!(detectors.snare_onset_suppression, 0.099999994);
         assert_eq!(detectors.snare_min_rms_db, SNARE_RMS_GATE_DEFAULT_DB);
-        assert_eq!(detectors.hat_onset_min_interval, 0.030284878);
+        assert_eq!(detectors.hat_onset_min_interval, 0.03);
         assert_eq!(detectors.hat_onset_pre_gain, 4.0);
         assert_eq!(detectors.snare_poi_switches, 16);
         assert_eq!(detectors.drop_gap_threshold, -21.0);
@@ -5062,7 +5207,17 @@ mod tests {
         let mut visualizer = Visualizer::new();
         for detector in [Detector::Kick, Detector::Snare, Detector::Drop] {
             let threshold = Parameter::OnsetFlux(detector, FluxSetting::MinThreshold);
-            assert_eq!(threshold.range(), (0.0, 0.25));
+            assert_eq!(
+                threshold.range(),
+                (
+                    if detector == Detector::Drop {
+                        0.0
+                    } else {
+                        0.06
+                    },
+                    0.25
+                )
+            );
             visualizer.set_parameter(threshold, 100.0);
             assert_eq!(visualizer.parameter_value(threshold), 0.25);
         }
@@ -5092,12 +5247,13 @@ mod tests {
     }
 
     #[test]
-    fn default_kernels_select_their_bands() {
+    fn detector_regions_select_their_frequency_bands() {
         let detectors = DetectorSettings::default();
-        assert!(detectors.kick_contains(0));
-        assert!(detectors.kick_contains(15));
-        assert!(detectors.snare_contains(4));
-        assert!(!detectors.snare_contains(15));
+        assert!(!detectors.kick_contains(0));
+        assert!(detectors.kick_contains(4));
+        assert!(!detectors.kick_contains(15));
+        assert!(detectors.snare_contains(8));
+        assert!(detectors.snare_contains(15));
         assert!(!detectors.snare_contains(1));
     }
 
@@ -5208,10 +5364,10 @@ mod tests {
     fn detector_settings_reach_the_debug_snapshot_and_parameters() {
         let mut visualizer = Visualizer::new();
         let settings = DetectorSettings {
-            kick_onset_min_interval: 0.05,
-            snare_onset_attack: 0.01,
+            kick_onset_min_interval: 0.08,
+            snare_onset_min_threshold: 0.18,
             drop_gap_threshold: -24.0,
-            drop_onset_attack: 0.015,
+            drop_quake_factor: 17.0,
             ..DetectorSettings::default()
         };
         visualizer.set_detector_settings(settings.clone());
@@ -5220,27 +5376,23 @@ mod tests {
             (visualizer.parameter_value(Parameter::OnsetFlux(
                 Detector::Kick,
                 FluxSetting::MinInterval
-            )) - 0.05)
+            )) - 0.08)
                 .abs()
                 < 1e-6
         );
         assert!(
-            (visualizer
-                .parameter_value(Parameter::OnsetFlux(Detector::Snare, FluxSetting::Attack))
-                - 0.01)
+            (visualizer.parameter_value(Parameter::OnsetFlux(
+                Detector::Snare,
+                FluxSetting::MinThreshold
+            )) - 0.18)
                 .abs()
                 < 1e-6
         );
         assert!((visualizer.parameter_value(Parameter::DropGapThreshold) + 24.0).abs() < 1e-6);
-        assert!(
-            (visualizer.parameter_value(Parameter::OnsetFlux(Detector::Drop, FluxSetting::Attack))
-                - 0.015)
-                .abs()
-                < 1e-6
-        );
-        assert!(visualizer.detector_settings().kick_contains(0));
-        assert!(visualizer.detector_settings().kick_contains(15));
-        assert!(visualizer.detector_settings().snare_contains(4));
+        assert!((visualizer.parameter_value(Parameter::DropQuakeFactor) - 17.0).abs() < 1e-6);
+        assert!(visualizer.detector_settings().kick_contains(4));
+        assert!(!visualizer.detector_settings().kick_contains(15));
+        assert!(visualizer.detector_settings().snare_contains(8));
         assert!(!visualizer.detector_settings().snare_contains(1));
         assert_eq!(snapshot.kick_hits, 0);
         assert_eq!(snapshot.snare_hits, 0);
@@ -5293,7 +5445,7 @@ mod tests {
         assert_eq!(floor.format(0.0123), "0.012");
         assert_eq!(
             Parameter::OnsetFlux(Detector::Kick, FluxSetting::MinThreshold).range(),
-            (FLUX_THRESHOLD_MIN, ONSET_THRESHOLD_MAX)
+            (0.06, ONSET_THRESHOLD_MAX)
         );
     }
 
@@ -5498,9 +5650,9 @@ mod tests {
     }
 
     #[test]
-    fn kick_detection_holds_across_input_gain() {
+    fn kick_detection_handles_capture_attenuation_and_rejects_quiet_noise() {
         fn hits(gain: f32) -> u32 {
-            let mut visualizer = loaded_visualizer();
+            let mut visualizer = Visualizer::new();
             visualizer.set_detector_settings(DetectorSettings {
                 kick_onset_min_threshold: 0.0,
                 ..kick_only_settings()
@@ -5512,14 +5664,19 @@ mod tests {
             visualizer.debug_snapshot().kick_hits
         }
         let loud = hits(1.0);
-        let quiet = hits(0.1);
+        let captured = hits(0.5);
         assert!(
             loud >= 48,
             "the loud train must confirm most of its 60 bursts, got {loud}"
         );
         assert!(
-            quiet * 4 >= loud * 3,
-            "a 20 dB quieter train must keep its hits, got {quiet} against {loud}"
+            captured * 4 >= loud * 3,
+            "desktop capture at -6 dB must keep its hits, got {captured} against {loud}"
+        );
+        assert_eq!(
+            hits(0.03),
+            0,
+            "inaudible attacks must stay behind the mix gate"
         );
     }
 
@@ -5568,40 +5725,36 @@ mod tests {
     }
 
     #[test]
-    fn a_quiet_rms_envelope_and_composite_onset_confirm_a_drop() {
+    fn a_changed_quiet_section_and_audible_bass_hit_confirm_a_drop() {
         let mut visualizer = Visualizer::new();
-        let settings = DetectorSettings {
-            drop_kernels: DropKernels {
-                onset: [1.0; BAND_COUNT],
-            },
-            drop_gap_threshold: -18.0,
-            ..DetectorSettings::default()
-        };
-        visualizer.set_detector_settings(settings.clone());
-        let hop = 1.0 / 86.0;
-        let quiet = Spectrum {
-            rms: 0.01,
+        let active = Spectrum {
+            rms: 0.25,
+            linear_bands: std::array::from_fn(|i| if i < 6 { 0.15 } else { 0.035 }),
             ..Spectrum::default()
         };
-        for _ in 0..12 {
+        let hop = 0.005;
+        for _ in 0..800 {
+            visualizer.observe(active, hop);
+        }
+        let quiet = Spectrum {
+            rms: 0.035,
+            linear_bands: std::array::from_fn(|i| if i < 6 { 0.002 } else { 0.02 }),
+            ..Spectrum::default()
+        };
+        for _ in 0..400 {
             visualizer.observe(quiet, hop);
         }
         let armed = visualizer.debug_snapshot();
-        assert!(armed.drop_onset.armed, "the quiet RMS arms the drop gate");
-        assert!(armed.drop_status.rms_db < settings.drop_gap_threshold);
-        assert!(armed.drop_status.envelope_db < settings.drop_gap_threshold);
-
-        let mut burst = quiet;
-        burst.rms = 0.2;
-        burst.bands = [1.0; BAND_COUNT];
-        burst.band_excess = [1.0; BAND_COUNT];
-        visualizer.observe(burst, hop);
-        assert_eq!(visualizer.debug_snapshot().drop_hits, 0);
-        visualizer.observe(quiet, hop);
+        assert!(
+            armed.drop_onset.armed,
+            "a changed quiet section arms the drop gate"
+        );
+        assert!(armed.drop_status.shape_distance > 0.1);
+        visualizer.observe(active, hop);
         let confirmed = visualizer.debug_snapshot();
         assert_eq!(
             confirmed.drop_hits, 1,
-            "the composite onset confirms the quiet gap"
+            "the sharp bass return confirms the changed quiet section"
         );
         assert!(
             !confirmed.drop_onset.armed,
@@ -6916,12 +7069,12 @@ mod tests {
             crate::visualizer::FLUX_INTERVAL_MAX
         );
         let snare_gate = Parameter::SnareRmsGate;
-        visualizer.set_parameter(snare_gate, -36.0);
-        assert_eq!(visualizer.parameter_value(snare_gate), -36.0);
+        visualizer.set_parameter(snare_gate, -25.0);
+        assert_eq!(visualizer.parameter_value(snare_gate), -25.0);
         visualizer.set_parameter(snare_gate, -100.0);
         assert_eq!(
             visualizer.parameter_value(snare_gate),
-            SNARE_RMS_GATE_MIN_DB
+            detection::ONSET_MIX_GATE_DB
         );
         visualizer.set_parameter(snare_gate, 100.0);
         assert_eq!(
@@ -7242,7 +7395,7 @@ mod tests {
                 "band {band} must reach at least one animation property"
             );
         }
-        assert!(Property::Kick.depends_on_band_onset(0, &detectors));
+        assert!(Property::Kick.depends_on_band_onset(4, &detectors));
         assert!(!Property::Flip.depends_on_band_onset(0, &detectors));
         assert!(Property::Flip.depends_on_band_onset(12, &detectors));
     }

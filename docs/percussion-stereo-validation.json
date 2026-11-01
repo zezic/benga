@@ -1,0 +1,170 @@
+{
+  "change": "Separate L/R FFTs, envelopes, positive movement and background excess before shared percussion decisions",
+  "normalization": "Per-side calibrated mean-square power; side positive growth combined as RMS; side positive-excess energy averaged. No width multiplier.",
+  "before_sha256": "cc01bc4d3a7000b15fa85aa7898992d626a780e3256d9e1fbe374386e7a5cc25",
+  "evaluated_stereo_sha256": "b978558167bcb0e1b6f1342f6b92d391668595722a142fd03440095a2e79478e",
+  "replay": {
+    "gain_db": -6,
+    "valid_complete_tracks": 11,
+    "audio_seconds": 2408.483125,
+    "before": {
+      "runs": 11,
+      "audio_seconds": 2408.483125,
+      "cpu_seconds": 37.067916,
+      "cpu_ms_per_audio_second": 15.390564963995748,
+      "kick": {
+        "count": 724,
+        "median_rate": 0.15850636807589286,
+        "max_rate": 1.080805471098617,
+        "zero_runs": 0,
+        "candidates": 17501,
+        "admitted": 6651,
+        "provisional_triggers": 35
+      },
+      "snare": {
+        "count": 2050,
+        "median_rate": 0.7961139686903304,
+        "max_rate": 1.5404952185637317,
+        "zero_runs": 0,
+        "candidates": 14724,
+        "admitted": 8162,
+        "provisional_triggers": 36
+      },
+      "hat": {
+        "count": 1912,
+        "median_rate": 0.7518854148742009,
+        "max_rate": 1.2079317346554324,
+        "zero_runs": 0,
+        "candidates": 15003,
+        "admitted": 8574,
+        "provisional_triggers": 62
+      },
+      "drop": {
+        "count": 29,
+        "median_rate": 0.011697426566155448,
+        "max_rate": 0.03170127361517857,
+        "zero_runs": 1
+      }
+    },
+    "stereo": {
+      "runs": 11,
+      "audio_seconds": 2408.483125,
+      "cpu_seconds": 53.118143,
+      "cpu_ms_per_audio_second": 22.054604596824817,
+      "kick": {
+        "count": 835,
+        "median_rate": 0.2460937366485603,
+        "max_rate": 1.080805471098617,
+        "zero_runs": 0,
+        "candidates": 12283,
+        "admitted": 6752,
+        "provisional_triggers": 23
+      },
+      "snare": {
+        "count": 1472,
+        "median_rate": 0.5765895780169322,
+        "max_rate": 1.314963660510977,
+        "zero_runs": 0,
+        "candidates": 8380,
+        "admitted": 5554,
+        "provisional_triggers": 57
+      },
+      "hat": {
+        "count": 1589,
+        "median_rate": 0.5473283534746021,
+        "max_rate": 1.1353029278248843,
+        "zero_runs": 0,
+        "candidates": 10560,
+        "admitted": 7085,
+        "provisional_triggers": 66
+      },
+      "drop": {
+        "count": 29,
+        "median_rate": 0.011697426566155448,
+        "max_rate": 0.03170127361517857,
+        "zero_runs": 1
+      }
+    },
+    "matched_arrangement_hops_and_drop_counts": true,
+    "failed_track": "Burial - Etched Headplate.ogg",
+    "counts_are_accuracy": false
+  },
+  "controlled_tests": {
+    "opposing_channel_attack": "Reproduced old missed candidate; now one admitted and eligible trigger at unchanged defaults for both snare/hat",
+    "canonical_stereo_hf_cases": 96,
+    "canonical_stereo_hf_max_emission_ms": 24.71655328798185,
+    "layouts": [
+      "centered",
+      "anti-phase",
+      "left-only equal power",
+      "right-only equal power",
+      "decorrelated carrier stereo",
+      "swapped stereo",
+      "quadrature",
+      "delayed right side"
+    ],
+    "slow_pan_ms": [
+      120,
+      600
+    ],
+    "independent_stereo_noise_gains": [
+      0.003,
+      0.5,
+      1.0
+    ],
+    "independent_stereo_noise_triggers": 0,
+    "callback_frames": [
+      1,
+      137,
+      256,
+      4096
+    ],
+    "mono_panned_energy_tolerance_relative": 0.001,
+    "canonical_probe_latencies": {
+      "kick": {
+        "cases": 49,
+        "median_ms": 45.999999999999986,
+        "max_ms": 47.66439909297052
+      },
+      "snare": {
+        "cases": 48,
+        "median_ms": 23.999999999999993,
+        "max_ms": 24.71655328798185
+      },
+      "hat": {
+        "cases": 48,
+        "median_ms": 23.999999999999993,
+        "max_ms": 24.71655328798185
+      }
+    }
+  },
+  "checks": {
+    "library_tests_passed": 436,
+    "binary_tests_passed": 26,
+    "library_tests_ignored": 26,
+    "binary_tests_ignored": 1,
+    "separate_fft_frontend_tests_passed": 17,
+    "stereo_production_tests_passed": 6,
+    "ui_analysis_tests_passed": 12,
+    "native_stereo_preview": "/tmp/benga-stereo-ui/stereo.png",
+    "release_build": "passed",
+    "format_and_diff": "passed"
+  },
+  "implementation": {
+    "fft_transforms_per_percussion_hop": 4,
+    "fft_plans_and_scratch_reused": true,
+    "per_hop_allocation": false,
+    "pending_feature_storage": "bounded preallocated heap storage; avoids large stereo traces overflowing small thread stacks"
+  },
+  "limitations": [
+    "Rapid panning can resemble a spatial attack.",
+    "Same-side overlapping sounds remain mixed; no instrument identity or stereo-source separation is inferred.",
+    "Unannotated library event counts measure changed activity, not precision or recall."
+  ],
+  "full_reports": [
+    "/tmp/benga-stereo-before/replay.json",
+    "/tmp/benga-stereo-final/replay.json",
+    "/tmp/benga-stereo-final/fixtures.json",
+    "/tmp/benga-stereo-noise-bursts.json"
+  ]
+}

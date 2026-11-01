@@ -1,6 +1,7 @@
 //! Presentation mode: viewport-relative typography and infographics drawn over
 //! the wireframe while the debug HUD and its hotkeys are suppressed.
 
+mod analysis;
 mod color;
 mod decorations;
 mod normal;
@@ -9,6 +10,7 @@ mod selector;
 mod stage;
 mod text;
 
+pub(super) use analysis::AnalysisInteraction;
 pub use color::ScenePalette;
 pub use normal::NormalScene;
 pub use poi::PoiScene;
@@ -21,13 +23,10 @@ use vello::{
 };
 
 use crate::{
-    render::{PlateMaskImage, RasterAsset},
-    text::Fonts,
-    theme::ThemeColors,
-    visualizer::Palette,
+    render::{PlateMaskImage, RasterAsset}, text::Fonts, theme::{Theme, ThemeColors}, visualizer::Palette,
 };
 
-use super::{showcase::ShowcaseMode, Rng, TriggerCounts, Visualizer};
+use super::{showcase::ShowcaseMode, Parameter, Rng, TriggerCounts, Visualizer};
 
 pub struct Presentation {
     active: bool,
@@ -45,6 +44,8 @@ pub struct Presentation {
     poi_mode: bool,
     focus_blend: f32,
     micro: Vec<MicroFx>,
+    analysis: analysis::AnalysisOverlay,
+    exclusion: Option<Rect>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,6 +83,8 @@ impl Presentation {
             poi_mode: false,
             focus_blend: 0.0,
             micro: Vec::new(),
+            analysis: analysis::AnalysisOverlay::default(),
+            exclusion: None,
         }
     }
 
@@ -94,6 +97,7 @@ impl Presentation {
         if active {
             self.last_triggers = None;
         } else {
+            self.analysis.cancel_interaction();
             self.colors_ready = false;
             self.model_id = None;
             self.poi_key = None;
@@ -108,8 +112,36 @@ impl Presentation {
         self.stage
     }
 
+    pub(super) fn analysis_pointer_down(&mut self, point: Point) -> Option<AnalysisInteraction> {
+        self.active
+            .then(|| self.analysis.pointer_down(point))
+            .flatten()
+    }
+
+    pub(super) fn analysis_pointer_move(
+        &mut self,
+        point: Option<Point>,
+    ) -> Option<(Parameter, f32)> {
+        self.active
+            .then(|| self.analysis.pointer_move(point))
+            .flatten()
+    }
+
+    pub(super) fn analysis_pointer_up(&mut self) {
+        self.analysis.pointer_up();
+    }
+
+    pub(super) fn analysis_contains(&self, point: Point) -> bool {
+        self.active && self.analysis.contains(point)
+    }
+
+    pub(super) fn analysis_dragging(&self) -> bool {
+        self.active && self.analysis.dragging()
+    }
+
     /// Reserves screen space for an interactive overlay above the presentation.
     pub fn set_exclusion_bounds(&mut self, bounds: Option<Rect>) {
+        self.exclusion = bounds;
         self.selector.set_exclusion_bounds(bounds);
     }
 
@@ -202,6 +234,9 @@ impl Presentation {
         );
         let mut occluders = self.selector.occluders(&stage);
         occluders.extend(self.poi.occluders(&stage));
+        occluders.extend(self.exclusion);
+        self.analysis
+            .update(dt, visualizer.debug_history(), fonts, &stage, visualizer);
         self.normal
             .set_fact_hidden(self.poi.shows_fact(), &mut self.rng);
         self.normal
@@ -254,7 +289,8 @@ impl Presentation {
         if !self.active {
             return;
         }
-        let normal_alpha = if self.poi_mode { 0.55 } else { 1.0 };
+        self.analysis.draw(scene, stage, palette);
+        let normal_alpha = if self.poi_mode { 0.25 } else { 1.0 };
         self.normal.draw(
             scene,
             raster_assets,
@@ -271,6 +307,19 @@ impl Presentation {
         }
     }
 
+    /// Interactive banks are composited through the normal-alpha top overlay.
+    pub(super) fn draw_analysis_controls(
+        &self,
+        scene: &mut Scene,
+        stage: &Stage,
+        palette: ScenePalette,
+        theme: &Theme
+    ) {
+        if self.active {
+            self.analysis.draw_controls(scene, stage, palette, theme);
+        }
+    }
+
     pub fn colors(&self) -> ScenePalette {
         self.colors
     }
@@ -282,6 +331,51 @@ impl Presentation {
     #[cfg(test)]
     pub fn debug_hit_marker(&mut self) {
         self.poi.debug_spawn_hit_marker(&mut self.rng);
+    }
+
+    #[cfg(test)]
+    pub fn debug_analysis_count(&self) -> usize {
+        self.analysis.panel_count()
+    }
+
+    #[cfg(test)]
+    pub fn analysis_slider_center(&self, parameter: Parameter) -> Option<Point> {
+        self.analysis.slider_center(parameter)
+    }
+
+    #[cfg(test)]
+    pub fn analysis_graph_bounds(&self) -> Option<Rect> {
+        self.analysis.onset_graph_bounds()
+    }
+
+    #[cfg(test)]
+    pub fn analysis_selected_detector(&self) -> super::Detector {
+        self.analysis.selected_detector()
+    }
+
+    #[cfg(test)]
+    pub fn analysis_bin_reset_center(&self) -> Option<Point> {
+        self.analysis.bin_reset_center()
+    }
+
+    #[cfg(test)]
+    pub fn analysis_bin_next_center(&self) -> Option<Point> {
+        self.analysis.bin_next_center()
+    }
+
+    #[cfg(test)]
+    pub fn analysis_first_bin_parameter(&self) -> Option<Parameter> {
+        self.analysis.first_bin_parameter()
+    }
+
+    #[cfg(test)]
+    pub fn analysis_marker_count_center(&self, more: bool) -> Option<Point> {
+        self.analysis.marker_count_center(more)
+    }
+
+    #[cfg(test)]
+    pub fn analysis_previous_event_center(&self) -> Option<Point> {
+        self.analysis.previous_event_center()
     }
 }
 

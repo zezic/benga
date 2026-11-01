@@ -1,0 +1,2384 @@
+{
+  "schema_version": 1,
+  "measured_date": "2026-10-31",
+  "revision": "adaptive percussion histograms / onset settings revision 3",
+  "probe_sha256": "78c725ccc706b0ddf5a5278d96c4527090372ef40c5ec6d8f6ff166a28bce83d",
+  "baseline_probe_sha256": "d793b00b01cb705a1e8b091ea763590a8d22f788ad7ce520906f01c71dacecfd",
+  "sources": {
+    "replay": "/tmp/benga-histogram-final/replay.json",
+    "playlist": "/tmp/benga-histogram-final/playlist.json",
+    "resolution": "/tmp/benga-histogram-final/resolution.json",
+    "callbacks": "/tmp/benga-histogram-final/callbacks.json",
+    "fixtures": "/tmp/benga-histogram-final/fixtures.json"
+  },
+  "baseline_source": "/tmp/benga-histogram-baseline/replay.json",
+  "delivery_equivalence": {
+    "evaluated_sha256": "78c725ccc706b0ddf5a5278d96c4527090372ef40c5ec6d8f6ff166a28bce83d",
+    "delivery_sha256": "01c040d5103e97fb18b047c47c7cd169ba47d6463a8f3e4add345d7300b5dece",
+    "difference_scope": "UI readout/precision, test cleanup, capacity-truncation diagnostic after reference lifetime edits; admission/features/ranks/triggers unchanged",
+    "same_production_settings_and_event_telemetry_on_20s_heldout_excerpt": true,
+    "excerpt": "James Shinra - Gritti.ogg"
+  },
+  "scope": {
+    "library": "Spotify Dump",
+    "selection_seed": 20261031,
+    "selected_tracks": 12,
+    "valid_complete_tracks": 11,
+    "unique_audio_seconds": 2408.483125,
+    "calibration_valid_tracks": 6,
+    "heldout_valid_tracks": 5,
+    "split_formed_before_tuning": true,
+    "failed_track": "Burial - Etched Headplate.ogg",
+    "failed_decode_runs": 4,
+    "failure_policy": "Excluded invalid/empty decoded files; no annotated instrument ground truth.",
+    "primary_gain_db": -6,
+    "tested_gains_db": [
+      0,
+      -6,
+      -18,
+      -30
+    ]
+  },
+  "partition": {
+    "calibration": [
+      "BACKWHEN - Karma.ogg",
+      "DIRTY GLASSEZ - In My Mind.ogg",
+      "Holy Mob, Inteus, Von Storm - Bucked Up.ogg",
+      "Kercha - Tigers.ogg",
+      "NxxxxxS - 4182347--.ogg",
+      "d0llywood1 - ihonestlymightjustgiveup.ogg"
+    ],
+    "heldout": [
+      "Burial - Etched Headplate.ogg",
+      "Everyst, svmu - Restless.ogg",
+      "James Shinra - Gritti.ogg",
+      "Kraftwerk - It's More Fun to Compute - 2009 Remaster.ogg",
+      "Ruff Kru, Interplanetary Criminal, Main Phase, DJ Cosworth - T.H.C (The Hardest Cru).ogg",
+      "vowl. - creep.ogg"
+    ]
+  },
+  "settings": {
+    "channels": [
+      {
+        "admission_energy": 1.0000000116860974e-07,
+        "admission_growth": 0.0010000000474974513,
+        "admission_prominence": 0.07999999821186066,
+        "background_ms": 80.0,
+        "concentration_ms": 5.0,
+        "energy_percentile": 40.0,
+        "envelope_ms": 1.0,
+        "feature_ms": 44.0,
+        "high_hz": 200.0,
+        "low_hz": 60.0,
+        "memory_seconds": 15.0,
+        "merge_ms": 6.0,
+        "min_attack_db": -38.0,
+        "min_output_prominence": 0.550000011920929,
+        "min_reference": 8,
+        "min_sharpness": 0.22499999403953552,
+        "output_interval_ms": 65.0,
+        "output_rms_db": -27.0,
+        "rearm_ms": 12.0,
+        "sharpness_percentile": 60.0,
+        "taper_hz": 200.0
+      },
+      {
+        "admission_energy": 1.0000000116860974e-07,
+        "admission_growth": 0.0010000000474974513,
+        "admission_prominence": 0.07999999821186066,
+        "background_ms": 80.0,
+        "concentration_ms": 5.0,
+        "energy_percentile": 40.0,
+        "envelope_ms": 1.0,
+        "feature_ms": 24.0,
+        "high_hz": 5000.0,
+        "low_hz": 2000.0,
+        "memory_seconds": 15.0,
+        "merge_ms": 6.0,
+        "min_attack_db": -38.0,
+        "min_output_prominence": 0.1599999964237213,
+        "min_reference": 8,
+        "min_sharpness": 0.46000000834465027,
+        "output_interval_ms": 65.0,
+        "output_rms_db": -27.0,
+        "rearm_ms": 12.0,
+        "sharpness_percentile": 60.0,
+        "taper_hz": 10000.0
+      },
+      {
+        "admission_energy": 1.0000000116860974e-07,
+        "admission_growth": 0.0010000000474974513,
+        "admission_prominence": 0.07999999821186066,
+        "background_ms": 80.0,
+        "concentration_ms": 5.0,
+        "energy_percentile": 40.0,
+        "envelope_ms": 1.0,
+        "feature_ms": 24.0,
+        "high_hz": 16000.0,
+        "low_hz": 5000.0,
+        "memory_seconds": 15.0,
+        "merge_ms": 6.0,
+        "min_attack_db": -38.0,
+        "min_output_prominence": 0.1599999964237213,
+        "min_reference": 8,
+        "min_sharpness": 0.46000000834465027,
+        "output_interval_ms": 25.0,
+        "output_rms_db": -27.0,
+        "rearm_ms": 12.0,
+        "sharpness_percentile": 60.0,
+        "taper_hz": 16000.0
+      }
+    ],
+    "fft_size": 512,
+    "hop_ms": 1.0
+  },
+  "individual_complete_tracks": {
+    "aggregate": {
+      "runs": 44,
+      "audio_seconds": 9633.9325,
+      "cpu_seconds": 162.833156,
+      "cpu_ms_per_audio_second": 16.902045,
+      "kick": {
+        "candidates": 69451,
+        "admitted": 23895,
+        "eligible": 1980,
+        "provisional_triggers": 99,
+        "zero_output_runs": 11,
+        "maximum_track_events_per_second": 1.080805,
+        "decisions_by_reason": {
+          "below absolute attack level": 2330,
+          "below admission energy": 244,
+          "below energy cutoff": 421,
+          "below output mix RMS": 1123,
+          "below output prominence": 12078,
+          "below physical sharpness": 2450,
+          "below sharpness cutoff": 3512,
+          "eligible": 1881,
+          "insufficient new prominence": 1572,
+          "negligible new growth": 12713,
+          "output interval": 1,
+          "overlapping feature windows": 31027,
+          "provisional warmup": 99
+        }
+      },
+      "snare": {
+        "candidates": 59274,
+        "admitted": 25839,
+        "eligible": 4687,
+        "provisional_triggers": 86,
+        "zero_output_runs": 12,
+        "maximum_track_events_per_second": 1.850123,
+        "decisions_by_reason": {
+          "below absolute attack level": 8697,
+          "below admission energy": 3215,
+          "below energy cutoff": 1491,
+          "below output mix RMS": 1167,
+          "below output prominence": 1362,
+          "below physical sharpness": 2404,
+          "below sharpness cutoff": 5968,
+          "eligible": 4601,
+          "insufficient new prominence": 698,
+          "negligible new growth": 19377,
+          "output interval": 63,
+          "overlapping feature windows": 10145,
+          "provisional warmup": 86
+        }
+      },
+      "hat": {
+        "candidates": 60430,
+        "admitted": 27642,
+        "eligible": 4381,
+        "provisional_triggers": 138,
+        "zero_output_runs": 15,
+        "maximum_track_events_per_second": 1.68193,
+        "decisions_by_reason": {
+          "below absolute attack level": 10658,
+          "below admission energy": 3139,
+          "below energy cutoff": 1716,
+          "below output mix RMS": 1004,
+          "below output prominence": 1297,
+          "below physical sharpness": 1335,
+          "below sharpness cutoff": 7251,
+          "eligible": 4243,
+          "insufficient new prominence": 490,
+          "negligible new growth": 17450,
+          "overlapping feature windows": 11709,
+          "provisional warmup": 138
+        }
+      },
+      "drop": 85
+    },
+    "by_gain_and_split": [
+      {
+        "gain_db": 0.0,
+        "split": "all",
+        "runs": 11,
+        "audio_seconds": 2408.483125,
+        "cpu_seconds": 41.143549,
+        "cpu_ms_per_audio_second": 17.082764,
+        "kick": {
+          "candidates": 17533,
+          "admitted": 6802,
+          "eligible": 735,
+          "provisional_triggers": 34,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.080805,
+          "decisions_by_reason": {
+            "below absolute attack level": 93,
+            "below admission energy": 11,
+            "below energy cutoff": 189,
+            "below output mix RMS": 1,
+            "below output prominence": 3714,
+            "below physical sharpness": 672,
+            "below sharpness cutoff": 1398,
+            "eligible": 701,
+            "insufficient new prominence": 719,
+            "negligible new growth": 2180,
+            "overlapping feature windows": 7821,
+            "provisional warmup": 34
+          }
+        },
+        "snare": {
+          "candidates": 14742,
+          "admitted": 8310,
+          "eligible": 2233,
+          "provisional_triggers": 41,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.850123,
+          "decisions_by_reason": {
+            "below absolute attack level": 560,
+            "below admission energy": 42,
+            "below energy cutoff": 869,
+            "below output mix RMS": 28,
+            "below output prominence": 641,
+            "below physical sharpness": 877,
+            "below sharpness cutoff": 3064,
+            "eligible": 2192,
+            "insufficient new prominence": 436,
+            "negligible new growth": 3462,
+            "output interval": 38,
+            "overlapping feature windows": 2492,
+            "provisional warmup": 41
+          }
+        },
+        "hat": {
+          "candidates": 15058,
+          "admitted": 8735,
+          "eligible": 2153,
+          "provisional_triggers": 58,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.68193,
+          "decisions_by_reason": {
+            "below absolute attack level": 644,
+            "below admission energy": 68,
+            "below energy cutoff": 1050,
+            "below output mix RMS": 50,
+            "below output prominence": 594,
+            "below physical sharpness": 478,
+            "below sharpness cutoff": 3766,
+            "eligible": 2095,
+            "insufficient new prominence": 305,
+            "negligible new growth": 3063,
+            "overlapping feature windows": 2887,
+            "provisional warmup": 58
+          }
+        },
+        "drop": 29,
+        "baseline_eligible": {
+          "kick": 6743,
+          "snare": 3195,
+          "hat": 7842,
+          "drop": 29
+        }
+      },
+      {
+        "gain_db": 0.0,
+        "split": "calibration",
+        "runs": 6,
+        "audio_seconds": 1215.470958,
+        "cpu_seconds": 20.748187,
+        "cpu_ms_per_audio_second": 17.07008,
+        "kick": {
+          "candidates": 9191,
+          "admitted": 3373,
+          "eligible": 167,
+          "provisional_triggers": 11,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 0.254314
+        },
+        "snare": {
+          "candidates": 7204,
+          "admitted": 4057,
+          "eligible": 1160,
+          "provisional_triggers": 16,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.850123
+        },
+        "hat": {
+          "candidates": 7419,
+          "admitted": 4078,
+          "eligible": 1071,
+          "provisional_triggers": 25,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.68193
+        },
+        "drop": 12,
+        "baseline_eligible": {
+          "kick": 3675,
+          "snare": 1244,
+          "hat": 4021,
+          "drop": 12
+        }
+      },
+      {
+        "gain_db": 0.0,
+        "split": "heldout",
+        "runs": 5,
+        "audio_seconds": 1193.012167,
+        "cpu_seconds": 20.395362,
+        "cpu_ms_per_audio_second": 17.095687,
+        "kick": {
+          "candidates": 8342,
+          "admitted": 3429,
+          "eligible": 568,
+          "provisional_triggers": 23,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.080805
+        },
+        "snare": {
+          "candidates": 7538,
+          "admitted": 4253,
+          "eligible": 1073,
+          "provisional_triggers": 25,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.376467
+        },
+        "hat": {
+          "candidates": 7639,
+          "admitted": 4657,
+          "eligible": 1082,
+          "provisional_triggers": 33,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.225351
+        },
+        "drop": 17,
+        "baseline_eligible": {
+          "kick": 3068,
+          "snare": 1951,
+          "hat": 3821,
+          "drop": 17
+        }
+      },
+      {
+        "gain_db": -6.0,
+        "split": "all",
+        "runs": 11,
+        "audio_seconds": 2408.483125,
+        "cpu_seconds": 40.90011,
+        "cpu_ms_per_audio_second": 16.981688,
+        "kick": {
+          "candidates": 17501,
+          "admitted": 6651,
+          "eligible": 724,
+          "provisional_triggers": 35,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.080805,
+          "decisions_by_reason": {
+            "below absolute attack level": 116,
+            "below admission energy": 26,
+            "below energy cutoff": 181,
+            "below output mix RMS": 12,
+            "below output prominence": 3575,
+            "below physical sharpness": 670,
+            "below sharpness cutoff": 1372,
+            "eligible": 689,
+            "insufficient new prominence": 588,
+            "negligible new growth": 2417,
+            "output interval": 1,
+            "overlapping feature windows": 7819,
+            "provisional warmup": 35
+          }
+        },
+        "snare": {
+          "candidates": 14724,
+          "admitted": 8162,
+          "eligible": 2050,
+          "provisional_triggers": 36,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.540495,
+          "decisions_by_reason": {
+            "below absolute attack level": 1310,
+            "below admission energy": 80,
+            "below energy cutoff": 613,
+            "below output mix RMS": 258,
+            "below output prominence": 563,
+            "below physical sharpness": 846,
+            "below sharpness cutoff": 2497,
+            "eligible": 2014,
+            "insufficient new prominence": 243,
+            "negligible new growth": 3747,
+            "output interval": 25,
+            "overlapping feature windows": 2492,
+            "provisional warmup": 36
+          }
+        },
+        "hat": {
+          "candidates": 15003,
+          "admitted": 8574,
+          "eligible": 1912,
+          "provisional_triggers": 62,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.207932,
+          "decisions_by_reason": {
+            "below absolute attack level": 1652,
+            "below admission energy": 101,
+            "below energy cutoff": 627,
+            "below output mix RMS": 312,
+            "below output prominence": 530,
+            "below physical sharpness": 444,
+            "below sharpness cutoff": 3097,
+            "eligible": 1850,
+            "insufficient new prominence": 181,
+            "negligible new growth": 3276,
+            "overlapping feature windows": 2871,
+            "provisional warmup": 62
+          }
+        },
+        "drop": 29,
+        "baseline_eligible": {
+          "kick": 6467,
+          "snare": 2520,
+          "hat": 7128,
+          "drop": 29
+        }
+      },
+      {
+        "gain_db": -6.0,
+        "split": "calibration",
+        "runs": 6,
+        "audio_seconds": 1215.470958,
+        "cpu_seconds": 20.433586,
+        "cpu_ms_per_audio_second": 16.81125,
+        "kick": {
+          "candidates": 9193,
+          "admitted": 3304,
+          "eligible": 168,
+          "provisional_triggers": 11,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 0.259843
+        },
+        "snare": {
+          "candidates": 7211,
+          "admitted": 3987,
+          "eligible": 1038,
+          "provisional_triggers": 14,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.540495
+        },
+        "hat": {
+          "candidates": 7412,
+          "admitted": 4000,
+          "eligible": 907,
+          "provisional_triggers": 28,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.207932
+        },
+        "drop": 12,
+        "baseline_eligible": {
+          "kick": 3554,
+          "snare": 1055,
+          "hat": 3638,
+          "drop": 12
+        }
+      },
+      {
+        "gain_db": -6.0,
+        "split": "heldout",
+        "runs": 5,
+        "audio_seconds": 1193.012167,
+        "cpu_seconds": 20.466524,
+        "cpu_ms_per_audio_second": 17.155336,
+        "kick": {
+          "candidates": 8308,
+          "admitted": 3347,
+          "eligible": 556,
+          "provisional_triggers": 24,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.080805
+        },
+        "snare": {
+          "candidates": 7513,
+          "admitted": 4175,
+          "eligible": 1012,
+          "provisional_triggers": 22,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.33376
+        },
+        "hat": {
+          "candidates": 7591,
+          "admitted": 4574,
+          "eligible": 1005,
+          "provisional_triggers": 34,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.087376
+        },
+        "drop": 17,
+        "baseline_eligible": {
+          "kick": 2913,
+          "snare": 1465,
+          "hat": 3490,
+          "drop": 17
+        }
+      },
+      {
+        "gain_db": -18.0,
+        "split": "all",
+        "runs": 11,
+        "audio_seconds": 2408.483125,
+        "cpu_seconds": 40.586807,
+        "cpu_ms_per_audio_second": 16.851605,
+        "kick": {
+          "candidates": 17316,
+          "admitted": 5842,
+          "eligible": 521,
+          "provisional_triggers": 30,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 0.893553,
+          "decisions_by_reason": {
+            "below absolute attack level": 397,
+            "below admission energy": 85,
+            "below energy cutoff": 51,
+            "below output mix RMS": 616,
+            "below output prominence": 2902,
+            "below physical sharpness": 613,
+            "below sharpness cutoff": 742,
+            "eligible": 491,
+            "insufficient new prominence": 263,
+            "negligible new growth": 3393,
+            "overlapping feature windows": 7733,
+            "provisional warmup": 30
+          }
+        },
+        "snare": {
+          "candidates": 14772,
+          "admitted": 6744,
+          "eligible": 404,
+          "provisional_triggers": 9,
+          "zero_output_runs": 1,
+          "maximum_track_events_per_second": 0.721204,
+          "decisions_by_reason": {
+            "below absolute attack level": 4330,
+            "below admission energy": 523,
+            "below energy cutoff": 9,
+            "below output mix RMS": 881,
+            "below output prominence": 158,
+            "below physical sharpness": 555,
+            "below sharpness cutoff": 407,
+            "eligible": 395,
+            "insufficient new prominence": 19,
+            "negligible new growth": 4964,
+            "overlapping feature windows": 2522,
+            "provisional warmup": 9
+          }
+        },
+        "hat": {
+          "candidates": 15084,
+          "admitted": 7316,
+          "eligible": 316,
+          "provisional_triggers": 18,
+          "zero_output_runs": 4,
+          "maximum_track_events_per_second": 0.792532,
+          "decisions_by_reason": {
+            "below absolute attack level": 5447,
+            "below admission energy": 536,
+            "below energy cutoff": 39,
+            "below output mix RMS": 621,
+            "below output prominence": 172,
+            "below physical sharpness": 333,
+            "below sharpness cutoff": 388,
+            "eligible": 298,
+            "insufficient new prominence": 4,
+            "negligible new growth": 4292,
+            "overlapping feature windows": 2936,
+            "provisional warmup": 18
+          }
+        },
+        "drop": 27,
+        "baseline_eligible": {
+          "kick": 2587,
+          "snare": 55,
+          "hat": 1466,
+          "drop": 27
+        }
+      },
+      {
+        "gain_db": -18.0,
+        "split": "calibration",
+        "runs": 6,
+        "audio_seconds": 1215.470958,
+        "cpu_seconds": 20.199104,
+        "cpu_ms_per_audio_second": 16.618335,
+        "kick": {
+          "candidates": 9177,
+          "admitted": 2680,
+          "eligible": 154,
+          "provisional_triggers": 11,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 0.231345
+        },
+        "snare": {
+          "candidates": 7224,
+          "admitted": 3194,
+          "eligible": 278,
+          "provisional_triggers": 6,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 0.721204
+        },
+        "hat": {
+          "candidates": 7494,
+          "admitted": 3376,
+          "eligible": 265,
+          "provisional_triggers": 10,
+          "zero_output_runs": 1,
+          "maximum_track_events_per_second": 0.792532
+        },
+        "drop": 11,
+        "baseline_eligible": {
+          "kick": 1432,
+          "snare": 36,
+          "hat": 1217,
+          "drop": 11
+        }
+      },
+      {
+        "gain_db": -18.0,
+        "split": "heldout",
+        "runs": 5,
+        "audio_seconds": 1193.012167,
+        "cpu_seconds": 20.387703,
+        "cpu_ms_per_audio_second": 17.089267,
+        "kick": {
+          "candidates": 8139,
+          "admitted": 3162,
+          "eligible": 367,
+          "provisional_triggers": 19,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 0.893553
+        },
+        "snare": {
+          "candidates": 7548,
+          "admitted": 3550,
+          "eligible": 126,
+          "provisional_triggers": 3,
+          "zero_output_runs": 1,
+          "maximum_track_events_per_second": 0.327183
+        },
+        "hat": {
+          "candidates": 7590,
+          "admitted": 3940,
+          "eligible": 51,
+          "provisional_triggers": 8,
+          "zero_output_runs": 3,
+          "maximum_track_events_per_second": 0.413284
+        },
+        "drop": 16,
+        "baseline_eligible": {
+          "kick": 1155,
+          "snare": 19,
+          "hat": 249,
+          "drop": 16
+        }
+      },
+      {
+        "gain_db": -30.0,
+        "split": "all",
+        "runs": 11,
+        "audio_seconds": 2408.483125,
+        "cpu_seconds": 40.20269,
+        "cpu_ms_per_audio_second": 16.69212,
+        "kick": {
+          "candidates": 17101,
+          "admitted": 4600,
+          "eligible": 0,
+          "provisional_triggers": 0,
+          "zero_output_runs": 11,
+          "maximum_track_events_per_second": 0.0,
+          "decisions_by_reason": {
+            "below absolute attack level": 1724,
+            "below admission energy": 122,
+            "below output mix RMS": 494,
+            "below output prominence": 1887,
+            "below physical sharpness": 495,
+            "insufficient new prominence": 2,
+            "negligible new growth": 4723,
+            "overlapping feature windows": 7654
+          }
+        },
+        "snare": {
+          "candidates": 15036,
+          "admitted": 2623,
+          "eligible": 0,
+          "provisional_triggers": 0,
+          "zero_output_runs": 11,
+          "maximum_track_events_per_second": 0.0,
+          "decisions_by_reason": {
+            "below absolute attack level": 2497,
+            "below admission energy": 2570,
+            "below physical sharpness": 126,
+            "negligible new growth": 7204,
+            "overlapping feature windows": 2639
+          }
+        },
+        "hat": {
+          "candidates": 15285,
+          "admitted": 3017,
+          "eligible": 0,
+          "provisional_triggers": 0,
+          "zero_output_runs": 11,
+          "maximum_track_events_per_second": 0.0,
+          "decisions_by_reason": {
+            "below absolute attack level": 2915,
+            "below admission energy": 2434,
+            "below output mix RMS": 21,
+            "below output prominence": 1,
+            "below physical sharpness": 80,
+            "negligible new growth": 6819,
+            "overlapping feature windows": 3015
+          }
+        },
+        "drop": 0,
+        "baseline_eligible": {
+          "kick": 0,
+          "snare": 0,
+          "hat": 0,
+          "drop": 0
+        }
+      },
+      {
+        "gain_db": -30.0,
+        "split": "calibration",
+        "runs": 6,
+        "audio_seconds": 1215.470958,
+        "cpu_seconds": 19.75261,
+        "cpu_ms_per_audio_second": 16.250993,
+        "kick": {
+          "candidates": 9100,
+          "admitted": 1908,
+          "eligible": 0,
+          "provisional_triggers": 0,
+          "zero_output_runs": 6,
+          "maximum_track_events_per_second": 0.0
+        },
+        "snare": {
+          "candidates": 7367,
+          "admitted": 1421,
+          "eligible": 0,
+          "provisional_triggers": 0,
+          "zero_output_runs": 6,
+          "maximum_track_events_per_second": 0.0
+        },
+        "hat": {
+          "candidates": 7699,
+          "admitted": 1537,
+          "eligible": 0,
+          "provisional_triggers": 0,
+          "zero_output_runs": 6,
+          "maximum_track_events_per_second": 0.0
+        },
+        "drop": 0,
+        "baseline_eligible": {
+          "kick": 0,
+          "snare": 0,
+          "hat": 0,
+          "drop": 0
+        }
+      },
+      {
+        "gain_db": -30.0,
+        "split": "heldout",
+        "runs": 5,
+        "audio_seconds": 1193.012167,
+        "cpu_seconds": 20.45008,
+        "cpu_ms_per_audio_second": 17.141552,
+        "kick": {
+          "candidates": 8001,
+          "admitted": 2692,
+          "eligible": 0,
+          "provisional_triggers": 0,
+          "zero_output_runs": 5,
+          "maximum_track_events_per_second": 0.0
+        },
+        "snare": {
+          "candidates": 7669,
+          "admitted": 1202,
+          "eligible": 0,
+          "provisional_triggers": 0,
+          "zero_output_runs": 5,
+          "maximum_track_events_per_second": 0.0
+        },
+        "hat": {
+          "candidates": 7586,
+          "admitted": 1480,
+          "eligible": 0,
+          "provisional_triggers": 0,
+          "zero_output_runs": 5,
+          "maximum_track_events_per_second": 0.0
+        },
+        "drop": 0,
+        "baseline_eligible": {
+          "kick": 0,
+          "snare": 0,
+          "hat": 0,
+          "drop": 0
+        }
+      }
+    ],
+    "primary_gain_per_track": [
+      {
+        "track": "BACKWHEN - Karma.ogg",
+        "split": "calibration",
+        "audio_seconds": 163.2,
+        "kick": {
+          "candidates": 1460,
+          "admitted": 435,
+          "count": 10
+        },
+        "snare": {
+          "candidates": 788,
+          "admitted": 264,
+          "count": 57
+        },
+        "hat": {
+          "candidates": 995,
+          "admitted": 401,
+          "count": 91
+        },
+        "drop": 0
+      },
+      {
+        "track": "DIRTY GLASSEZ - In My Mind.ogg",
+        "split": "calibration",
+        "audio_seconds": 289.61025,
+        "kick": {
+          "candidates": 2328,
+          "admitted": 834,
+          "count": 62
+        },
+        "snare": {
+          "candidates": 1648,
+          "admitted": 921,
+          "count": 240
+        },
+        "hat": {
+          "candidates": 1807,
+          "admitted": 522,
+          "count": 149
+        },
+        "drop": 1
+      },
+      {
+        "track": "Everyst, svmu - Restless.ogg",
+        "split": "heldout",
+        "audio_seconds": 219.428583,
+        "kick": {
+          "candidates": 2224,
+          "admitted": 184,
+          "count": 31
+        },
+        "snare": {
+          "candidates": 995,
+          "admitted": 316,
+          "count": 23
+        },
+        "hat": {
+          "candidates": 949,
+          "admitted": 516,
+          "count": 153
+        },
+        "drop": 4
+      },
+      {
+        "track": "Holy Mob, Inteus, Von Storm - Bucked Up.ogg",
+        "split": "calibration",
+        "audio_seconds": 180.878625,
+        "kick": {
+          "candidates": 1240,
+          "admitted": 256,
+          "count": 47
+        },
+        "snare": {
+          "candidates": 1176,
+          "admitted": 606,
+          "count": 144
+        },
+        "hat": {
+          "candidates": 873,
+          "admitted": 524,
+          "count": 136
+        },
+        "drop": 3
+      },
+      {
+        "track": "James Shinra - Gritti.ogg",
+        "split": "heldout",
+        "audio_seconds": 304.402604,
+        "kick": {
+          "candidates": 2070,
+          "admitted": 1073,
+          "count": 329
+        },
+        "snare": {
+          "candidates": 2166,
+          "admitted": 1601,
+          "count": 406
+        },
+        "hat": {
+          "candidates": 2338,
+          "admitted": 1806,
+          "count": 331
+        },
+        "drop": 5
+      },
+      {
+        "track": "Kercha - Tigers.ogg",
+        "split": "calibration",
+        "audio_seconds": 261.604188,
+        "kick": {
+          "candidates": 1856,
+          "admitted": 1063,
+          "count": 3
+        },
+        "snare": {
+          "candidates": 2086,
+          "admitted": 1553,
+          "count": 403
+        },
+        "hat": {
+          "candidates": 2322,
+          "admitted": 1822,
+          "count": 316
+        },
+        "drop": 2
+      },
+      {
+        "track": "Kraftwerk - It's More Fun to Compute - 2009 Remaster.ogg",
+        "split": "heldout",
+        "audio_seconds": 256.466667,
+        "kick": {
+          "candidates": 1543,
+          "admitted": 1150,
+          "count": 142
+        },
+        "snare": {
+          "candidates": 1779,
+          "admitted": 866,
+          "count": 272
+        },
+        "hat": {
+          "candidates": 1437,
+          "admitted": 590,
+          "count": 137
+        },
+        "drop": 3
+      },
+      {
+        "track": "NxxxxxS - 4182347--.ogg",
+        "split": "calibration",
+        "audio_seconds": 194.0,
+        "kick": {
+          "candidates": 1555,
+          "admitted": 472,
+          "count": 26
+        },
+        "snare": {
+          "candidates": 878,
+          "admitted": 328,
+          "count": 82
+        },
+        "hat": {
+          "candidates": 759,
+          "admitted": 364,
+          "count": 105
+        },
+        "drop": 2
+      },
+      {
+        "track": "Ruff Kru, Interplanetary Criminal, Main Phase, DJ Cosworth - T.H.C (The Hardest Cru).ogg",
+        "split": "heldout",
+        "audio_seconds": 296.571438,
+        "kick": {
+          "candidates": 1406,
+          "admitted": 730,
+          "count": 50
+        },
+        "snare": {
+          "candidates": 2009,
+          "admitted": 1127,
+          "count": 225
+        },
+        "hat": {
+          "candidates": 2256,
+          "admitted": 1382,
+          "count": 292
+        },
+        "drop": 4
+      },
+      {
+        "track": "d0llywood1 - ihonestlymightjustgiveup.ogg",
+        "split": "calibration",
+        "audio_seconds": 126.177896,
+        "kick": {
+          "candidates": 754,
+          "admitted": 244,
+          "count": 20
+        },
+        "snare": {
+          "candidates": 635,
+          "admitted": 315,
+          "count": 112
+        },
+        "hat": {
+          "candidates": 656,
+          "admitted": 367,
+          "count": 110
+        },
+        "drop": 4
+      },
+      {
+        "track": "vowl. - creep.ogg",
+        "split": "heldout",
+        "audio_seconds": 116.142875,
+        "kick": {
+          "candidates": 1065,
+          "admitted": 210,
+          "count": 4
+        },
+        "snare": {
+          "candidates": 564,
+          "admitted": 265,
+          "count": 86
+        },
+        "hat": {
+          "candidates": 611,
+          "admitted": 280,
+          "count": 92
+        },
+        "drop": 1
+      }
+    ]
+  },
+  "baseline_agreement": {
+    "matched_runs": 44,
+    "drop_counts_identical_runs": 44,
+    "baseline_drop_events": 85,
+    "current_drop_events": 85,
+    "claim": "Exact matched drop counts; spectrum/cadence equivalence is additionally tested directly."
+  },
+  "continuous_playlists": {
+    "history_retained_across_boundaries": true,
+    "runs": [
+      {
+        "gain_db": -30.0,
+        "runs": 1,
+        "audio_seconds": 2408.483125,
+        "cpu_seconds": 25.586871,
+        "cpu_ms_per_audio_second": 10.623646,
+        "kick": {
+          "candidates": 17119,
+          "admitted": 4616,
+          "eligible": 0,
+          "provisional_triggers": 0,
+          "zero_output_runs": 1,
+          "maximum_track_events_per_second": 0.0
+        },
+        "snare": {
+          "candidates": 15012,
+          "admitted": 2597,
+          "eligible": 0,
+          "provisional_triggers": 0,
+          "zero_output_runs": 1,
+          "maximum_track_events_per_second": 0.0
+        },
+        "hat": {
+          "candidates": 15231,
+          "admitted": 3016,
+          "eligible": 0,
+          "provisional_triggers": 0,
+          "zero_output_runs": 1,
+          "maximum_track_events_per_second": 0.0
+        },
+        "drop": 0,
+        "segments": [
+          {
+            "track": "BACKWHEN - Karma.ogg",
+            "start": 0.0,
+            "end": 163.2,
+            "decode_success": true,
+            "counts": {
+              "kick": 0,
+              "snare": 0,
+              "hat": 0,
+              "drop": 0
+            }
+          },
+          {
+            "track": "DIRTY GLASSEZ - In My Mind.ogg",
+            "start": 163.2,
+            "end": 452.81025,
+            "decode_success": true,
+            "counts": {
+              "kick": 0,
+              "snare": 0,
+              "hat": 0,
+              "drop": 0
+            }
+          },
+          {
+            "track": "Everyst, svmu - Restless.ogg",
+            "start": 452.81025,
+            "end": 672.2388333333333,
+            "decode_success": true,
+            "counts": {
+              "kick": 0,
+              "snare": 0,
+              "hat": 0,
+              "drop": 0
+            }
+          },
+          {
+            "track": "Holy Mob, Inteus, Von Storm - Bucked Up.ogg",
+            "start": 672.2388333333333,
+            "end": 853.1174583333334,
+            "decode_success": true,
+            "counts": {
+              "kick": 0,
+              "snare": 0,
+              "hat": 0,
+              "drop": 0
+            }
+          },
+          {
+            "track": "James Shinra - Gritti.ogg",
+            "start": 853.1174583333334,
+            "end": 1157.5200625,
+            "decode_success": true,
+            "counts": {
+              "kick": 0,
+              "snare": 0,
+              "hat": 0,
+              "drop": 0
+            }
+          },
+          {
+            "track": "Kercha - Tigers.ogg",
+            "start": 1157.5200625,
+            "end": 1419.12425,
+            "decode_success": true,
+            "counts": {
+              "kick": 0,
+              "snare": 0,
+              "hat": 0,
+              "drop": 0
+            }
+          },
+          {
+            "track": "Kraftwerk - It's More Fun to Compute - 2009 Remaster.ogg",
+            "start": 1419.12425,
+            "end": 1675.5909166666668,
+            "decode_success": true,
+            "counts": {
+              "kick": 0,
+              "snare": 0,
+              "hat": 0,
+              "drop": 0
+            }
+          },
+          {
+            "track": "NxxxxxS - 4182347--.ogg",
+            "start": 1675.5909166666668,
+            "end": 1869.5909166666668,
+            "decode_success": true,
+            "counts": {
+              "kick": 0,
+              "snare": 0,
+              "hat": 0,
+              "drop": 0
+            }
+          },
+          {
+            "track": "Ruff Kru, Interplanetary Criminal, Main Phase, DJ Cosworth - T.H.C (The Hardest Cru).ogg",
+            "start": 1869.5909166666668,
+            "end": 2166.162354166667,
+            "decode_success": true,
+            "counts": {
+              "kick": 0,
+              "snare": 0,
+              "hat": 0,
+              "drop": 0
+            }
+          },
+          {
+            "track": "d0llywood1 - ihonestlymightjustgiveup.ogg",
+            "start": 2166.162354166667,
+            "end": 2292.34025,
+            "decode_success": true,
+            "counts": {
+              "kick": 0,
+              "snare": 0,
+              "hat": 0,
+              "drop": 0
+            }
+          },
+          {
+            "track": "vowl. - creep.ogg",
+            "start": 2292.34025,
+            "end": 2408.483125,
+            "decode_success": true,
+            "counts": {
+              "kick": 0,
+              "snare": 0,
+              "hat": 0,
+              "drop": 0
+            }
+          }
+        ],
+        "contains_partial_failed_decode": false,
+        "failed_tracks": [
+          "Burial - Etched Headplate.ogg"
+        ]
+      },
+      {
+        "gain_db": -18.0,
+        "runs": 1,
+        "audio_seconds": 2408.483125,
+        "cpu_seconds": 25.759516,
+        "cpu_ms_per_audio_second": 10.695328,
+        "kick": {
+          "candidates": 17336,
+          "admitted": 5870,
+          "eligible": 524,
+          "provisional_triggers": 18,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 0.217564
+        },
+        "snare": {
+          "candidates": 14765,
+          "admitted": 6728,
+          "eligible": 413,
+          "provisional_triggers": 6,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 0.171477
+        },
+        "hat": {
+          "candidates": 15020,
+          "admitted": 7354,
+          "eligible": 324,
+          "provisional_triggers": 19,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 0.134525
+        },
+        "drop": 35,
+        "segments": [
+          {
+            "track": "BACKWHEN - Karma.ogg",
+            "start": 0.0,
+            "end": 163.2,
+            "decode_success": true,
+            "counts": {
+              "kick": 10,
+              "snare": 8,
+              "hat": 29,
+              "drop": 0
+            }
+          },
+          {
+            "track": "DIRTY GLASSEZ - In My Mind.ogg",
+            "start": 163.2,
+            "end": 452.81025,
+            "decode_success": true,
+            "counts": {
+              "kick": 67,
+              "snare": 123,
+              "hat": 95,
+              "drop": 1
+            }
+          },
+          {
+            "track": "Everyst, svmu - Restless.ogg",
+            "start": 452.81025,
+            "end": 672.2388333333333,
+            "decode_success": true,
+            "counts": {
+              "kick": 29,
+              "snare": 5,
+              "hat": 0,
+              "drop": 4
+            }
+          },
+          {
+            "track": "Holy Mob, Inteus, Von Storm - Bucked Up.ogg",
+            "start": 672.2388333333333,
+            "end": 853.1174583333334,
+            "decode_success": true,
+            "counts": {
+              "kick": 33,
+              "snare": 4,
+              "hat": 7,
+              "drop": 4
+            }
+          },
+          {
+            "track": "James Shinra - Gritti.ogg",
+            "start": 853.1174583333334,
+            "end": 1157.5200625,
+            "decode_success": true,
+            "counts": {
+              "kick": 285,
+              "snare": 0,
+              "hat": 0,
+              "drop": 5
+            }
+          },
+          {
+            "track": "Kercha - Tigers.ogg",
+            "start": 1157.5200625,
+            "end": 1419.12425,
+            "decode_success": true,
+            "counts": {
+              "kick": 1,
+              "snare": 31,
+              "hat": 0,
+              "drop": 4
+            }
+          },
+          {
+            "track": "Kraftwerk - It's More Fun to Compute - 2009 Remaster.ogg",
+            "start": 1419.12425,
+            "end": 1675.5909166666668,
+            "decode_success": true,
+            "counts": {
+              "kick": 10,
+              "snare": 2,
+              "hat": 0,
+              "drop": 3
+            }
+          },
+          {
+            "track": "NxxxxxS - 4182347--.ogg",
+            "start": 1675.5909166666668,
+            "end": 1869.5909166666668,
+            "decode_success": true,
+            "counts": {
+              "kick": 22,
+              "snare": 22,
+              "hat": 38,
+              "drop": 3
+            }
+          },
+          {
+            "track": "Ruff Kru, Interplanetary Criminal, Main Phase, DJ Cosworth - T.H.C (The Hardest Cru).ogg",
+            "start": 1869.5909166666668,
+            "end": 2166.162354166667,
+            "decode_success": true,
+            "counts": {
+              "kick": 51,
+              "snare": 87,
+              "hat": 2,
+              "drop": 4
+            }
+          },
+          {
+            "track": "d0llywood1 - ihonestlymightjustgiveup.ogg",
+            "start": 2166.162354166667,
+            "end": 2292.34025,
+            "decode_success": true,
+            "counts": {
+              "kick": 14,
+              "snare": 93,
+              "hat": 105,
+              "drop": 5
+            }
+          },
+          {
+            "track": "vowl. - creep.ogg",
+            "start": 2292.34025,
+            "end": 2408.483125,
+            "decode_success": true,
+            "counts": {
+              "kick": 2,
+              "snare": 38,
+              "hat": 48,
+              "drop": 2
+            }
+          }
+        ],
+        "contains_partial_failed_decode": false,
+        "failed_tracks": [
+          "Burial - Etched Headplate.ogg"
+        ]
+      },
+      {
+        "gain_db": -6.0,
+        "runs": 1,
+        "audio_seconds": 2408.483125,
+        "cpu_seconds": 25.857919,
+        "cpu_ms_per_audio_second": 10.736184,
+        "kick": {
+          "candidates": 17524,
+          "admitted": 6680,
+          "eligible": 710,
+          "provisional_triggers": 15,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 0.294791
+        },
+        "snare": {
+          "candidates": 14737,
+          "admitted": 8160,
+          "eligible": 2057,
+          "provisional_triggers": 15,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 0.854065
+        },
+        "hat": {
+          "candidates": 14975,
+          "admitted": 8627,
+          "eligible": 1905,
+          "provisional_triggers": 53,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 0.790954
+        },
+        "drop": 39,
+        "segments": [
+          {
+            "track": "BACKWHEN - Karma.ogg",
+            "start": 0.0,
+            "end": 163.2,
+            "decode_success": true,
+            "counts": {
+              "kick": 10,
+              "snare": 57,
+              "hat": 91,
+              "drop": 0
+            }
+          },
+          {
+            "track": "DIRTY GLASSEZ - In My Mind.ogg",
+            "start": 163.2,
+            "end": 452.81025,
+            "decode_success": true,
+            "counts": {
+              "kick": 60,
+              "snare": 239,
+              "hat": 150,
+              "drop": 1
+            }
+          },
+          {
+            "track": "Everyst, svmu - Restless.ogg",
+            "start": 452.81025,
+            "end": 672.2388333333333,
+            "decode_success": true,
+            "counts": {
+              "kick": 27,
+              "snare": 24,
+              "hat": 147,
+              "drop": 5
+            }
+          },
+          {
+            "track": "Holy Mob, Inteus, Von Storm - Bucked Up.ogg",
+            "start": 672.2388333333333,
+            "end": 853.1174583333334,
+            "decode_success": true,
+            "counts": {
+              "kick": 42,
+              "snare": 149,
+              "hat": 128,
+              "drop": 4
+            }
+          },
+          {
+            "track": "James Shinra - Gritti.ogg",
+            "start": 853.1174583333334,
+            "end": 1157.5200625,
+            "decode_success": true,
+            "counts": {
+              "kick": 339,
+              "snare": 423,
+              "hat": 356,
+              "drop": 5
+            }
+          },
+          {
+            "track": "Kercha - Tigers.ogg",
+            "start": 1157.5200625,
+            "end": 1419.12425,
+            "decode_success": true,
+            "counts": {
+              "kick": 2,
+              "snare": 410,
+              "hat": 310,
+              "drop": 5
+            }
+          },
+          {
+            "track": "Kraftwerk - It's More Fun to Compute - 2009 Remaster.ogg",
+            "start": 1419.12425,
+            "end": 1675.5909166666668,
+            "decode_success": true,
+            "counts": {
+              "kick": 135,
+              "snare": 248,
+              "hat": 137,
+              "drop": 4
+            }
+          },
+          {
+            "track": "NxxxxxS - 4182347--.ogg",
+            "start": 1675.5909166666668,
+            "end": 1869.5909166666668,
+            "decode_success": true,
+            "counts": {
+              "kick": 25,
+              "snare": 74,
+              "hat": 104,
+              "drop": 3
+            }
+          },
+          {
+            "track": "Ruff Kru, Interplanetary Criminal, Main Phase, DJ Cosworth - T.H.C (The Hardest Cru).ogg",
+            "start": 1869.5909166666668,
+            "end": 2166.162354166667,
+            "decode_success": true,
+            "counts": {
+              "kick": 51,
+              "snare": 232,
+              "hat": 279,
+              "drop": 5
+            }
+          },
+          {
+            "track": "d0llywood1 - ihonestlymightjustgiveup.ogg",
+            "start": 2166.162354166667,
+            "end": 2292.34025,
+            "decode_success": true,
+            "counts": {
+              "kick": 16,
+              "snare": 111,
+              "hat": 115,
+              "drop": 5
+            }
+          },
+          {
+            "track": "vowl. - creep.ogg",
+            "start": 2292.34025,
+            "end": 2408.483125,
+            "decode_success": true,
+            "counts": {
+              "kick": 3,
+              "snare": 90,
+              "hat": 88,
+              "drop": 2
+            }
+          }
+        ],
+        "contains_partial_failed_decode": false,
+        "failed_tracks": [
+          "Burial - Etched Headplate.ogg"
+        ]
+      },
+      {
+        "gain_db": 0.0,
+        "runs": 1,
+        "audio_seconds": 2408.483125,
+        "cpu_seconds": 40.795782,
+        "cpu_ms_per_audio_second": 16.938372,
+        "kick": {
+          "candidates": 17553,
+          "admitted": 6831,
+          "eligible": 714,
+          "provisional_triggers": 10,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 0.296452
+        },
+        "snare": {
+          "candidates": 14739,
+          "admitted": 8303,
+          "eligible": 2213,
+          "provisional_triggers": 14,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 0.918836
+        },
+        "hat": {
+          "candidates": 15005,
+          "admitted": 8791,
+          "eligible": 2117,
+          "provisional_triggers": 38,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 0.878976
+        },
+        "drop": 38,
+        "segments": [
+          {
+            "track": "BACKWHEN - Karma.ogg",
+            "start": 0.0,
+            "end": 163.2,
+            "decode_success": true,
+            "counts": {
+              "kick": 10,
+              "snare": 59,
+              "hat": 96,
+              "drop": 0
+            }
+          },
+          {
+            "track": "DIRTY GLASSEZ - In My Mind.ogg",
+            "start": 163.2,
+            "end": 452.81025,
+            "decode_success": true,
+            "counts": {
+              "kick": 60,
+              "snare": 257,
+              "hat": 161,
+              "drop": 1
+            }
+          },
+          {
+            "track": "Everyst, svmu - Restless.ogg",
+            "start": 452.81025,
+            "end": 672.2388333333333,
+            "decode_success": true,
+            "counts": {
+              "kick": 26,
+              "snare": 67,
+              "hat": 150,
+              "drop": 5
+            }
+          },
+          {
+            "track": "Holy Mob, Inteus, Von Storm - Bucked Up.ogg",
+            "start": 672.2388333333333,
+            "end": 853.1174583333334,
+            "decode_success": true,
+            "counts": {
+              "kick": 37,
+              "snare": 163,
+              "hat": 137,
+              "drop": 4
+            }
+          },
+          {
+            "track": "James Shinra - Gritti.ogg",
+            "start": 853.1174583333334,
+            "end": 1157.5200625,
+            "decode_success": true,
+            "counts": {
+              "kick": 337,
+              "snare": 428,
+              "hat": 401,
+              "drop": 5
+            }
+          },
+          {
+            "track": "Kercha - Tigers.ogg",
+            "start": 1157.5200625,
+            "end": 1419.12425,
+            "decode_success": true,
+            "counts": {
+              "kick": 3,
+              "snare": 469,
+              "hat": 427,
+              "drop": 4
+            }
+          },
+          {
+            "track": "Kraftwerk - It's More Fun to Compute - 2009 Remaster.ogg",
+            "start": 1419.12425,
+            "end": 1675.5909166666668,
+            "decode_success": true,
+            "counts": {
+              "kick": 133,
+              "snare": 256,
+              "hat": 142,
+              "drop": 4
+            }
+          },
+          {
+            "track": "NxxxxxS - 4182347--.ogg",
+            "start": 1675.5909166666668,
+            "end": 1869.5909166666668,
+            "decode_success": true,
+            "counts": {
+              "kick": 24,
+              "snare": 76,
+              "hat": 105,
+              "drop": 3
+            }
+          },
+          {
+            "track": "Ruff Kru, Interplanetary Criminal, Main Phase, DJ Cosworth - T.H.C (The Hardest Cru).ogg",
+            "start": 1869.5909166666668,
+            "end": 2166.162354166667,
+            "decode_success": true,
+            "counts": {
+              "kick": 64,
+              "snare": 236,
+              "hat": 283,
+              "drop": 5
+            }
+          },
+          {
+            "track": "d0llywood1 - ihonestlymightjustgiveup.ogg",
+            "start": 2166.162354166667,
+            "end": 2292.34025,
+            "decode_success": true,
+            "counts": {
+              "kick": 16,
+              "snare": 109,
+              "hat": 122,
+              "drop": 5
+            }
+          },
+          {
+            "track": "vowl. - creep.ogg",
+            "start": 2292.34025,
+            "end": 2408.483125,
+            "decode_success": true,
+            "counts": {
+              "kick": 4,
+              "snare": 93,
+              "hat": 93,
+              "drop": 2
+            }
+          }
+        ],
+        "contains_partial_failed_decode": false,
+        "failed_tracks": [
+          "Burial - Etched Headplate.ogg"
+        ]
+      }
+    ],
+    "note": "Segment counts retain cross-track references and may differ from fresh-detector per-track runs."
+  },
+  "heldout_fast_resolution_matrix": {
+    "gain_db": -6,
+    "valid_tracks": 5,
+    "corrupt_track_excluded": true,
+    "rows": [
+      {
+        "sample_rate": 44100,
+        "fast_fft_at_48khz": 256,
+        "runs": 5,
+        "audio_seconds": 1193.012109,
+        "cpu_seconds": 18.96947,
+        "cpu_ms_per_audio_second": 15.900484,
+        "kick": {
+          "candidates": 7594,
+          "admitted": 3333,
+          "eligible": 551,
+          "provisional_triggers": 17,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.06438
+        },
+        "snare": {
+          "candidates": 2598,
+          "admitted": 700,
+          "eligible": 254,
+          "provisional_triggers": 123,
+          "zero_output_runs": 1,
+          "maximum_track_events_per_second": 0.40407
+        },
+        "hat": {
+          "candidates": 3564,
+          "admitted": 865,
+          "eligible": 291,
+          "provisional_triggers": 117,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 0.309963
+        },
+        "drop": 15
+      },
+      {
+        "sample_rate": 44100,
+        "fast_fft_at_48khz": 512,
+        "runs": 5,
+        "audio_seconds": 1193.012109,
+        "cpu_seconds": 19.997231,
+        "cpu_ms_per_audio_second": 16.761968,
+        "kick": {
+          "candidates": 7594,
+          "admitted": 3333,
+          "eligible": 551,
+          "provisional_triggers": 17,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.06438
+        },
+        "snare": {
+          "candidates": 7240,
+          "admitted": 4281,
+          "eligible": 973,
+          "provisional_triggers": 22,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.284483
+        },
+        "hat": {
+          "candidates": 7303,
+          "admitted": 4725,
+          "eligible": 1012,
+          "provisional_triggers": 37,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.189215
+        },
+        "drop": 15
+      },
+      {
+        "sample_rate": 48000,
+        "fast_fft_at_48khz": 256,
+        "runs": 5,
+        "audio_seconds": 1193.012167,
+        "cpu_seconds": 18.316685,
+        "cpu_ms_per_audio_second": 15.353309,
+        "kick": {
+          "candidates": 8308,
+          "admitted": 3347,
+          "eligible": 555,
+          "provisional_triggers": 24,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.080805
+        },
+        "snare": {
+          "candidates": 2917,
+          "admitted": 629,
+          "eligible": 235,
+          "provisional_triggers": 126,
+          "zero_output_runs": 1,
+          "maximum_track_events_per_second": 0.344938
+        },
+        "hat": {
+          "candidates": 3780,
+          "admitted": 778,
+          "eligible": 281,
+          "provisional_triggers": 122,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 0.327183
+        },
+        "drop": 17
+      },
+      {
+        "sample_rate": 48000,
+        "fast_fft_at_48khz": 512,
+        "runs": 5,
+        "audio_seconds": 1193.012167,
+        "cpu_seconds": 20.473509,
+        "cpu_ms_per_audio_second": 17.16119,
+        "kick": {
+          "candidates": 8308,
+          "admitted": 3347,
+          "eligible": 556,
+          "provisional_triggers": 24,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.080805
+        },
+        "snare": {
+          "candidates": 7513,
+          "admitted": 4175,
+          "eligible": 1012,
+          "provisional_triggers": 22,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.33376
+        },
+        "hat": {
+          "candidates": 7591,
+          "admitted": 4574,
+          "eligible": 1005,
+          "provisional_triggers": 34,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.087376
+        },
+        "drop": 17
+      },
+      {
+        "sample_rate": 96000,
+        "fast_fft_at_48khz": 256,
+        "runs": 5,
+        "audio_seconds": 1193.012135,
+        "cpu_seconds": 38.722644,
+        "cpu_ms_per_audio_second": 32.457879,
+        "kick": {
+          "candidates": 8308,
+          "admitted": 3347,
+          "eligible": 555,
+          "provisional_triggers": 24,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.080806
+        },
+        "snare": {
+          "candidates": 2917,
+          "admitted": 629,
+          "eligible": 235,
+          "provisional_triggers": 126,
+          "zero_output_runs": 1,
+          "maximum_track_events_per_second": 0.344938
+        },
+        "hat": {
+          "candidates": 3780,
+          "admitted": 778,
+          "eligible": 281,
+          "provisional_triggers": 122,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 0.327183
+        },
+        "drop": 17
+      },
+      {
+        "sample_rate": 96000,
+        "fast_fft_at_48khz": 512,
+        "runs": 5,
+        "audio_seconds": 1193.012135,
+        "cpu_seconds": 42.000916,
+        "cpu_ms_per_audio_second": 35.205774,
+        "kick": {
+          "candidates": 8308,
+          "admitted": 3347,
+          "eligible": 556,
+          "provisional_triggers": 24,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.080806
+        },
+        "snare": {
+          "candidates": 7513,
+          "admitted": 4175,
+          "eligible": 1012,
+          "provisional_triggers": 22,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.33376
+        },
+        "hat": {
+          "candidates": 7591,
+          "admitted": 4574,
+          "eligible": 1005,
+          "provisional_triggers": 34,
+          "zero_output_runs": 0,
+          "maximum_track_events_per_second": 1.087376
+        },
+        "drop": 17
+      }
+    ],
+    "claim": "Count/CPU sensitivity to sample rate and fast FFT resolution, not a labeled quality comparison."
+  },
+  "callback_partitions": {
+    "track": "James Shinra - Gritti.ogg",
+    "requested_seconds": 20,
+    "consumed_seconds": 19.992,
+    "callback_frames": [
+      137,
+      256,
+      4096,
+      8192,
+      480000
+    ],
+    "percussion_detector_telemetry_identical": true,
+    "drop_count_identical": true,
+    "drop_timing_note": "Drop timestamps/RMS are callback-polled diagnostics; only percussion has immutable sample-clock event telemetry.",
+    "reported_event_times_features_counts_agree": true,
+    "analysis_hops": 3745,
+    "counts": {
+      "kick": {
+        "candidates": 58,
+        "admitted": 43,
+        "count": 27
+      },
+      "snare": {
+        "candidates": 87,
+        "admitted": 67,
+        "count": 27
+      },
+      "hat": {
+        "candidates": 100,
+        "admitted": 81,
+        "count": 5
+      }
+    },
+    "telemetry_poll_frames_max": 480
+  },
+  "known_signal_fixtures": {
+    "executable": "examples/percussion_fixtures.rs",
+    "cases": 164,
+    "canonical_cases": 144,
+    "anti_phase_stereo": true,
+    "callback_frames": 137,
+    "canonical_source_gain": 0.5,
+    "canonical_source_attack_ms": 1,
+    "canonical_sample_rates": [
+      44100,
+      48000,
+      96000
+    ],
+    "canonical_fast_ffts": [
+      256,
+      512
+    ],
+    "canonical_phases": 8,
+    "by_instrument": [
+      {
+        "instrument": "kick",
+        "cases": 48,
+        "candidates": 48,
+        "admitted": 48,
+        "eligible": 48,
+        "signal_to_emission": {
+          "count": 48,
+          "minimum_ms": 45.0,
+          "median_ms": 46.0,
+          "p95_ms": 47.664399,
+          "maximum_ms": 47.664399
+        }
+      },
+      {
+        "instrument": "snare",
+        "cases": 48,
+        "candidates": 48,
+        "admitted": 48,
+        "eligible": 48,
+        "signal_to_emission": {
+          "count": 48,
+          "minimum_ms": 24.0,
+          "median_ms": 24.0,
+          "p95_ms": 24.716553,
+          "maximum_ms": 24.716553
+        }
+      },
+      {
+        "instrument": "hat",
+        "cases": 48,
+        "candidates": 48,
+        "admitted": 48,
+        "eligible": 48,
+        "signal_to_emission": {
+          "count": 48,
+          "minimum_ms": 24.0,
+          "median_ms": 24.0,
+          "p95_ms": 24.716553,
+          "maximum_ms": 24.716553
+        }
+      }
+    ],
+    "cpu_seconds": 1.46372,
+    "audio_seconds": 82,
+    "gain_and_rise_cases": [
+      {
+        "admitted": 1,
+        "candidates": 1,
+        "gain": 1.0,
+        "known_signal_onset": 0.1,
+        "rise_ms": 1.0,
+        "eligible": 1,
+        "signal_to_emission": {
+          "count": 1,
+          "minimum_ms": 45.0,
+          "median_ms": 45.0,
+          "p95_ms": 45.0,
+          "maximum_ms": 45.0
+        }
+      },
+      {
+        "admitted": 1,
+        "candidates": 1,
+        "gain": 0.5,
+        "known_signal_onset": 0.1,
+        "rise_ms": 1.0,
+        "eligible": 1,
+        "signal_to_emission": {
+          "count": 1,
+          "minimum_ms": 46.0,
+          "median_ms": 46.0,
+          "p95_ms": 46.0,
+          "maximum_ms": 46.0
+        }
+      },
+      {
+        "admitted": 1,
+        "candidates": 1,
+        "gain": 0.125,
+        "known_signal_onset": 0.1,
+        "rise_ms": 1.0,
+        "eligible": 0,
+        "signal_to_emission": {
+          "count": 0
+        }
+      },
+      {
+        "admitted": 1,
+        "candidates": 1,
+        "gain": 0.03162277862429619,
+        "known_signal_onset": 0.1,
+        "rise_ms": 1.0,
+        "eligible": 0,
+        "signal_to_emission": {
+          "count": 0
+        }
+      },
+      {
+        "admitted": 1,
+        "candidates": 1,
+        "gain": 1.0,
+        "known_signal_onset": 0.1,
+        "rise_ms": 15.0,
+        "eligible": 1,
+        "signal_to_emission": {
+          "count": 1,
+          "minimum_ms": 47.0,
+          "median_ms": 47.0,
+          "p95_ms": 47.0,
+          "maximum_ms": 47.0
+        }
+      },
+      {
+        "admitted": 1,
+        "candidates": 1,
+        "gain": 0.5,
+        "known_signal_onset": 0.1,
+        "rise_ms": 15.0,
+        "eligible": 1,
+        "signal_to_emission": {
+          "count": 1,
+          "minimum_ms": 47.0,
+          "median_ms": 47.0,
+          "p95_ms": 47.0,
+          "maximum_ms": 47.0
+        }
+      },
+      {
+        "admitted": 1,
+        "candidates": 1,
+        "gain": 0.125,
+        "known_signal_onset": 0.1,
+        "rise_ms": 15.0,
+        "eligible": 0,
+        "signal_to_emission": {
+          "count": 0
+        }
+      },
+      {
+        "admitted": 1,
+        "candidates": 1,
+        "gain": 0.03162277862429619,
+        "known_signal_onset": 0.1,
+        "rise_ms": 15.0,
+        "eligible": 0,
+        "signal_to_emission": {
+          "count": 0
+        }
+      },
+      {
+        "admitted": 1,
+        "candidates": 1,
+        "gain": 1.0,
+        "known_signal_onset": 0.1,
+        "rise_ms": 30.0,
+        "eligible": 0,
+        "signal_to_emission": {
+          "count": 0
+        }
+      },
+      {
+        "admitted": 1,
+        "candidates": 1,
+        "gain": 0.5,
+        "known_signal_onset": 0.1,
+        "rise_ms": 30.0,
+        "eligible": 0,
+        "signal_to_emission": {
+          "count": 0
+        }
+      },
+      {
+        "admitted": 1,
+        "candidates": 1,
+        "gain": 0.125,
+        "known_signal_onset": 0.1,
+        "rise_ms": 30.0,
+        "eligible": 0,
+        "signal_to_emission": {
+          "count": 0
+        }
+      },
+      {
+        "admitted": 1,
+        "candidates": 1,
+        "gain": 0.03162277862429619,
+        "known_signal_onset": 0.1,
+        "rise_ms": 30.0,
+        "eligible": 0,
+        "signal_to_emission": {
+          "count": 0
+        }
+      },
+      {
+        "admitted": 1,
+        "candidates": 1,
+        "gain": 1.0,
+        "known_signal_onset": 0.1,
+        "rise_ms": 60.0,
+        "eligible": 0,
+        "signal_to_emission": {
+          "count": 0
+        }
+      },
+      {
+        "admitted": 1,
+        "candidates": 1,
+        "gain": 0.5,
+        "known_signal_onset": 0.1,
+        "rise_ms": 60.0,
+        "eligible": 0,
+        "signal_to_emission": {
+          "count": 0
+        }
+      },
+      {
+        "admitted": 1,
+        "candidates": 1,
+        "gain": 0.125,
+        "known_signal_onset": 0.1,
+        "rise_ms": 60.0,
+        "eligible": 0,
+        "signal_to_emission": {
+          "count": 0
+        }
+      },
+      {
+        "admitted": 1,
+        "candidates": 1,
+        "gain": 0.03162277862429619,
+        "known_signal_onset": 0.1,
+        "rise_ms": 60.0,
+        "eligible": 0,
+        "signal_to_emission": {
+          "count": 0
+        }
+      },
+      {
+        "admitted": 1,
+        "candidates": 1,
+        "gain": 1.0,
+        "known_signal_onset": 0.1,
+        "rise_ms": 120.0,
+        "eligible": 0,
+        "signal_to_emission": {
+          "count": 0
+        }
+      },
+      {
+        "admitted": 1,
+        "candidates": 1,
+        "gain": 0.5,
+        "known_signal_onset": 0.1,
+        "rise_ms": 120.0,
+        "eligible": 0,
+        "signal_to_emission": {
+          "count": 0
+        }
+      },
+      {
+        "admitted": 1,
+        "candidates": 1,
+        "gain": 0.125,
+        "known_signal_onset": 0.1,
+        "rise_ms": 120.0,
+        "eligible": 0,
+        "signal_to_emission": {
+          "count": 0
+        }
+      },
+      {
+        "admitted": 0,
+        "candidates": 1,
+        "gain": 0.03162277862429619,
+        "known_signal_onset": 0.1,
+        "rise_ms": 120.0,
+        "eligible": 0,
+        "signal_to_emission": {
+          "count": 0
+        }
+      }
+    ],
+    "latency_scope": "Known source onset to actual emission availability; excludes capture buffering and next display frame."
+  },
+  "exhaustive_kick_acceptance": {
+    "test": "production_kick_longer_horizon_experiment",
+    "cases": 1152,
+    "fast_eligible_cases": 288,
+    "smooth_ineligible_cases": 864,
+    "sample_rates": [
+      44100,
+      48000,
+      96000
+    ],
+    "source_amplitudes": [
+      0.2,
+      0.4,
+      0.8
+    ],
+    "frequencies_hz": [
+      60,
+      80,
+      120,
+      180
+    ],
+    "phases": 4,
+    "decays_ms": [
+      60,
+      150
+    ],
+    "attack_rises_ms": [
+      1,
+      30,
+      60,
+      120
+    ],
+    "fast_concentration_range": [
+      0.2328,
+      0.284
+    ],
+    "smooth_concentration_range": [
+      0.154,
+      0.189
+    ],
+    "maximum_fast_signal_to_emission_ms": 47.66,
+    "maximum_rejected_smooth_signal_to_completion_ms": 52.65,
+    "command": "cargo test --release --lib production_kick_longer_horizon_experiment -- --ignored --nocapture"
+  },
+  "cpu_measurement": {
+    "architecture": "arm64",
+    "rust": "1.98.1",
+    "scope": "production analysis plus probe telemetry/JSON; excludes ffmpeg decoding",
+    "exclusions": [
+      "ffmpeg decoding",
+      "audio capture buffering",
+      "UI rendering"
+    ],
+    "baseline_cpu": "Unavailable in frozen baseline telemetry; its wall time is not a comparable CPU measurement."
+  },
+  "checks": {
+    "library_tests_passed": 404,
+    "library_tests_ignored": 26,
+    "binary_tests_passed": 26,
+    "binary_tests_ignored": 1,
+    "native_ui_preview_cases_reviewed": 10,
+    "native_ui_preview_directory": "/tmp/benga-histogram-ui",
+    "latest_focused_percussion_tests_passed": 25,
+    "latest_ui_tests_passed": 6,
+    "format_and_diff_checks": "passed",
+    "release_build": "passed",
+    "clippy": "Blocked by three existing approximate-constant errors in showcase.rs and existing warnings; no new frontend/acceptance diagnostics."
+  },
+  "limitations": [
+    "Unannotated replay counts are activity measurements, not precision/recall or instrument identity probabilities.",
+    "Defaults are conservative; sparse kick output and overlap rejection can miss real musical attacks.",
+    "Overlapping fixed feature windows reject both candidates rather than treating mixture energy as isolated source energy.",
+    "Fast bass plucks and struck chords can resemble percussion; the production fixture intentionally demonstrates this ambiguity.",
+    "Quiet/smooth ongoing rises can complete later than 50 ms without producing an eligible percussion trigger.",
+    "Short FFT masks have finite leakage; changing physical windows changes observed transient features."
+  ]
+}

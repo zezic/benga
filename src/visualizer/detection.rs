@@ -1,20 +1,18 @@
-//! Per-band relative-excess extraction and the kick, snare, hi-hat, and drop detectors.
+//! Detector settings, streaming orchestration, and public diagnostics.
 //!
-//! Every band extracts a continuous onset signal from its FFT bins. Each bin
-//! keeps a background envelope, and the positive relative excess over that
-//! background is capped and averaged over the band. ABDR, WSDR, DRP, and ABL
-//! then position that signal relative to the whole spectrum before the composite
-//! detectors multiply it by their kernels.
-//!
-//! Only the kick, snare, hi-hat, and drop detectors produce boolean onsets, from the
-//! kernel-projected continuous flow. The drop gates its onset detector with a
-//! smoothed RMS envelope below a configurable dBFS threshold.
+//! Short-window attacks feed independent percussion classifiers; normalized
+//! spectral trends and energy contrast feed the arrangement tracker. Legacy
+//! temporal polygons remain readable for saved-configuration compatibility.
 
 use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
 
+use super::arrangement::ArrangementTracker as DropTracker;
+use super::percussion::PercussionSettings;
+use super::percussion_spectrum::PercussionFrame;
 use super::spectrum::{RelativeExcessSettings, Spectrum};
+use super::transients::SharpOnsets;
 use super::{Curve, BAND_COUNT};
 
 pub const ABL_GAIN_MIN: f32 = 0.5;
@@ -35,9 +33,6 @@ pub const FLUX_RELEASE_MIN: f32 = 0.005;
 pub const FLUX_RELEASE_MAX: f32 = 0.5;
 pub const FLUX_AVERAGE_MIN: f32 = 0.05;
 pub const FLUX_AVERAGE_MAX: f32 = 4.0;
-/// Largest number of onset peaks the adaptive reference reserves room for.
-/// The time window bounds the count in practice.
-const PEAK_WINDOW_CAPACITY: usize = 256;
 pub const FLUX_SENSITIVITY_MIN: f32 = 0.5;
 pub const FLUX_SENSITIVITY_MAX: f32 = 5.0;
 pub const FLUX_THRESHOLD_MIN: f32 = 0.0;
@@ -49,6 +44,9 @@ pub const FLUX_SUPPRESSION_MIN: f32 = 0.0;
 pub const FLUX_SUPPRESSION_MAX: f32 = 2.0;
 pub const FLUX_PRE_GAIN_MIN: f32 = 0.01;
 pub const FLUX_PRE_GAIN_MAX: f32 = 4.0;
+pub const KICK_FREQUENCY_MIN_HZ: f32 = 20.0;
+pub const KICK_FREQUENCY_MAX_HZ: f32 = 2_000.0;
+pub const KICK_FREQUENCY_MIN_WIDTH_HZ: f32 = 10.0;
 pub const CHOKE_MIN: f32 = 0.0;
 pub const CHOKE_MAX: f32 = 2.0;
 pub const QUAKE_FACTOR_MIN: f32 = 0.0;
@@ -56,6 +54,7 @@ pub const QUAKE_FACTOR_MAX: f32 = 50.0;
 pub const SEQUENCE_EVERY_MIN: u32 = 1;
 pub const SEQUENCE_EVERY_MAX: u32 = 32;
 /// Allowed snare output RMS gate in dBFS.
+pub(super) const ONSET_MIX_GATE_DB: f32 = -27.0;
 pub const SNARE_RMS_GATE_MIN_DB: f32 = -60.0;
 pub const SNARE_RMS_GATE_MAX_DB: f32 = 0.0;
 pub const SNARE_RMS_GATE_DEFAULT_DB: f32 = -24.0;
@@ -69,14 +68,7 @@ pub const SPRING_STIFFNESS_MAX: f32 = 400.0;
 pub const SPRING_DAMPING_MIN: f32 = 0.0;
 pub const SPRING_DAMPING_MAX: f32 = 60.0;
 
-const FLASH_DECAY: f32 = 8.0;
 const SPRING_STEP: f32 = 1.0 / 240.0;
-/// RMS envelope follower time constants. The release outlives the 85 ms
-/// analysis window so a short dip between beats cannot arm the gap gate.
-const GAP_ENVELOPE_ATTACK: f32 = 0.02;
-const GAP_ENVELOPE_RELEASE: f32 = 0.35;
-/// Silence floor for every level reported in dBFS.
-const GAP_DB_FLOOR: f32 = -80.0;
 const KERNEL_EPSILON: f32 = 1e-6;
 
 /// The drop detector's onset kernel.
@@ -137,19 +129,6 @@ impl DropKernels {
         }
         Ok(())
     }
-}
-
-fn kernel_projection(weights: &[f32; BAND_COUNT], values: &[f32; BAND_COUNT]) -> f32 {
-    let total = weights.iter().sum::<f32>();
-    if total <= KERNEL_EPSILON {
-        return 0.0;
-    }
-    weights
-        .iter()
-        .zip(values)
-        .map(|(weight, value)| weight * value)
-        .sum::<f32>()
-        / total
 }
 
 fn validate_kernel(name: &str, weights: &[f32; BAND_COUNT]) -> anyhow::Result<()> {
@@ -449,6 +428,7 @@ impl TemporalPattern {
         field_value_for(inner, outer, x, y) * fade
     }
 
+    #[cfg(test)]
     fn sample_steps(&self, kernel: PatternKernel, steps: usize) -> Vec<[f32; BAND_COUNT]> {
         let effective = self.effective.clamp(0.1, 1.0);
         (0..steps)
@@ -469,6 +449,7 @@ impl TemporalPattern {
     /// Matches the template against the newest part of the onset history and
     /// returns the main-kernel excitation, the suppression-kernel inhibition,
     /// and their residual after suppression.
+    #[cfg(test)]
     fn project(
         &self,
         history: &VecDeque<[f32; BAND_COUNT]>,
@@ -603,46 +584,499 @@ fn distance_to_segment(a: [f32; 2], b: [f32; 2], x: f32, y: f32) -> f32 {
     ((x - px).powi(2) + (y - py).powi(2)).sqrt()
 }
 
-/// All user-tunable detector configuration. The whole value persists in the
-/// config file and is mirrored by the inspector sliders.
+/// One live control of the spectral arrangement detector.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ArrangementSetting {
+    MixLossDb,
+    MixLossHold,
+    ShapeDistance,
+    TrendChange,
+    ChangedFraction,
+    GapHold,
+    GapRmsDb,
+    GapRmsHold,
+    ReferenceTime,
+    BassFastTime,
+    BassSlowTime,
+    BassHitThreshold,
+    DropMinRmsDb,
+    DropRefractory,
+}
+
+impl ArrangementSetting {
+    pub const ALL: [Self; 14] = [
+        Self::MixLossDb,
+        Self::MixLossHold,
+        Self::ShapeDistance,
+        Self::TrendChange,
+        Self::ChangedFraction,
+        Self::GapHold,
+        Self::GapRmsDb,
+        Self::GapRmsHold,
+        Self::ReferenceTime,
+        Self::BassFastTime,
+        Self::BassSlowTime,
+        Self::BassHitThreshold,
+        Self::DropMinRmsDb,
+        Self::DropRefractory,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::MixLossDb => "Mix loss",
+            Self::MixLossHold => "Mix loss hold",
+            Self::ShapeDistance => "Shape change",
+            Self::TrendChange => "Trend change",
+            Self::ChangedFraction => "Changed area",
+            Self::GapHold => "Gap hold",
+            Self::GapRmsDb => "RMS gap below",
+            Self::GapRmsHold => "RMS gap hold",
+            Self::ReferenceTime => "Reference",
+            Self::BassFastTime => "Fast LF envelope",
+            Self::BassSlowTime => "Slow LF envelope",
+            Self::BassHitThreshold => "Bass attack",
+            Self::DropMinRmsDb => "Drop RMS",
+            Self::DropRefractory => "Drop interval",
+        }
+    }
+
+    pub fn range(self) -> (f32, f32) {
+        match self {
+            Self::MixLossDb => (0.25, 12.0),
+            Self::MixLossHold => (0.05, 10.0),
+            Self::ShapeDistance => (0.01, 0.6),
+            Self::TrendChange => (0.005, 0.3),
+            Self::ChangedFraction => (0.05, 1.0),
+            Self::GapHold => (0.05, 4.0),
+            Self::GapRmsDb => (-80.0, 0.0),
+            Self::GapRmsHold => (0.05, 10.0),
+            Self::ReferenceTime => (0.5, 20.0),
+            Self::BassFastTime => (0.002, 0.200),
+            Self::BassSlowTime => (0.020, 2.0),
+            Self::BassHitThreshold => (0.02, 0.6),
+            Self::DropMinRmsDb => (-60.0, 0.0),
+            Self::DropRefractory => (0.25, 30.0),
+        }
+    }
+
+    pub fn step(self) -> f32 {
+        match self {
+            Self::MixLossDb | Self::ReferenceTime | Self::DropRefractory => 0.25,
+            Self::ShapeDistance | Self::BassHitThreshold => 0.01,
+            Self::TrendChange => 0.005,
+            Self::BassFastTime => 0.001,
+            Self::BassSlowTime => 0.005,
+            Self::MixLossHold | Self::ChangedFraction | Self::GapHold | Self::GapRmsHold => 0.05,
+            Self::DropMinRmsDb | Self::GapRmsDb => 1.0,
+        }
+    }
+
+    pub fn is_time(self) -> bool {
+        matches!(
+            self,
+            Self::MixLossHold
+                | Self::GapHold
+                | Self::GapRmsHold
+                | Self::ReferenceTime
+                | Self::BassFastTime
+                | Self::BassSlowTime
+                | Self::DropRefractory
+        )
+    }
+
+    pub fn format(self, value: f32) -> String {
+        match self {
+            Self::MixLossDb => format!("{value:.2} dB"),
+            Self::DropMinRmsDb | Self::GapRmsDb => format!("{value:.1} dB"),
+            Self::MixLossHold
+            | Self::GapHold
+            | Self::GapRmsHold
+            | Self::ReferenceTime
+            | Self::BassFastTime
+            | Self::BassSlowTime
+            | Self::DropRefractory => {
+                if value < 1.0 {
+                    format!("{:.0} ms", value * 1000.0)
+                } else {
+                    format!("{value:.2} s")
+                }
+            }
+            _ => format!("{:.1}%", value * 100.0),
+        }
+    }
+}
+
+/// Persisted controls used directly by gap arming and drop confirmation.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ArrangementSettings {
+    pub mix_loss_db: f32,
+    /// Independent gap confirmation after this continuous time above the mix-loss requirement.
+    pub mix_loss_hold: f32,
+    pub shape_distance: f32,
+    pub trend_change: f32,
+    pub changed_fraction: f32,
+    pub gap_hold: f32,
+    /// Independent gap confirmation when analysis-window RMS stays below this level.
+    pub gap_rms_db: f32,
+    /// Required continuous time below the absolute RMS threshold, in seconds.
+    pub gap_rms_hold: f32,
+    pub reference_time: f32,
+    /// LF onset envelope time constants in seconds; slow must exceed fast by 5 ms.
+    pub bass_fast_time: f32,
+    pub bass_slow_time: f32,
+    pub bass_hit_threshold: f32,
+    pub drop_min_rms_db: f32,
+    pub drop_refractory: f32,
+}
+
+impl Default for ArrangementSettings {
+    fn default() -> Self {
+        Self {
+            mix_loss_db: 2.0,
+            mix_loss_hold: 1.2,
+            shape_distance: 0.12,
+            trend_change: 0.055,
+            changed_fraction: 0.25,
+            gap_hold: 1.2,
+            gap_rms_db: -40.0,
+            gap_rms_hold: 0.5,
+            reference_time: 5.0,
+            bass_fast_time: 0.020,
+            bass_slow_time: 0.250,
+            bass_hit_threshold: 0.12,
+            drop_min_rms_db: -26.0,
+            drop_refractory: 8.0,
+        }
+    }
+}
+
+impl ArrangementSettings {
+    pub fn value(self, setting: ArrangementSetting) -> f32 {
+        match setting {
+            ArrangementSetting::MixLossDb => self.mix_loss_db,
+            ArrangementSetting::MixLossHold => self.mix_loss_hold,
+            ArrangementSetting::ShapeDistance => self.shape_distance,
+            ArrangementSetting::TrendChange => self.trend_change,
+            ArrangementSetting::ChangedFraction => self.changed_fraction,
+            ArrangementSetting::GapHold => self.gap_hold,
+            ArrangementSetting::GapRmsDb => self.gap_rms_db,
+            ArrangementSetting::GapRmsHold => self.gap_rms_hold,
+            ArrangementSetting::ReferenceTime => self.reference_time,
+            ArrangementSetting::BassFastTime => self.bass_fast_time,
+            ArrangementSetting::BassSlowTime => self.bass_slow_time,
+            ArrangementSetting::BassHitThreshold => self.bass_hit_threshold,
+            ArrangementSetting::DropMinRmsDb => self.drop_min_rms_db,
+            ArrangementSetting::DropRefractory => self.drop_refractory,
+        }
+    }
+
+    pub fn set(&mut self, setting: ArrangementSetting, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        let (low, high) = setting.range();
+        let value = value.clamp(low, high);
+        let value = match setting {
+            ArrangementSetting::BassFastTime => value.min(self.bass_slow_time - 0.005),
+            ArrangementSetting::BassSlowTime => value.max(self.bass_fast_time + 0.005),
+            _ => value,
+        };
+        *match setting {
+            ArrangementSetting::MixLossDb => &mut self.mix_loss_db,
+            ArrangementSetting::MixLossHold => &mut self.mix_loss_hold,
+            ArrangementSetting::ShapeDistance => &mut self.shape_distance,
+            ArrangementSetting::TrendChange => &mut self.trend_change,
+            ArrangementSetting::ChangedFraction => &mut self.changed_fraction,
+            ArrangementSetting::GapHold => &mut self.gap_hold,
+            ArrangementSetting::GapRmsDb => &mut self.gap_rms_db,
+            ArrangementSetting::GapRmsHold => &mut self.gap_rms_hold,
+            ArrangementSetting::ReferenceTime => &mut self.reference_time,
+            ArrangementSetting::BassFastTime => &mut self.bass_fast_time,
+            ArrangementSetting::BassSlowTime => &mut self.bass_slow_time,
+            ArrangementSetting::BassHitThreshold => &mut self.bass_hit_threshold,
+            ArrangementSetting::DropMinRmsDb => &mut self.drop_min_rms_db,
+            ArrangementSetting::DropRefractory => &mut self.drop_refractory,
+        } = value;
+    }
+
+    pub fn validate(self) -> anyhow::Result<Self> {
+        for setting in ArrangementSetting::ALL {
+            let value = self.value(setting);
+            let (low, high) = setting.range();
+            anyhow::ensure!(
+                value.is_finite() && (low..=high).contains(&value),
+                "arrangement {} must be finite and between {low} and {high}",
+                setting.label()
+            );
+        }
+        anyhow::ensure!(
+            self.bass_slow_time + f32::EPSILON >= self.bass_fast_time + 0.005,
+            "arrangement slow LF envelope must be at least 5 ms slower than the fast LF envelope"
+        );
+        Ok(self)
+    }
+}
+
+const BIN_GAIN_MAX_HZ: f32 = 192_000.0;
+const BIN_GAIN_MAX_POINTS: usize = 8192;
+
+/// A physical FFT bin, addressed in frequency so saved edits survive a new grid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct BinAddress {
+    pub center_millihz: u32,
+    pub width_millihz: u32,
+}
+
+impl Default for BinAddress {
+    fn default() -> Self {
+        Self {
+            center_millihz: 0,
+            width_millihz: 1,
+        }
+    }
+}
+
+impl BinAddress {
+    pub fn new(center_hz: f32, bin_width_hz: f32) -> Self {
+        let center = if center_hz.is_finite() {
+            center_hz.clamp(0.0, BIN_GAIN_MAX_HZ)
+        } else {
+            0.0
+        };
+        let width = if bin_width_hz.is_finite() {
+            bin_width_hz.clamp(0.001, BIN_GAIN_MAX_HZ)
+        } else {
+            0.001
+        };
+        Self {
+            center_millihz: (center * 1000.0).round() as u32,
+            width_millihz: ((width * 1000.0).round() as u32).max(1),
+        }
+    }
+
+    pub fn center_hz(self) -> f32 {
+        self.center_millihz as f32 / 1000.0
+    }
+    pub fn width_hz(self) -> f32 {
+        self.width_millihz as f32 / 1000.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BinGainPoint {
+    pub hz: f32,
+    pub gain: f32,
+}
+
+/// Piecewise-linear attenuation. Empty curves and frequencies outside a curve
+/// have unity gain; neighboring anchors make an edit local to the selected bin.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FrequencyGainProfile {
+    pub points: Vec<BinGainPoint>,
+}
+
+impl FrequencyGainProfile {
+    pub fn gain_at(&self, hz: f32) -> f32 {
+        if !hz.is_finite() {
+            return 1.0;
+        }
+        match self
+            .points
+            .binary_search_by(|point| point.hz.total_cmp(&hz))
+        {
+            Ok(index) => self.points[index].gain,
+            Err(0) => 1.0,
+            Err(index) if index == self.points.len() => 1.0,
+            Err(index) => {
+                let left = self.points[index - 1];
+                let right = self.points[index];
+                let fraction = (hz - left.hz) / (right.hz - left.hz);
+                left.gain + (right.gain - left.gain) * fraction
+            }
+        }
+    }
+
+    pub fn set_bin(&mut self, address: BinAddress, gain: f32) {
+        if !gain.is_finite() {
+            return;
+        }
+        let address = BinAddress::new(address.center_hz(), address.width_hz());
+        let maximum = (BIN_GAIN_MAX_HZ * 1000.0) as u32;
+        let coordinates = [
+            address.center_millihz.saturating_sub(address.width_millihz),
+            address.center_millihz,
+            address
+                .center_millihz
+                .saturating_add(address.width_millihz)
+                .min(maximum),
+        ];
+        let missing = coordinates
+            .iter()
+            .enumerate()
+            .filter(|(index, coordinate)| {
+                !coordinates[..*index].contains(coordinate)
+                    && self
+                        .points
+                        .binary_search_by(|point| {
+                            point.hz.total_cmp(&(**coordinate as f32 / 1000.0))
+                        })
+                        .is_err()
+            })
+            .count();
+        if self.points.len() + missing > BIN_GAIN_MAX_POINTS {
+            return;
+        }
+        let low = coordinates[0] as f32 / 1000.0;
+        let high = coordinates[2] as f32 / 1000.0;
+        let low_gain = self.gain_at(low);
+        let high_gain = self.gain_at(high);
+        self.insert(BinGainPoint {
+            hz: low,
+            gain: low_gain,
+        });
+        self.insert(BinGainPoint {
+            hz: high,
+            gain: high_gain,
+        });
+        self.insert(BinGainPoint {
+            hz: address.center_hz(),
+            gain: gain.clamp(0.0, 1.0),
+        });
+    }
+
+    fn insert(&mut self, point: BinGainPoint) {
+        match self
+            .points
+            .binary_search_by(|existing| existing.hz.total_cmp(&point.hz))
+        {
+            Ok(index) => self.points[index] = point,
+            Err(index) => self.points.insert(index, point),
+        }
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.points.len() <= BIN_GAIN_MAX_POINTS,
+            "bin attenuation profile has too many points"
+        );
+        let mut previous = None;
+        for point in &self.points {
+            anyhow::ensure!(
+                point.hz.is_finite() && (0.0..=BIN_GAIN_MAX_HZ).contains(&point.hz),
+                "bin attenuation frequency must be finite and inside the supported spectrum"
+            );
+            anyhow::ensure!(
+                point.gain.is_finite() && (0.0..=1.0).contains(&point.gain),
+                "bin attenuation gain must be finite and between zero and one"
+            );
+            anyhow::ensure!(
+                previous.is_none_or(|hz| point.hz > hz),
+                "bin attenuation frequencies must be unique and increasing"
+            );
+            previous = Some(point.hz);
+        }
+        Ok(())
+    }
+}
+
+/// Independent detector attenuation curves. Channels are kick, snare, and hat.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PercussionBinGains {
+    pub kick: FrequencyGainProfile,
+    pub snare: FrequencyGainProfile,
+    pub hat: FrequencyGainProfile,
+}
+
+impl PercussionBinGains {
+    pub fn profile(&self, channel: usize) -> &FrequencyGainProfile {
+        match channel {
+            0 => &self.kick,
+            1 => &self.snare,
+            2 => &self.hat,
+            _ => panic!("unknown percussion channel"),
+        }
+    }
+
+    fn profile_mut(&mut self, channel: usize) -> &mut FrequencyGainProfile {
+        match channel {
+            0 => &mut self.kick,
+            1 => &mut self.snare,
+            2 => &mut self.hat,
+            _ => panic!("unknown percussion channel"),
+        }
+    }
+
+    pub fn value(&self, channel: usize, address: BinAddress) -> f32 {
+        self.profile(channel).gain_at(address.center_hz())
+    }
+
+    pub fn set_bin(&mut self, channel: usize, address: BinAddress, gain: f32) {
+        self.profile_mut(channel).set_bin(address, gain);
+    }
+
+    pub fn reset(&mut self, channel: usize) {
+        self.profile_mut(channel).points.clear();
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for channel in 0..3 {
+            self.profile(channel).validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// Detector configuration. Legacy temporal fields remain readable and roundtrip
+/// for compatibility; the inspector exposes only controls used by the new DSP.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "DetectorSettingsRaw", into = "DetectorSettingsRaw")]
 pub struct DetectorSettings {
+    /// Revision-three causal event features and paired onset populations.
+    pub percussion: PercussionSettings,
+    pub arrangement: ArrangementSettings,
+    pub bin_gains: PercussionBinGains,
     /// Per-band absolute-loudness shaping used by the onset flow.
     pub band_onset: [BandOnsetSettings; BAND_COUNT],
     /// Per-bin relative-excess background detector.
     pub excess: RelativeExcessSettings,
-    /// Temporal onset template for the kick detector.
+    /// Bounds of the kick body's raw-FFT attack region, in Hz.
+    pub kick_low_hz: f32,
+    pub kick_high_hz: f32,
+    /// Legacy temporal template, retained for saved-configuration compatibility.
     pub kick_pattern: TemporalPattern,
-    /// Trim applied to the kick pattern projection before onset tracking.
+    /// Legacy temporal projection gain; unused by sharp-attack detection.
     pub kick_onset_pre_gain: f32,
-    /// Dedicated onset tracker settings for the kick onset kernel.
+    /// Legacy envelope time constants. Live controls begin at `average` below.
     pub kick_onset_attack: f32,
     pub kick_onset_release: f32,
     pub kick_onset_average: f32,
     pub kick_onset_sensitivity: f32,
     pub kick_onset_min_threshold: f32,
     pub kick_onset_min_interval: f32,
-    /// Weight of the kick suppression-kernel flow subtracted from its onset flow.
+    /// Legacy suppression weight; the new classifiers validate regions directly.
     pub kick_onset_suppression: f32,
-    /// Time the kick stays muted after a confirmed snare or drop.
+    /// Legacy choke settings. Coincident validated percussion now stays independent.
     pub kick_snare_choke: f32,
     pub kick_drop_choke: f32,
     pub kick_quake_factor: f32,
     /// A new quake direction is taken every this many kicks.
     pub kick_sequence_every: u32,
-    /// Temporal onset template for the snare detector.
+    /// Legacy temporal template.
     pub snare_pattern: TemporalPattern,
-    /// Trim applied to the snare pattern projection before onset tracking.
+    /// Legacy projection gain.
     pub snare_onset_pre_gain: f32,
-    /// Dedicated onset tracker settings for the snare onset kernel.
+    /// Legacy envelope time constants. Live controls begin at `average` below.
     pub snare_onset_attack: f32,
     pub snare_onset_release: f32,
     pub snare_onset_average: f32,
     pub snare_onset_sensitivity: f32,
     pub snare_onset_min_threshold: f32,
     pub snare_onset_min_interval: f32,
-    /// Weight of the snare suppression-kernel flow subtracted from its onset flow.
+    /// Legacy temporal suppression weight.
     pub snare_onset_suppression: f32,
     /// Minimum broadband RMS in dBFS required to emit a confirmed snare.
     pub snare_min_rms_db: f32,
@@ -651,9 +1085,9 @@ pub struct DetectorSettings {
     pub snare_choke: f32,
     pub flip_stiffness: f32,
     pub flip_damping: f32,
-    /// Temporal onset template for the hi-hat detector.
+    /// Legacy temporal template.
     pub hat_pattern: TemporalPattern,
-    /// Trim applied to the hi-hat pattern projection before onset tracking.
+    /// Legacy projection gain.
     pub hat_onset_pre_gain: f32,
     pub hat_onset_attack: f32,
     pub hat_onset_release: f32,
@@ -661,13 +1095,14 @@ pub struct DetectorSettings {
     pub hat_onset_sensitivity: f32,
     pub hat_onset_min_threshold: f32,
     pub hat_onset_min_interval: f32,
-    /// Weight of the hi-hat suppression-kernel flow subtracted from its onset flow.
+    /// Legacy temporal suppression weight.
     pub hat_onset_suppression: f32,
-    /// Per-band weights for the onset projection.
+    /// Legacy drop projection weights; bass confirmation now uses actual attack energy.
     pub drop_kernels: DropKernels,
-    /// RMS envelope level in dBFS below which the gap gate arms.
+    /// Legacy absolute quiet ceiling, retained only for config compatibility.
+    /// Gap starts now depend on spectral trends and relative mix energy loss.
     pub drop_gap_threshold: f32,
-    /// Dedicated onset tracker settings for the composite onset kernel.
+    /// Legacy drop flux settings; the arrangement tracker maintains its own state.
     pub drop_onset_pre_gain: f32,
     pub drop_onset_attack: f32,
     pub drop_onset_release: f32,
@@ -685,16 +1120,21 @@ pub struct DetectorSettings {
 impl Default for DetectorSettings {
     fn default() -> Self {
         Self {
+            percussion: PercussionSettings::default(),
+            arrangement: ArrangementSettings::default(),
+            bin_gains: PercussionBinGains::default(),
             band_onset: [BandOnsetSettings::default(); BAND_COUNT],
             excess: RelativeExcessSettings::default(),
+            kick_low_hz: 102.614056,
+            kick_high_hz: 223.14035,
             kick_pattern: TemporalPattern::kick_initial(),
             kick_onset_pre_gain: 0.2977303,
             kick_onset_attack: 0.004782859,
             kick_onset_release: 0.010084573,
-            kick_onset_average: 1.2069348,
-            kick_onset_sensitivity: 0.5,
-            kick_onset_min_threshold: 0.027,
-            kick_onset_min_interval: 0.15654644,
+            kick_onset_average: 0.6,
+            kick_onset_sensitivity: 1.0,
+            kick_onset_min_threshold: 0.16,
+            kick_onset_min_interval: 0.09,
             kick_onset_suppression: 0.0,
             kick_snare_choke: 0.099999994,
             kick_drop_choke: 0.099999994,
@@ -704,10 +1144,10 @@ impl Default for DetectorSettings {
             snare_onset_pre_gain: 1.0054638,
             snare_onset_attack: 0.001,
             snare_onset_release: 0.005,
-            snare_onset_average: 0.90220815,
-            snare_onset_sensitivity: 1.2,
-            snare_onset_min_threshold: 0.019000001,
-            snare_onset_min_interval: 0.14992328,
+            snare_onset_average: 0.6,
+            snare_onset_sensitivity: 1.0,
+            snare_onset_min_threshold: 0.14,
+            snare_onset_min_interval: 0.10,
             snare_onset_suppression: 0.099999994,
             snare_min_rms_db: SNARE_RMS_GATE_DEFAULT_DB,
             snare_flip_every: 8,
@@ -719,10 +1159,10 @@ impl Default for DetectorSettings {
             hat_onset_pre_gain: 4.0,
             hat_onset_attack: 0.001,
             hat_onset_release: 0.005,
-            hat_onset_average: 1.4821466,
-            hat_onset_sensitivity: 0.5,
-            hat_onset_min_threshold: 0.020000001,
-            hat_onset_min_interval: 0.030284878,
+            hat_onset_average: 0.6,
+            hat_onset_sensitivity: 1.0,
+            hat_onset_min_threshold: 0.16,
+            hat_onset_min_interval: 0.03,
             hat_onset_suppression: 0.0,
             drop_kernels: DropKernels::default(),
             drop_gap_threshold: -21.0,
@@ -743,6 +1183,23 @@ impl Default for DetectorSettings {
 
 impl DetectorSettings {
     pub fn validate(self) -> anyhow::Result<Self> {
+        self.percussion.validate()?;
+        self.arrangement.validate()?;
+        self.bin_gains.validate()?;
+        for (name, frequency) in [
+            ("kick_low_hz", self.kick_low_hz),
+            ("kick_high_hz", self.kick_high_hz),
+        ] {
+            anyhow::ensure!(
+                frequency.is_finite()
+                    && (KICK_FREQUENCY_MIN_HZ..=KICK_FREQUENCY_MAX_HZ).contains(&frequency),
+                "{name} must be finite and between {KICK_FREQUENCY_MIN_HZ} and {KICK_FREQUENCY_MAX_HZ} Hz"
+            );
+        }
+        anyhow::ensure!(
+            self.kick_high_hz >= self.kick_low_hz + KICK_FREQUENCY_MIN_WIDTH_HZ,
+            "kick frequency range must span at least {KICK_FREQUENCY_MIN_WIDTH_HZ} Hz"
+        );
         for (band, settings) in self.band_onset.iter().enumerate() {
             anyhow::ensure!(
                 settings.abl_gain.is_finite()
@@ -1063,65 +1520,23 @@ impl DetectorSettings {
         Ok(self)
     }
 
-    fn drop_onset_recipe(&self) -> OnsetRecipe {
-        OnsetRecipe {
-            kernel: self.drop_kernels.onset,
-            suppression: self.drop_onset_suppression,
-            pre_gain: self.drop_onset_pre_gain,
-            tracker: FluxSettings {
-                attack: self.drop_onset_attack,
-                release: self.drop_onset_release,
-                average: self.drop_onset_average,
-                sensitivity: self.drop_onset_sensitivity,
-                min_threshold: self.drop_onset_min_threshold,
-                min_interval: self.drop_onset_min_interval,
-            },
-        }
-    }
-
-    fn kick_onset_tracker(&self) -> FluxSettings {
-        FluxSettings {
-            attack: self.kick_onset_attack,
-            release: self.kick_onset_release,
-            average: self.kick_onset_average,
-            sensitivity: self.kick_onset_sensitivity,
-            min_threshold: self.kick_onset_min_threshold,
-            min_interval: self.kick_onset_min_interval,
-        }
-    }
-
-    fn snare_onset_tracker(&self) -> FluxSettings {
-        FluxSettings {
-            attack: self.snare_onset_attack,
-            release: self.snare_onset_release,
-            average: self.snare_onset_average,
-            sensitivity: self.snare_onset_sensitivity,
-            min_threshold: self.snare_onset_min_threshold,
-            min_interval: self.snare_onset_min_interval,
-        }
-    }
-
-    fn hat_onset_tracker(&self) -> FluxSettings {
-        FluxSettings {
-            attack: self.hat_onset_attack,
-            release: self.hat_onset_release,
-            average: self.hat_onset_average,
-            sensitivity: self.hat_onset_sensitivity,
-            min_threshold: self.hat_onset_min_threshold,
-            min_interval: self.hat_onset_min_interval,
-        }
-    }
-
     pub fn kick_contains(&self, band: usize) -> bool {
-        self.kick_pattern.contains_band(band)
+        if band >= BAND_COUNT {
+            return false;
+        }
+        // Routing diagnostics use nominal display bands. The actual detector
+        // integrates fractional raw-bin overlap with these configured bounds.
+        let low = 32.0 * 500.0_f32.powf(band as f32 / BAND_COUNT as f32);
+        let high = 32.0 * 500.0_f32.powf((band + 1) as f32 / BAND_COUNT as f32);
+        high.min(self.kick_high_hz) - low.max(self.kick_low_hz) > 0.001
     }
 
     pub fn snare_contains(&self, band: usize) -> bool {
-        self.snare_pattern.contains_band(band)
+        (6..BAND_COUNT).contains(&band)
     }
 
     pub fn hat_contains(&self, band: usize) -> bool {
-        self.hat_pattern.contains_band(band)
+        (12..BAND_COUNT).contains(&band)
     }
 
     pub fn drop_kernel_weights(&self, kernel: DropKernel) -> [f32; BAND_COUNT] {
@@ -1206,6 +1621,31 @@ impl Default for TemporalPatternRaw {
 }
 
 impl TemporalPatternRaw {
+    fn validate_legacy(&self) -> anyhow::Result<()> {
+        for (name, polygon) in [
+            ("inner", &self.inner),
+            ("outer", &self.outer),
+            ("suppression inner", &self.suppression_inner),
+            ("suppression outer", &self.suppression_outer),
+        ] {
+            if !polygon.is_empty() {
+                validate_polygon(name, polygon)?;
+            }
+        }
+        anyhow::ensure!(
+            self.effective.is_finite() && (0.1..=1.0).contains(&self.effective),
+            "legacy pattern area must be finite in 0.1..=1"
+        );
+        anyhow::ensure!(
+            self.steps.len() <= PATTERN_MAX_STEPS,
+            "legacy pattern exceeds bounded history"
+        );
+        for step in &self.steps {
+            validate_kernel("legacy pattern", step)?;
+        }
+        Ok(())
+    }
+
     fn into_pattern(self) -> TemporalPattern {
         if self.inner.len() >= 3 && self.outer.len() >= 3 {
             TemporalPattern {
@@ -1239,9 +1679,17 @@ impl From<TemporalPattern> for TemporalPatternRaw {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct DetectorSettingsRaw {
+    percussion: PercussionSettings,
+    arrangement: ArrangementSettings,
+    bin_gains: PercussionBinGains,
+    /// New score units require new thresholds when reading temporal recipes.
+    #[serde(default)]
+    onset_revision: u32,
     /// New per-band ABL settings. Missing means all bands use defaults.
     band_onset: Vec<BandOnsetSettings>,
     excess: RelativeExcessSettings,
+    kick_low_hz: f32,
+    kick_high_hz: f32,
     /// Settings from the previous per-band flux tracker; accepted but unused.
     #[serde(rename = "band_flux", skip_serializing)]
     legacy_band_flux: Vec<BandFluxSettingsRaw>,
@@ -1386,6 +1834,97 @@ impl TryFrom<DetectorSettingsRaw> for DetectorSettings {
     type Error = anyhow::Error;
 
     fn try_from(raw: DetectorSettingsRaw) -> Result<Self, Self::Error> {
+        anyhow::ensure!(
+            raw.onset_revision <= 3,
+            "unsupported onset_revision {}",
+            raw.onset_revision
+        );
+        for pattern in [&raw.kick_pattern, &raw.snare_pattern, &raw.hat_pattern]
+            .into_iter()
+            .flatten()
+        {
+            pattern.validate_legacy()?;
+        }
+        for kernel in [&raw.legacy_kick_kernel, &raw.legacy_snare_kernel]
+            .into_iter()
+            .flatten()
+        {
+            validate_kernel("legacy", kernel)?;
+        }
+        for settings in &raw.legacy_band_flux {
+            for value in [
+                settings.attack,
+                settings.release,
+                settings.average,
+                settings.sensitivity,
+                settings.min_threshold,
+                settings.min_interval,
+                settings.gain,
+            ] {
+                anyhow::ensure!(
+                    value.is_finite() && value >= 0.0,
+                    "legacy band flux values must be finite and nonnegative"
+                );
+            }
+        }
+        for value in [
+            raw.legacy_flux_attack,
+            raw.legacy_flux_release,
+            raw.legacy_flux_average,
+            raw.legacy_flux_sensitivity,
+            raw.legacy_flux_min_threshold,
+            raw.legacy_flux_min_interval,
+        ] {
+            anyhow::ensure!(
+                value.is_finite() && value >= 0.0,
+                "legacy flux values must be finite and nonnegative"
+            );
+        }
+        let histogram_migration = raw.onset_revision < 3;
+        // Accepted compatibility fields must be checked even when their old
+        // algorithm is no longer active, and before any migration overwrites them.
+        for (name, value) in [
+            ("drop_window", raw.legacy_drop_window),
+            ("drop_gap_window", raw.legacy_drop_gap_window.unwrap_or(0.0)),
+            ("drop_gap_gain", raw.legacy_drop_gap_gain),
+            ("drop_low_lp", raw.legacy_drop_low_lp),
+            ("drop_high_lp", raw.legacy_drop_high_lp),
+            ("drop_gap_time", raw.legacy_drop_gap_time),
+            ("drop_quiet_time", raw.legacy_drop_quiet_time),
+            ("kick_window", raw.legacy_kick_window),
+            ("snare_window", raw.legacy_snare_window),
+            ("snare_min_power", raw.legacy_snare_min_power),
+        ] {
+            anyhow::ensure!(
+                value.is_finite() && value >= 0.0,
+                "legacy {name} must be finite and nonnegative"
+            );
+        }
+        for value in [raw.legacy_drop_gap_level, raw.legacy_drop_quiet_level] {
+            anyhow::ensure!(value.is_finite(), "legacy drop levels must be finite");
+        }
+        anyhow::ensure!(
+            raw.drop_gap_threshold.is_finite()
+                && (DROP_GAP_THRESHOLD_MIN..=DROP_GAP_THRESHOLD_MAX)
+                    .contains(&raw.drop_gap_threshold),
+            "drop_gap_threshold must be finite and in its saved range"
+        );
+        validate_kernel("legacy drop low", &raw.legacy_drop_low_kernel)?;
+        validate_kernel("legacy drop high", &raw.legacy_drop_high_kernel)?;
+        anyhow::ensure!(
+            raw.legacy_drop_split <= BAND_COUNT
+                && raw.legacy_kick_low <= BAND_COUNT
+                && raw.legacy_kick_high <= BAND_COUNT,
+            "legacy band boundaries exceed spectrum"
+        );
+        anyhow::ensure!(
+            raw.legacy_snare_bands
+                .iter()
+                .flatten()
+                .all(|band| *band < BAND_COUNT),
+            "legacy snare band exceeds spectrum"
+        );
+        let needs_migration = raw.onset_revision < 2;
         let band_onset: [BandOnsetSettings; BAND_COUNT] = if raw.band_onset.is_empty() {
             [BandOnsetSettings::default(); BAND_COUNT]
         } else {
@@ -1440,8 +1979,13 @@ impl TryFrom<DetectorSettingsRaw> for DetectorSettings {
             raw.drop_gap_threshold
         };
         Self {
+            percussion: raw.percussion,
+            arrangement: raw.arrangement,
+            bin_gains: raw.bin_gains,
             band_onset,
             excess: raw.excess,
+            kick_low_hz: raw.kick_low_hz,
+            kick_high_hz: raw.kick_high_hz,
             kick_pattern,
             kick_onset_pre_gain: raw.kick_onset_pre_gain,
             kick_onset_attack: raw.kick_onset_attack,
@@ -1496,14 +2040,47 @@ impl TryFrom<DetectorSettingsRaw> for DetectorSettings {
             quake_damping: raw.quake_damping,
         }
         .validate()
+        .map(|mut settings| {
+            if histogram_migration {
+                // Validate the complete old recipe above before discarding its
+                // incompatible regional gain curves and frequency masks.
+                settings.percussion = PercussionSettings::default();
+                settings.bin_gains = PercussionBinGains::default();
+                log::info!("Percussion revision 3: reset masks to 60–200 / 2000–10000 / 5000–16000 Hz and input gains to unity; arrangement and motion preferences retained");
+            }
+            if needs_migration {
+                // Validate the original recipe before migrating score units:
+                // corrupt settings must never be silently repaired and saved.
+                let defaults = Self::default();
+                settings.kick_onset_average = defaults.kick_onset_average;
+                settings.kick_onset_sensitivity = defaults.kick_onset_sensitivity;
+                settings.kick_onset_min_threshold = defaults.kick_onset_min_threshold;
+                settings.kick_onset_min_interval = defaults.kick_onset_min_interval;
+                settings.snare_onset_average = defaults.snare_onset_average;
+                settings.snare_onset_sensitivity = defaults.snare_onset_sensitivity;
+                settings.snare_onset_min_threshold = defaults.snare_onset_min_threshold;
+                settings.snare_onset_min_interval = defaults.snare_onset_min_interval;
+                settings.hat_onset_average = defaults.hat_onset_average;
+                settings.hat_onset_sensitivity = defaults.hat_onset_sensitivity;
+                settings.hat_onset_min_threshold = defaults.hat_onset_min_threshold;
+                settings.hat_onset_min_interval = defaults.hat_onset_min_interval;
+            }
+            settings
+        })
     }
 }
 
 impl From<DetectorSettings> for DetectorSettingsRaw {
     fn from(settings: DetectorSettings) -> Self {
         Self {
+            percussion: settings.percussion,
+            arrangement: settings.arrangement,
+            bin_gains: settings.bin_gains,
+            onset_revision: 3,
             band_onset: settings.band_onset.to_vec(),
             excess: settings.excess,
+            kick_low_hz: settings.kick_low_hz,
+            kick_high_hz: settings.kick_high_hz,
             legacy_band_flux: Vec::new(),
             legacy_flux_attack: 0.0,
             legacy_flux_release: 0.0,
@@ -1605,8 +2182,7 @@ pub struct DetectorEvents {
     pub gap_entry: bool,
 }
 
-/// One onset tracker recipe. Each composite detector keeps its own copy for
-/// the kernel-projected flow.
+/// Legacy envelope recipe retained in the public configuration API.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FluxSettings {
     pub attack: f32,
@@ -1635,19 +2211,9 @@ impl Default for FluxSettings {
     }
 }
 
-/// One composite detector's onset recipe: the kernel that excites it, the
-/// weight of the inverted-kernel inhibition, and the tracker that turns the
-/// residual flow into onsets.
-#[derive(Clone, Copy, Debug)]
-struct OnsetRecipe {
-    kernel: [f32; BAND_COUNT],
-    suppression: f32,
-    pre_gain: f32,
-    tracker: FluxSettings,
-}
-
 /// One composite projection: the inverted-kernel flow, the part of it the
 /// suppression weight subtracts, and the residual that reaches the tracker.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default)]
 struct OnsetProjection {
     /// Inverted-kernel weighted onset flow after pre-gain, before suppression.
@@ -1658,416 +2224,6 @@ struct OnsetProjection {
     residual: f32,
 }
 
-impl OnsetRecipe {
-    /// Projects the per-band onset flow onto the kernel and subtracts the flow
-    /// selected by the inverted kernel. The residual is the transient that
-    /// belongs to this instrument rather than to the rest of the mix.
-    fn project(&self, tracked: &[f32; BAND_COUNT]) -> OnsetProjection {
-        let excited = kernel_projection(&self.kernel, tracked) * self.pre_gain;
-        let inverted: [f32; BAND_COUNT] = std::array::from_fn(|band| 1.0 - self.kernel[band]);
-        let inhibition = kernel_projection(&inverted, tracked) * self.pre_gain;
-        let suppressed = self.suppression * inhibition;
-        OnsetProjection {
-            inhibition,
-            suppressed,
-            residual: (excited - suppressed).max(0.0),
-        }
-    }
-}
-
-/// One peak of the smoothed onset flow and the time it was seen.
-#[derive(Clone, Copy, Debug)]
-struct OnsetPeak {
-    at: f32,
-    amplitude: f32,
-}
-
-/// Median amplitude of the onset peaks inside a rolling time window.
-///
-/// The median ignores a single loud crash, so the threshold follows the
-/// track's typical onset amplitude instead of its loudest moment. When the
-/// window is empty the tracker falls back to its absolute threshold.
-#[derive(Debug)]
-struct PeakMedianWindow {
-    peaks: VecDeque<OnsetPeak>,
-    scratch: Vec<f32>,
-    median: Option<f32>,
-}
-
-impl Default for PeakMedianWindow {
-    fn default() -> Self {
-        Self {
-            peaks: VecDeque::with_capacity(PEAK_WINDOW_CAPACITY),
-            scratch: Vec::with_capacity(PEAK_WINDOW_CAPACITY),
-            median: None,
-        }
-    }
-}
-
-impl PeakMedianWindow {
-    /// Drops the peaks that left the window and records the peak that appeared
-    /// on this hop.
-    fn advance(&mut self, now: f32, peak_at: f32, window: f32, candidate: Option<f32>) {
-        let mut changed = self.prune(now, window);
-        if let Some(amplitude) = candidate {
-            self.peaks.push_back(OnsetPeak {
-                at: peak_at,
-                amplitude,
-            });
-            changed = true;
-        }
-        if changed {
-            self.update();
-        }
-    }
-
-    fn prune(&mut self, now: f32, window: f32) -> bool {
-        let mut changed = false;
-        while let Some(peak) = self.peaks.front() {
-            if now - peak.at <= window {
-                break;
-            }
-            self.peaks.pop_front();
-            changed = true;
-        }
-        changed
-    }
-
-    fn update(&mut self) {
-        if self.peaks.is_empty() {
-            self.median = None;
-            return;
-        }
-        self.scratch.clear();
-        self.scratch
-            .extend(self.peaks.iter().map(|peak| peak.amplitude));
-        let middle = self.scratch.len() / 2;
-        let (_, median, _) = self.scratch.select_nth_unstable_by(middle, f32::total_cmp);
-        self.median = Some(*median);
-    }
-
-    fn clear(&mut self) {
-        self.peaks.clear();
-        self.median = None;
-    }
-}
-
-/// Where a composite detector's onset threshold comes from.
-#[derive(Debug)]
-enum OnsetReference {
-    /// Slow mean of the smoothed flow. The drop detector keeps this reference
-    /// until its own onset story is revisited.
-    FluxLevel(f32),
-    /// Median of the recent onset peaks. Kick, snare, and hi-hat use this
-    /// reference so the threshold follows the track's own onset amplitude.
-    PeakMedian(PeakMedianWindow),
-}
-
-impl OnsetReference {
-    fn value(&self) -> Option<f32> {
-        match self {
-            Self::FluxLevel(average) => Some(*average),
-            Self::PeakMedian(window) => window.median,
-        }
-    }
-
-    fn advance(
-        &mut self,
-        smoothed: f32,
-        now: f32,
-        dt: f32,
-        settings: &FluxSettings,
-        candidate: Option<f32>,
-    ) {
-        match self {
-            Self::FluxLevel(average) => {
-                let alpha = (-dt / settings.average).exp();
-                *average = alpha * *average + (1.0 - alpha) * smoothed;
-            }
-            Self::PeakMedian(window) => {
-                window.advance(now, now - dt, settings.average, candidate);
-            }
-        }
-    }
-
-    /// Strength of a confirmed onset relative to the reference that judged it.
-    fn power(&self, peak: f32, threshold: f32) -> f32 {
-        match self {
-            // The drop detector keeps reporting strength over its threshold.
-            Self::FluxLevel(_) => peak / threshold.max(1e-6),
-            // A track-relative strength of one is the typical onset amplitude.
-            Self::PeakMedian(window) => match window.median {
-                Some(reference) if reference > 0.0 => peak / reference,
-                _ => 1.0,
-            },
-        }
-    }
-
-    fn reset(&mut self) {
-        match self {
-            Self::FluxLevel(average) => *average = 0.0,
-            Self::PeakMedian(window) => window.clear(),
-        }
-    }
-}
-
-/// One composite detector's onset tracker.
-///
-/// The attack/release envelope turns the projected flow into a peaky signal.
-/// The threshold is `max(reference * sensitivity, min_threshold)`. The peak
-/// test uses the threshold from the previous hop, so a peak cannot raise its
-/// own bar.
-#[derive(Debug)]
-struct FluxTracker {
-    raw: f32,
-    smoothed: f32,
-    reference: OnsetReference,
-    previous_smoothed: f32,
-    before_previous_smoothed: f32,
-    threshold: f32,
-    last_onset: f32,
-    primed: bool,
-}
-
-impl Default for FluxTracker {
-    /// Kick, snare, and hi-hat start on the peak-median reference.
-    fn default() -> Self {
-        Self::with_reference(OnsetReference::PeakMedian(PeakMedianWindow::default()))
-    }
-}
-
-impl FluxTracker {
-    /// The drop detector keeps the flux-level reference.
-    fn level() -> Self {
-        Self::with_reference(OnsetReference::FluxLevel(0.0))
-    }
-
-    fn with_reference(reference: OnsetReference) -> Self {
-        Self {
-            raw: 0.0,
-            smoothed: 0.0,
-            reference,
-            previous_smoothed: 0.0,
-            before_previous_smoothed: 0.0,
-            threshold: 0.0,
-            last_onset: 0.0,
-            primed: false,
-        }
-    }
-
-    fn observe(&mut self, flux: f32, now: f32, dt: f32, settings: &FluxSettings) -> Option<f32> {
-        self.raw = flux;
-        if !self.primed {
-            self.smoothed = flux;
-            self.previous_smoothed = flux;
-            self.before_previous_smoothed = flux;
-            if let OnsetReference::FluxLevel(average) = &mut self.reference {
-                *average = flux;
-            }
-            self.threshold = self.reference_threshold(settings);
-            self.last_onset = f32::NEG_INFINITY;
-            self.primed = true;
-            return None;
-        }
-        let attack_alpha = (-dt / settings.attack).exp();
-        let release_alpha = (-dt / settings.release).exp();
-        let alpha = if flux > self.smoothed {
-            attack_alpha
-        } else {
-            release_alpha
-        };
-        self.smoothed = alpha * self.smoothed + (1.0 - alpha) * flux;
-
-        let previous = self.previous_smoothed;
-        let threshold = self.threshold;
-        let local_peak = previous >= self.before_previous_smoothed && previous > self.smoothed;
-        let onset = local_peak
-            && previous >= threshold
-            && now - dt - self.last_onset >= settings.min_interval;
-        let power = if onset {
-            self.last_onset = now - dt;
-            Some(self.reference.power(previous, threshold))
-        } else {
-            None
-        };
-        let candidate = (local_peak && previous >= settings.min_threshold).then_some(previous);
-        self.reference
-            .advance(self.smoothed, now, dt, settings, candidate);
-        self.threshold = self.reference_threshold(settings);
-        self.before_previous_smoothed = previous;
-        self.previous_smoothed = self.smoothed;
-        power
-    }
-
-    fn reference_threshold(&self, settings: &FluxSettings) -> f32 {
-        let reference = self.reference.value().unwrap_or(0.0);
-        (reference * settings.sensitivity).max(settings.min_threshold)
-    }
-
-    fn reset(&mut self) {
-        self.raw = 0.0;
-        self.smoothed = 0.0;
-        self.reference.reset();
-        self.previous_smoothed = 0.0;
-        self.before_previous_smoothed = 0.0;
-        self.threshold = 0.0;
-        self.last_onset = 0.0;
-        self.primed = false;
-    }
-}
-
-#[derive(Debug, Default)]
-struct KickTracker {
-    onset: FluxTracker,
-    choked_until: f32,
-    flash: f32,
-    last_power: f32,
-}
-
-impl KickTracker {
-    fn observe(&mut self, flux: f32, now: f32, dt: f32, settings: &FluxSettings) -> Option<f32> {
-        self.flash *= (-dt * FLASH_DECAY).exp();
-        let onset = self.onset.observe(flux, now, dt, settings);
-        if now < self.choked_until {
-            return None;
-        }
-        let power = onset?;
-        self.flash = 1.0;
-        self.last_power = power;
-        Some(power)
-    }
-
-    fn choke(&mut self, now: f32, duration: f32) {
-        self.choked_until = self.choked_until.max(now + duration);
-    }
-
-    fn reset(&mut self) {
-        *self = Self::default();
-    }
-}
-
-#[derive(Debug, Default)]
-struct SnareTracker {
-    onset: FluxTracker,
-    flash: f32,
-    last_power: f32,
-}
-
-impl SnareTracker {
-    /// Runs the onset tracker without emitting a trigger; the caller decides
-    /// whether the absolute gate lets the trigger through.
-    fn observe(&mut self, flux: f32, now: f32, dt: f32, settings: &FluxSettings) -> Option<f32> {
-        self.flash *= (-dt * FLASH_DECAY).exp();
-        self.onset.observe(flux, now, dt, settings)
-    }
-
-    /// Publishes a trigger that passed its gate.
-    fn emit(&mut self, power: f32) {
-        self.flash = 1.0;
-        self.last_power = power;
-    }
-
-    fn reset(&mut self) {
-        *self = Self::default();
-    }
-}
-
-/// Converts a linear RMS value to dBFS, clamped at the silence floor.
-fn rms_to_db(rms: f32) -> f32 {
-    (20.0 * rms.max(1e-9).log10()).max(GAP_DB_FLOOR)
-}
-
-#[derive(Debug)]
-struct DropTracker {
-    onset: FluxTracker,
-    /// Smoothed linear RMS.
-    envelope: f32,
-    envelope_ready: bool,
-    rms_db: f32,
-    envelope_db: f32,
-    /// Latches high while the envelope is below the gap gate; a composite
-    /// onset clears it.
-    eligible: bool,
-    /// Whether this hop crossed from unarmed to armed.
-    gap_entry: bool,
-    flash: f32,
-    last_power: f32,
-}
-
-impl Default for DropTracker {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl DropTracker {
-    fn new() -> Self {
-        Self {
-            onset: FluxTracker::level(),
-            envelope: 0.0,
-            envelope_ready: false,
-            rms_db: GAP_DB_FLOOR,
-            envelope_db: GAP_DB_FLOOR,
-            eligible: false,
-            gap_entry: false,
-            flash: 0.0,
-            last_power: 0.0,
-        }
-    }
-
-    fn observe(
-        &mut self,
-        now: f32,
-        rms: f32,
-        onset_flux: f32,
-        settings: &DetectorSettings,
-        dt: f32,
-    ) -> Option<f32> {
-        self.flash *= (-dt * FLASH_DECAY).exp();
-        self.rms_db = rms_to_db(rms);
-        if self.envelope_ready {
-            let tau = if rms > self.envelope {
-                GAP_ENVELOPE_ATTACK
-            } else {
-                GAP_ENVELOPE_RELEASE
-            };
-            let alpha = (-dt / tau).exp();
-            self.envelope = alpha * self.envelope + (1.0 - alpha) * rms;
-        } else {
-            self.envelope = rms;
-            self.envelope_ready = true;
-        }
-        self.envelope_db = rms_to_db(self.envelope);
-        // The gate latches below the threshold: the confirming onset usually
-        // arrives after the level has already started to rise again.
-        let was_eligible = self.eligible;
-        self.eligible |= self.envelope_db < settings.drop_gap_threshold;
-        self.gap_entry = !was_eligible && self.eligible;
-
-        let onset_settings = settings.drop_onset_recipe().tracker;
-        let power = self.onset.observe(onset_flux, now, dt, &onset_settings)?;
-        if !self.eligible {
-            return None;
-        }
-        self.eligible = false;
-        self.flash = 1.0;
-        self.last_power = power;
-        Some(power)
-    }
-
-    fn reset(&mut self) {
-        self.onset.reset();
-        self.envelope = 0.0;
-        self.envelope_ready = false;
-        self.rms_db = GAP_DB_FLOOR;
-        self.envelope_db = GAP_DB_FLOOR;
-        self.eligible = false;
-        self.gap_entry = false;
-        self.flash = 0.0;
-        self.last_power = 0.0;
-    }
-}
-
 /// All per-band trackers and the four confirmed detectors. One `observe` call
 /// advances the state by one analysis hop.
 pub struct OnsetBank {
@@ -2076,18 +2232,11 @@ pub struct OnsetBank {
     band_abl: [f32; BAND_COUNT],
     band_drp: [f32; BAND_COUNT],
     band_onset: [f32; BAND_COUNT],
-    /// Newest per-hop onset flows, used by the temporal kick, snare, and
-    /// hi-hat templates.
+    /// Recent per-band flow retained for the analyzer's history diagnostics.
     onset_history: VecDeque<[f32; BAND_COUNT]>,
-    kick: KickTracker,
-    snare: SnareTracker,
-    hat: SnareTracker,
+    sharp: SharpOnsets,
     drop: DropTracker,
-    kick_projection: OnsetProjection,
-    snare_projection: OnsetProjection,
-    hat_projection: OnsetProjection,
-    drop_projection: OnsetProjection,
-    time: f32,
+    time: f64,
 }
 
 impl Default for OnsetBank {
@@ -2105,23 +2254,13 @@ impl OnsetBank {
             band_drp: [0.0; BAND_COUNT],
             band_onset: [0.0; BAND_COUNT],
             onset_history: VecDeque::with_capacity(PATTERN_MAX_STEPS),
-            kick: KickTracker::default(),
-            snare: SnareTracker::default(),
-            hat: SnareTracker::default(),
+            sharp: SharpOnsets::default(),
             drop: DropTracker::default(),
-            kick_projection: OnsetProjection::default(),
-            snare_projection: OnsetProjection::default(),
-            hat_projection: OnsetProjection::default(),
-            drop_projection: OnsetProjection::default(),
             time: 0.0,
         }
     }
 
-    /// Feeds one analysis hop. The continuous per-band onset flow is appended
-    /// to the pattern history; kick, snare, and hi-hat match their temporal
-    /// templates
-    /// against it, while drop projects the current flow through its onset
-    /// kernel. Each composite detector then tracks its own onsets.
+    /// Feed one causal analysis hop to the percussion and arrangement detectors.
     pub fn observe(
         &mut self,
         spectrum: &Spectrum,
@@ -2130,7 +2269,7 @@ impl OnsetBank {
         settings: &DetectorSettings,
         dt: f32,
     ) -> DetectorEvents {
-        self.time += dt;
+        self.time += f64::from(dt);
         let wsdr = band_abdr.iter().sum::<f32>() / BAND_COUNT as f32;
         for band in 0..BAND_COUNT {
             let drp = if wsdr > 1e-6 {
@@ -2148,75 +2287,43 @@ impl OnsetBank {
             self.onset_history.pop_front();
         }
         self.onset_history.push_back(self.band_onset);
-        let tracked = self.band_onset;
-        let pattern_steps = (0.5 / dt).floor().max(1.0) as usize;
+        DetectorEvents {
+            drop: self.drop.observe(spectrum, self.time, dt, settings),
+            gap_entry: self.drop.gap_entry,
+            ..DetectorEvents::default()
+        }
+    }
 
-        let mut events = DetectorEvents::default();
-        let snare_projection = settings.snare_pattern.project(
-            &self.onset_history,
-            settings.snare_onset_suppression,
-            settings.snare_onset_pre_gain,
-            pattern_steps,
-        );
-        self.snare_projection = snare_projection;
-        let rms_db = rms_to_db(spectrum.rms);
-        if let Some(snare) = self.snare.observe(
-            snare_projection.residual,
-            self.time,
-            dt,
-            &settings.snare_onset_tracker(),
-        ) {
-            if rms_db >= settings.snare_min_rms_db {
-                self.snare.emit(snare);
-                events.snare = Some(snare);
-                self.kick.choke(self.time, settings.snare_choke);
-            }
-        }
-        let hat_projection = settings.hat_pattern.project(
-            &self.onset_history,
-            settings.hat_onset_suppression,
-            settings.hat_onset_pre_gain,
-            pattern_steps,
-        );
-        self.hat_projection = hat_projection;
-        if let Some(hat) = self.hat.observe(
-            hat_projection.residual,
-            self.time,
-            dt,
-            &settings.hat_onset_tracker(),
-        ) {
-            self.hat.emit(hat);
-            events.hat = Some(hat);
-        }
-        let drop_recipe = settings.drop_onset_recipe();
-        let drop_projection = drop_recipe.project(&tracked);
-        self.drop_projection = drop_projection;
-        let drop = self.drop.observe(
-            self.time,
-            spectrum.rms,
-            drop_projection.residual,
-            settings,
-            dt,
-        );
-        events.gap_entry = self.drop.gap_entry;
-        if let Some(drop) = drop {
-            events.drop = Some(drop);
-            self.kick.choke(self.time, settings.kick_drop_choke);
-        }
-        let kick_projection = settings.kick_pattern.project(
-            &self.onset_history,
-            settings.kick_onset_suppression,
-            settings.kick_onset_pre_gain,
-            pattern_steps,
-        );
-        self.kick_projection = kick_projection;
-        events.kick = self.kick.observe(
-            kick_projection.residual,
-            self.time,
-            dt,
-            &settings.kick_onset_tracker(),
-        );
-        events
+    /// Independent fast branch; arrangement history advances only in `observe`.
+    pub fn observe_percussion(
+        &mut self,
+        frame: &PercussionFrame,
+        settings: &DetectorSettings,
+    ) -> DetectorEvents {
+        self.sharp
+            .observe_percussion(frame, frame.at, &settings.percussion)
+    }
+
+    pub fn percussion_decisions(&self) -> &VecDeque<super::percussion::PercussionDecision> {
+        self.sharp.decisions()
+    }
+
+    pub fn percussion_reference(
+        &self,
+        channel: usize,
+    ) -> super::percussion::PercussionReferenceSnapshot {
+        self.sharp.reference(channel)
+    }
+
+    pub fn reset_percussion(&mut self) {
+        self.sharp.reset_features();
+    }
+
+    pub fn percussion_channel_status(
+        &self,
+        channel: usize,
+    ) -> super::percussion::PercussionChannelStatus {
+        self.sharp.channel_status(channel)
     }
 
     pub fn reset(&mut self) {
@@ -2226,14 +2333,8 @@ impl OnsetBank {
         self.band_drp = [0.0; BAND_COUNT];
         self.band_onset = [0.0; BAND_COUNT];
         self.onset_history.clear();
-        self.kick.reset();
-        self.snare.reset();
-        self.hat.reset();
+        self.sharp = SharpOnsets::default();
         self.drop.reset();
-        self.kick_projection = OnsetProjection::default();
-        self.snare_projection = OnsetProjection::default();
-        self.hat_projection = OnsetProjection::default();
-        self.drop_projection = OnsetProjection::default();
         self.time = 0.0;
     }
 
@@ -2250,27 +2351,9 @@ impl OnsetBank {
                 abl: self.band_abl[index],
                 drp: self.band_drp[index],
             }),
-            kick: TriggerStatus {
-                flash: self.kick.flash,
-                power: self.kick.last_power,
-                count: 0,
-                armed: false,
-                choked: self.time < self.kick.choked_until,
-            },
-            snare: TriggerStatus {
-                flash: self.snare.flash,
-                power: self.snare.last_power,
-                count: 0,
-                armed: false,
-                choked: false,
-            },
-            hat: TriggerStatus {
-                flash: self.hat.flash,
-                power: self.hat.last_power,
-                count: 0,
-                armed: false,
-                choked: false,
-            },
+            kick: self.sharp.triggers()[0],
+            snare: self.sharp.triggers()[1],
+            hat: self.sharp.triggers()[2],
             drop: TriggerStatus {
                 flash: self.drop.flash,
                 power: self.drop.last_power,
@@ -2278,26 +2361,11 @@ impl OnsetBank {
                 armed: self.drop.eligible,
                 choked: false,
             },
-            kick_flux: onset_flux_status(&self.kick.onset, self.kick_projection),
-            snare_flux: onset_flux_status(&self.snare.onset, self.snare_projection),
-            hat_flux: onset_flux_status(&self.hat.onset, self.hat_projection),
-            drop_status: DropStatus {
-                rms_db: self.drop.rms_db,
-                envelope_db: self.drop.envelope_db,
-                onset: onset_flux_status(&self.drop.onset, self.drop_projection),
-            },
+            kick_flux: self.sharp.fluxes()[0],
+            snare_flux: self.sharp.fluxes()[1],
+            hat_flux: self.sharp.fluxes()[2],
+            drop_status: self.drop.status,
         }
-    }
-}
-
-fn onset_flux_status(tracker: &FluxTracker, projection: OnsetProjection) -> OnsetFluxStatus {
-    OnsetFluxStatus {
-        flux: tracker.raw,
-        smoothed: tracker.smoothed,
-        reference: tracker.reference.value(),
-        threshold: tracker.threshold,
-        inhibition: projection.inhibition,
-        suppressed: projection.suppressed,
     }
 }
 
@@ -2334,29 +2402,134 @@ impl TriggerStatus {
     };
 }
 
-/// Drop state behind the trigger: the RMS level and its envelope, the gap gate,
-/// and the composite onset tracker.
-#[derive(Clone, Copy, Debug, Default)]
+/// The arrangement tracker's spectrum, trend, energy, and bass-hit evidence.
+#[derive(Clone, Copy, Debug)]
 pub struct DropStatus {
     /// Analysis-window RMS in dBFS.
     pub rms_db: f32,
     /// Smoothed RMS envelope in dBFS.
     pub envelope_db: f32,
+    /// Level-normalized log spectrum, centered and scaled by 24 dB.
+    pub shape: [f32; BAND_COUNT],
+    pub reference_shape: [f32; BAND_COUNT],
+    pub shape_distance: f32,
+    pub trend_change: f32,
+    pub changed_fraction: f32,
+    /// Spectral requirements used for this hop, retained with historical values.
+    pub shape_distance_threshold: f32,
+    pub trend_change_threshold: f32,
+    pub changed_fraction_threshold: f32,
+    /// Current envelope relative to the remembered active section.
+    pub energy_delta_db: f32,
+    /// Required relative energy loss at this analysis hop, as a positive dB value.
+    pub mix_loss_threshold_db: f32,
+    /// Independent mix-loss requirement and its continuous timer at this hop.
+    pub mix_loss_hold_seconds: f32,
+    pub mix_loss_held_seconds: f32,
+    pub mix_loss_condition_met: bool,
+    /// Relative gap-start condition, including history and the silence exception.
+    pub gap_conditions_met: bool,
+    /// Configured continuous hold and the tracker's accumulated quiet time.
+    pub gap_hold_seconds: f32,
+    pub gap_held_seconds: f32,
+    /// Independent absolute RMS requirement and continuous timer at this hop.
+    pub gap_rms_threshold_db: f32,
+    pub gap_rms_hold_seconds: f32,
+    pub gap_rms_held_seconds: f32,
+    pub gap_rms_condition_met: bool,
+    pub gap_history_ready: bool,
+    /// Time until another drop may fire; relative gap arming also respects this interval.
+    pub gap_cooldown_remaining: f32,
+    /// Configured overall RMS floor for confirming a bass return.
+    pub drop_rms_threshold_db: f32,
+    /// Fast and slow envelopes of the weighted LF magnitude.
+    pub bass_fast_db: f32,
+    pub bass_slow_db: f32,
+    /// Time constants used for the LF envelope measurements at this hop.
+    pub bass_fast_seconds: f32,
+    pub bass_slow_seconds: f32,
+    /// Minimum fast envelope level needed to clear the configured onset fraction.
+    pub bass_onset_threshold_db: f32,
+    /// A current LF rise that began after this gap was confirmed.
+    pub bass_onset_ready: bool,
+    /// Positive fraction of the fast LF envelope above the slow envelope.
+    pub bass_hit: f32,
+    pub hit_threshold: f32,
+    pub quiet_progress: f32,
     pub onset: OnsetFluxStatus,
 }
 
-/// Raw, smoothed, and adaptive-threshold values from one composite onset
-/// tracker, plus the suppression flux it subtracts.
+impl Default for DropStatus {
+    fn default() -> Self {
+        let tuning = ArrangementSettings::default();
+        Self {
+            rms_db: -80.0,
+            envelope_db: -80.0,
+            shape: [0.0; BAND_COUNT],
+            reference_shape: [0.0; BAND_COUNT],
+            shape_distance: 0.0,
+            trend_change: 0.0,
+            changed_fraction: 0.0,
+            shape_distance_threshold: tuning.shape_distance,
+            trend_change_threshold: tuning.trend_change,
+            changed_fraction_threshold: tuning.changed_fraction,
+            energy_delta_db: 0.0,
+            mix_loss_threshold_db: tuning.mix_loss_db,
+            mix_loss_hold_seconds: tuning.mix_loss_hold,
+            mix_loss_held_seconds: 0.0,
+            mix_loss_condition_met: false,
+            gap_conditions_met: false,
+            gap_hold_seconds: tuning.gap_hold,
+            gap_held_seconds: 0.0,
+            gap_rms_threshold_db: tuning.gap_rms_db,
+            gap_rms_hold_seconds: tuning.gap_rms_hold,
+            gap_rms_held_seconds: 0.0,
+            gap_rms_condition_met: false,
+            gap_history_ready: false,
+            gap_cooldown_remaining: 0.0,
+            drop_rms_threshold_db: tuning.drop_min_rms_db,
+            bass_fast_db: -80.0,
+            bass_slow_db: -80.0,
+            bass_fast_seconds: tuning.bass_fast_time,
+            bass_slow_seconds: tuning.bass_slow_time,
+            bass_onset_threshold_db: -80.0,
+            bass_onset_ready: false,
+            bass_hit: 0.0,
+            hit_threshold: 0.12,
+            quiet_progress: 0.0,
+            onset: OnsetFluxStatus {
+                threshold: 0.12,
+                ..OnsetFluxStatus::default()
+            },
+        }
+    }
+}
+
+/// Attack score and adaptive decision threshold. `smoothed` is a short peak
+/// hold for display only; it never delays or causes an onset.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct OnsetFluxStatus {
+    /// Winsorized attack score actually admitted to the adaptive average.
+    pub adaptation_input: f32,
+    /// Short display-only peak hold of that input, preserving attacks between frames.
+    pub adaptation_input_peak: f32,
+    /// Causal components used to decide this hop's threshold.
+    pub baseline: f32,
+    pub deviation: f32,
+    pub sensitivity_margin: f32,
+    pub minimum_threshold: f32,
+    /// Fraction of the detector region that is new in this short hop.
+    pub sharpness: f32,
+    /// Significant frequency area participating in the attack.
+    pub coverage: f32,
+    /// Whether current energy and region validation permit an onset.
+    pub mix_gate: bool,
     pub flux: f32,
     pub smoothed: f32,
-    /// Median of the recent onset peaks, or the slow flux level for the drop
-    /// detector. Threshold is derived from it; `None` before the reference has
-    /// any data.
+    /// Running attack reference; `None` before it has data.
     pub reference: Option<f32>,
     pub threshold: f32,
-    /// Inverted-kernel weighted tracked flux before the suppression weight.
+    /// Legacy diagnostics, zero for the new classifiers.
     pub inhibition: f32,
     /// What the suppression weight subtracts from the excitation.
     pub suppressed: f32,
@@ -2493,43 +2666,366 @@ impl Spring {
 mod tests {
     use super::*;
 
+    #[test]
+    fn bin_gain_edits_are_local_and_interpolate_on_a_different_fft_grid() {
+        let mut profile = FrequencyGainProfile::default();
+        for frequency in [0.0, 50.0, 100.0, 2000.0, 192_000.0] {
+            assert_eq!(profile.gain_at(frequency), 1.0);
+        }
+        profile.set_bin(BinAddress::new(100.0, 50.0), 0.25);
+        assert_eq!(profile.gain_at(50.0), 1.0);
+        assert_eq!(profile.gain_at(100.0), 0.25);
+        assert_eq!(profile.gain_at(150.0), 1.0);
+        assert_eq!(profile.gain_at(0.0), 1.0);
+        assert_eq!(profile.gain_at(200.0), 1.0);
+        assert!((profile.gain_at(125.0) - 0.625).abs() < 1e-6);
+
+        profile.set_bin(BinAddress::new(150.0, 50.0), 0.5);
+        assert_eq!(
+            profile.gain_at(100.0),
+            0.25,
+            "an adjacent edit preserves the earlier bin"
+        );
+        assert_eq!(profile.gain_at(150.0), 0.5);
+        assert_eq!(profile.gain_at(200.0), 1.0);
+        assert!(
+            (profile.gain_at(125.0) - 0.375).abs() < 1e-6,
+            "a new FFT grid samples the same frequency curve"
+        );
+
+        profile.set_bin(BinAddress::new(125.0, 25.0), 0.0);
+        assert_eq!(profile.gain_at(100.0), 0.25);
+        assert_eq!(profile.gain_at(125.0), 0.0);
+        assert_eq!(profile.gain_at(150.0), 0.5);
+        profile.validate().unwrap();
+        assert!(profile
+            .points
+            .windows(2)
+            .all(|pair| pair[0].hz < pair[1].hz));
+    }
+
+    #[test]
+    fn bin_gain_channels_are_independent_and_reset_to_unity() {
+        let address = BinAddress::new(140.625, 46.875);
+        assert_eq!(address.center_millihz, 140_625);
+        assert_eq!(address.width_millihz, 46_875);
+        assert_eq!(BinAddress::new(f32::NAN, 0.0), BinAddress::default());
+        let mut profiles = PercussionBinGains::default();
+        profiles.set_bin(0, address, 0.0);
+        profiles.set_bin(1, address, 0.4);
+        assert_eq!(profiles.value(0, address), 0.0);
+        assert_eq!(profiles.value(1, address), 0.4);
+        assert_eq!(profiles.value(2, address), 1.0);
+        profiles.set_bin(0, address, f32::NAN);
+        assert_eq!(profiles.value(0, address), 0.0);
+        profiles.reset(0);
+        assert_eq!(profiles.value(0, address), 1.0);
+        assert_eq!(profiles.value(1, address), 0.4);
+        profiles.validate().unwrap();
+    }
+
+    #[test]
+    fn bin_gain_settings_default_for_old_configs_and_roundtrip_custom_curves() {
+        for saved in ["()", "(onset_revision:2)"] {
+            let restored: DetectorSettings = ron::from_str(saved).unwrap();
+            assert_eq!(restored.bin_gains, PercussionBinGains::default());
+        }
+        let mut settings = DetectorSettings::default();
+        settings
+            .bin_gains
+            .set_bin(0, BinAddress::new(140.625, 46.875), 0.2);
+        settings
+            .bin_gains
+            .set_bin(2, BinAddress::new(6012.0, 43.066), 0.0);
+        let encoded = ron::to_string(&settings).unwrap();
+        let decoded: DetectorSettings = ron::from_str(&encoded).unwrap();
+        assert_eq!(decoded, settings);
+        for invalid in [
+            "(bin_gains:(kick:(points:[(hz:100.0,gain:1.1)])))",
+            "(bin_gains:(kick:(points:[(hz:100.0,gain:-0.1)])))",
+            "(bin_gains:(kick:(points:[(hz:NaN,gain:1.0)])))",
+            "(bin_gains:(hat:(points:[(hz:100.0,gain:NaN)])))",
+            "(bin_gains:(snare:(points:[(hz:-1.0,gain:1.0)])))",
+            "(bin_gains:(snare:(points:[(hz:192001.0,gain:1.0)])))",
+            "(bin_gains:(kick:(points:[(hz:100.0,gain:0.0),(hz:100.0,gain:1.0)])))",
+            "(bin_gains:(kick:(points:[(hz:200.0,gain:0.0),(hz:100.0,gain:1.0)])))",
+        ] {
+            assert!(
+                ron::from_str::<DetectorSettings>(invalid).is_err(),
+                "{invalid}"
+            );
+        }
+        let too_large = FrequencyGainProfile {
+            points: (0..=BIN_GAIN_MAX_POINTS)
+                .map(|i| BinGainPoint {
+                    hz: i as f32,
+                    gain: 1.0,
+                })
+                .collect(),
+        };
+        assert!(too_large.validate().is_err());
+    }
+
+    #[test]
+    fn arrangement_controls_default_for_old_configs_and_preserve_custom_values() {
+        let legacy: DetectorSettings = ron::from_str("() ").unwrap();
+        assert_eq!(legacy.arrangement, ArrangementSettings::default());
+        let mut tuned = legacy;
+        for setting in ArrangementSetting::ALL {
+            let (low, high) = setting.range();
+            tuned.arrangement.set(setting, low + (high - low) * 0.7);
+        }
+        let saved = ron::to_string(&tuned).unwrap();
+        let restored: DetectorSettings = ron::from_str(&saved).unwrap();
+        assert_eq!(restored.arrangement, tuned.arrangement);
+        assert!(ron::from_str::<DetectorSettings>("(arrangement:(gap_hold:0.0))").is_err());
+        assert!(ron::from_str::<DetectorSettings>("(arrangement:(mix_loss_db:NaN))").is_err());
+    }
+
+    #[test]
+    fn independent_mix_loss_hold_defaults_for_old_configs_and_round_trips_custom_values() {
+        for saved in [
+            "()",
+            "(arrangement:(mix_loss_db:3.5,gap_hold:2.0,gap_rms_hold:0.75))",
+        ] {
+            let settings: DetectorSettings = ron::from_str(saved).unwrap();
+            assert_eq!(settings.arrangement.mix_loss_hold, 1.2);
+        }
+        let mut settings: DetectorSettings =
+            ron::from_str("(arrangement:(mix_loss_db:3.5,gap_hold:2.0,gap_rms_hold:0.75))")
+                .unwrap();
+        settings
+            .arrangement
+            .set(ArrangementSetting::MixLossHold, 0.85);
+        assert_eq!(settings.arrangement.mix_loss_db, 3.5);
+        assert_eq!(settings.arrangement.gap_hold, 2.0);
+        assert_eq!(settings.arrangement.gap_rms_hold, 0.75);
+        let saved = ron::to_string(&settings).unwrap();
+        let restored: DetectorSettings = ron::from_str(&saved).unwrap();
+        assert_eq!(restored, settings);
+        assert_eq!(ArrangementSetting::MixLossHold.format(0.85), "850 ms");
+        assert_eq!(ArrangementSetting::MixLossHold.format(1.2), "1.20 s");
+        assert!(ArrangementSetting::MixLossHold.is_time());
+        let status = DropStatus::default();
+        assert_eq!(status.mix_loss_hold_seconds, 1.2);
+        assert_eq!(status.mix_loss_held_seconds, 0.0);
+        assert!(!status.mix_loss_condition_met);
+    }
+
+    #[test]
+    fn independent_mix_loss_hold_validates_ranges_and_ignores_nonfinite_edits() {
+        for saved in [
+            "(arrangement:(mix_loss_hold:0.0))",
+            "(arrangement:(mix_loss_hold:0.049))",
+            "(arrangement:(mix_loss_hold:10.001))",
+            "(arrangement:(mix_loss_hold:NaN))",
+            "(arrangement:(mix_loss_hold:inf))",
+        ] {
+            assert!(ron::from_str::<DetectorSettings>(saved).is_err(), "{saved}");
+        }
+        let mut settings = ArrangementSettings::default();
+        settings.set(ArrangementSetting::MixLossHold, -1.0);
+        assert_eq!(settings.mix_loss_hold, 0.05);
+        settings.set(ArrangementSetting::MixLossHold, 100.0);
+        assert_eq!(settings.mix_loss_hold, 10.0);
+        let saved = settings;
+        settings.set(ArrangementSetting::MixLossHold, f32::NAN);
+        settings.set(ArrangementSetting::MixLossHold, f32::INFINITY);
+        assert_eq!(settings, saved);
+        settings.validate().unwrap();
+    }
+
+    #[test]
+    fn absolute_rms_gap_controls_preserve_old_settings_and_round_trip_custom_values() {
+        for saved in [
+            "()",
+            "(arrangement:(mix_loss_db:0.25,shape_distance:0.01,gap_hold:0.05))",
+        ] {
+            let restored: DetectorSettings = ron::from_str(saved).unwrap();
+            assert_eq!(restored.arrangement.gap_rms_db, -40.0);
+            assert_eq!(restored.arrangement.gap_rms_hold, 0.5);
+        }
+        let restored: DetectorSettings =
+            ron::from_str("(arrangement:(mix_loss_db:0.25,shape_distance:0.01,gap_hold:0.05))")
+                .unwrap();
+        assert_eq!(restored.arrangement.mix_loss_db, 0.25);
+        assert_eq!(restored.arrangement.shape_distance, 0.01);
+        assert_eq!(restored.arrangement.gap_hold, 0.05);
+
+        let mut settings = restored;
+        settings
+            .arrangement
+            .set(ArrangementSetting::GapRmsDb, -33.0);
+        settings
+            .arrangement
+            .set(ArrangementSetting::GapRmsHold, 0.75);
+        let encoded = ron::to_string(&settings).unwrap();
+        let decoded: DetectorSettings = ron::from_str(&encoded).unwrap();
+        assert_eq!(decoded, settings);
+        assert_eq!(ArrangementSetting::GapRmsDb.format(-33.0), "-33.0 dB");
+        assert_eq!(ArrangementSetting::GapRmsHold.format(0.75), "750 ms");
+        assert!(ArrangementSetting::GapRmsHold.is_time());
+        assert!(!ArrangementSetting::GapRmsDb.is_time());
+    }
+
+    #[test]
+    fn absolute_rms_gap_controls_validate_ranges_and_ignore_nonfinite_edits() {
+        for saved in [
+            "(arrangement:(gap_rms_db:-81.0))",
+            "(arrangement:(gap_rms_db:0.1))",
+            "(arrangement:(gap_rms_db:NaN))",
+            "(arrangement:(gap_rms_hold:0.0))",
+            "(arrangement:(gap_rms_hold:10.1))",
+            "(arrangement:(gap_rms_hold:inf))",
+        ] {
+            assert!(ron::from_str::<DetectorSettings>(saved).is_err(), "{saved}");
+        }
+        let mut settings = ArrangementSettings::default();
+        settings.set(ArrangementSetting::GapRmsDb, -100.0);
+        settings.set(ArrangementSetting::GapRmsHold, 100.0);
+        assert_eq!(settings.gap_rms_db, -80.0);
+        assert_eq!(settings.gap_rms_hold, 10.0);
+        let saved = settings;
+        settings.set(ArrangementSetting::GapRmsDb, f32::NAN);
+        settings.set(ArrangementSetting::GapRmsHold, f32::INFINITY);
+        assert_eq!(settings, saved);
+        settings.validate().unwrap();
+    }
+
+    #[test]
+    fn lf_envelope_controls_default_for_saved_configs_and_round_trip_custom_times() {
+        for saved in ["()", "(arrangement:(gap_hold:0.05,bass_hit_threshold:0.1))"] {
+            let settings: DetectorSettings = ron::from_str(saved).unwrap();
+            assert_eq!(settings.arrangement.bass_fast_time, 0.020);
+            assert_eq!(settings.arrangement.bass_slow_time, 0.250);
+        }
+        let mut settings = DetectorSettings::default();
+        settings
+            .arrangement
+            .set(ArrangementSetting::BassFastTime, 0.010);
+        settings
+            .arrangement
+            .set(ArrangementSetting::BassSlowTime, 0.125);
+        let encoded = ron::to_string(&settings).unwrap();
+        let decoded: DetectorSettings = ron::from_str(&encoded).unwrap();
+        assert_eq!(decoded, settings);
+        assert_eq!(ArrangementSetting::BassFastTime.format(0.010), "10 ms");
+        assert_eq!(ArrangementSetting::BassSlowTime.format(0.125), "125 ms");
+        assert!(ArrangementSetting::BassFastTime.is_time());
+        assert!(ArrangementSetting::BassSlowTime.is_time());
+        let defaults = DropStatus::default();
+        assert_eq!(defaults.bass_fast_seconds, 0.020);
+        assert_eq!(defaults.bass_slow_seconds, 0.250);
+    }
+
+    #[test]
+    fn lf_envelope_controls_keep_the_edited_time_separated_and_validate_saved_pairs() {
+        let mut settings = ArrangementSettings::default();
+        settings.set(ArrangementSetting::BassSlowTime, 0.020);
+        assert_eq!(settings.bass_fast_time, 0.020);
+        assert_eq!(settings.bass_slow_time, settings.bass_fast_time + 0.005);
+        settings.validate().unwrap();
+        let slow_before_edit = settings.bass_slow_time;
+        settings.set(ArrangementSetting::BassFastTime, 0.200);
+        assert_eq!(settings.bass_slow_time, slow_before_edit);
+        assert_eq!(settings.bass_fast_time, settings.bass_slow_time - 0.005);
+        settings.validate().unwrap();
+        settings.set(ArrangementSetting::BassSlowTime, 2.0);
+        settings.set(ArrangementSetting::BassFastTime, 0.200);
+        assert_eq!(settings.bass_fast_time, 0.200);
+        assert_eq!(settings.bass_slow_time, 2.0);
+        let saved = settings;
+        settings.set(ArrangementSetting::BassFastTime, f32::NAN);
+        settings.set(ArrangementSetting::BassSlowTime, f32::INFINITY);
+        assert_eq!(settings, saved);
+        let boundary: DetectorSettings =
+            ron::from_str("(arrangement:(bass_fast_time:0.200,bass_slow_time:0.205))").unwrap();
+        boundary.arrangement.validate().unwrap();
+        for invalid in [
+            "(arrangement:(bass_fast_time:0.001))",
+            "(arrangement:(bass_fast_time:0.201))",
+            "(arrangement:(bass_slow_time:0.019))",
+            "(arrangement:(bass_slow_time:2.001))",
+            "(arrangement:(bass_fast_time:0.050,bass_slow_time:0.040))",
+            "(arrangement:(bass_fast_time:0.050,bass_slow_time:0.050))",
+            "(arrangement:(bass_fast_time:NaN))",
+            "(arrangement:(bass_slow_time:inf))",
+        ] {
+            assert!(
+                ron::from_str::<DetectorSettings>(invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn kick_frequency_limits_default_for_existing_configs_and_roundtrip_custom_values() {
+        let defaults = DetectorSettings::default();
+        for serialized in ["()", "(onset_revision:2,kick_onset_sensitivity:2.2)"] {
+            let restored: DetectorSettings = ron::from_str(serialized).unwrap();
+            assert_eq!(restored.kick_low_hz, defaults.kick_low_hz);
+            assert_eq!(restored.kick_high_hz, defaults.kick_high_hz);
+        }
+        let custom = DetectorSettings {
+            kick_low_hz: 75.0,
+            kick_high_hz: 410.5,
+            ..defaults
+        };
+        let serialized = ron::to_string(&custom).unwrap();
+        let restored: DetectorSettings = ron::from_str(&serialized).unwrap();
+        assert_eq!(restored, custom);
+        for invalid in [
+            "(kick_low_hz:19.0)",
+            "(kick_high_hz:2001.0)",
+            "(kick_low_hz:NaN)",
+            "(kick_high_hz:NaN)",
+            "(kick_low_hz:300.0,kick_high_hz:200.0)",
+            "(kick_low_hz:200.0,kick_high_hz:209.0)",
+        ] {
+            assert!(
+                ron::from_str::<DetectorSettings>(invalid).is_err(),
+                "{invalid}"
+            );
+        }
+        for valid in [
+            "(kick_low_hz:20.0,kick_high_hz:30.0)",
+            "(kick_low_hz:1018.7,kick_high_hz:1028.7)",
+            "(kick_low_hz:1990.0,kick_high_hz:2000.0)",
+        ] {
+            assert!(ron::from_str::<DetectorSettings>(valid).is_ok(), "{valid}");
+        }
+    }
+
+    #[test]
+    fn kick_routing_tracks_configured_hz_overlap_without_touching_other_regions() {
+        let defaults = DetectorSettings::default();
+        let selected = |settings: &DetectorSettings| {
+            (0..BAND_COUNT)
+                .filter(|&band| settings.kick_contains(band))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(selected(&defaults), [3, 4]);
+        let custom = DetectorSettings {
+            kick_low_hz: 50.0,
+            kick_high_hz: 110.0,
+            ..defaults.clone()
+        };
+        assert_eq!(selected(&custom), [1, 2, 3]);
+        assert!(!custom.kick_contains(BAND_COUNT));
+        for band in 0..BAND_COUNT {
+            assert_eq!(custom.snare_contains(band), defaults.snare_contains(band));
+            assert_eq!(custom.hat_contains(band), defaults.hat_contains(band));
+        }
+        let boundary = DetectorSettings {
+            kick_low_hz: 151.31866,
+            kick_high_hz: 223.14035,
+            ..defaults
+        };
+        assert_eq!(selected(&boundary), [4]);
+    }
+
     fn defaults() -> DetectorSettings {
         DetectorSettings::default()
-    }
-
-    /// Peak-tracking settings with the fast envelope of the real detectors.
-    fn adaptive_settings() -> FluxSettings {
-        FluxSettings {
-            attack: 0.001,
-            release: 0.005,
-            average: 2.0,
-            sensitivity: 0.5,
-            min_threshold: 0.01,
-            min_interval: 0.05,
-        }
-    }
-
-    /// One hit followed by seven silent hops, so pulses stay independent.
-    fn pulse_train(amplitude: f32, hits: usize) -> Vec<f32> {
-        let mut flux = Vec::new();
-        for _ in 0..hits {
-            flux.push(amplitude);
-            flux.extend(std::iter::repeat_n(0.0, 7));
-        }
-        flux
-    }
-
-    fn feed(tracker: &mut FluxTracker, settings: &FluxSettings, train: &[f32]) -> Vec<f32> {
-        let dt = 1.0 / 86.0;
-        let mut now = 0.0;
-        let mut onsets = Vec::new();
-        for &flux in train {
-            now += dt;
-            if let Some(power) = tracker.observe(flux, now, dt, settings) {
-                onsets.push(power);
-            }
-        }
-        onsets
     }
 
     #[test]
@@ -2563,162 +3059,33 @@ mod tests {
     }
 
     #[test]
-    fn a_flux_peak_triggers_after_the_local_maximum() {
-        let settings = FluxSettings::default();
-        let mut tracker = FluxTracker::default();
-        let dt = 1.0 / 86.0;
-        let mut now = 0.0;
-        let mut fired = false;
-        for flux in [0.0, 0.0, 0.5, 1.0, 0.8, 0.2, 0.0, 0.0] {
-            now += dt;
-            if tracker.observe(flux, now, dt, &settings).is_some() {
-                fired = true;
-            }
-        }
-        assert!(fired, "a flux pulse must produce one local-peak onset");
-    }
-
-    #[test]
-    fn a_steady_flux_does_not_trigger() {
-        let settings = FluxSettings::default();
-        let mut tracker = FluxTracker::default();
-        let dt = 1.0 / 86.0;
-        let mut now = 0.0;
-        for _ in 0..120 {
-            now += dt;
-            assert!(tracker.observe(0.5, now, dt, &settings).is_none());
-        }
-    }
-
-    #[test]
-    fn repeated_flux_peaks_respect_the_minimum_interval() {
-        let flux_settings = FluxSettings {
-            min_interval: 0.05,
-            ..FluxSettings::default()
+    fn temporal_settings_migrate_score_units_but_preserve_motion_and_energy_preferences() {
+        let legacy = "(kick_onset_min_threshold:0.027,kick_onset_average:1.2,snare_min_rms_db:-29.0,kick_quake_factor:17.0)";
+        let migrated: DetectorSettings = ron::from_str(legacy).unwrap();
+        assert_eq!(migrated.kick_onset_min_threshold, 0.16);
+        assert_eq!(migrated.kick_onset_average, 0.6);
+        assert_eq!(migrated.snare_min_rms_db, -29.0);
+        assert_eq!(migrated.kick_quake_factor, 17.0);
+        let tuned = DetectorSettings {
+            kick_onset_min_threshold: 0.22,
+            kick_onset_average: 1.4,
+            ..migrated
         };
-        let mut tracker = FluxTracker::default();
-        let dt = 1.0 / 86.0;
-        let mut now = 0.0;
-        let mut fires = 0;
-        for flux in [0.0, 0.0, 1.0, 0.0, 1.0, 0.0] {
-            now += dt;
-            if tracker.observe(flux, now, dt, &flux_settings).is_some() {
-                fires += 1;
-            }
-        }
-        assert_eq!(
-            fires, 1,
-            "the second pulse lands inside the minimum interval"
-        );
+        let saved = ron::to_string(&tuned).unwrap();
+        assert!(saved.contains("onset_revision:3"));
+        let restored: DetectorSettings = ron::from_str(&saved).unwrap();
+        assert_eq!(restored.kick_onset_min_threshold, 0.22);
+        assert_eq!(restored.kick_onset_average, 1.4);
     }
 
     #[test]
-    fn the_peak_median_threshold_follows_the_track_scale() {
-        let settings = adaptive_settings();
-        let loud = feed(
-            &mut FluxTracker::default(),
-            &settings,
-            &pulse_train(0.32, 12),
-        );
-        let quiet = feed(
-            &mut FluxTracker::default(),
-            &settings,
-            &pulse_train(0.04, 12),
-        );
-        assert_eq!(loud.len(), 12);
-        assert_eq!(
-            quiet.len(),
-            12,
-            "a quiet track keeps the same hit count as a loud one"
-        );
-    }
-
-    #[test]
-    fn one_loud_peak_does_not_raise_the_median_threshold() {
-        let settings = adaptive_settings();
-        let mut flux = pulse_train(0.1, 8);
-        flux.extend(pulse_train(1.0, 1));
-        flux.extend(pulse_train(0.1, 8));
-        let onsets = feed(&mut FluxTracker::default(), &settings, &flux);
-        assert_eq!(
-            onsets.len(),
-            17,
-            "the median must ignore the single loud crash"
-        );
-        for power in &onsets[9..] {
-            assert!(
-                (power - 1.0).abs() < 0.05,
-                "the peaks after the crash stay at the median"
-            );
-        }
-    }
-
-    #[test]
-    fn the_onset_power_is_relative_to_the_peak_median() {
-        let settings = adaptive_settings();
-        let mut flux = pulse_train(0.1, 8);
-        flux.extend(pulse_train(0.06, 1));
-        let onsets = feed(&mut FluxTracker::default(), &settings, &flux);
-        assert_eq!(onsets.len(), 9);
-        assert!(
-            (onsets[8] - 0.6).abs() < 1e-3,
-            "a 60% peak reports 60% of the median"
-        );
-    }
-
-    #[test]
-    fn the_peak_median_forgets_peaks_outside_its_window() {
-        let settings = FluxSettings {
-            average: 0.1,
-            ..adaptive_settings()
-        };
-        let mut flux = pulse_train(0.3, 4);
-        flux.extend(std::iter::repeat_n(0.0, 32));
-        flux.extend(pulse_train(0.02, 1));
-        let onsets = feed(&mut FluxTracker::default(), &settings, &flux);
-        assert_eq!(
-            onsets.len(),
-            5,
-            "the quiet hit after the gap must confirm against the absolute floor"
-        );
-    }
-
-    #[test]
-    fn the_onset_status_reports_the_peak_median_reference() {
-        let settings = adaptive_settings();
-        let mut tracker = FluxTracker::default();
-        feed(&mut tracker, &settings, &pulse_train(0.1, 4));
-        let status = onset_flux_status(&tracker, OnsetProjection::default());
-        let reference = status.reference.expect("the peaks filled the median");
-        assert!((reference - 0.1).abs() < 0.01);
-    }
-
-    #[test]
-    fn the_flux_level_reference_averages_the_smoothed_flow() {
-        let settings = FluxSettings {
-            average: 0.1,
-            sensitivity: 2.0,
-            min_threshold: 0.0,
-            ..adaptive_settings()
-        };
-        let mut tracker = FluxTracker::level();
-        let dt = 1.0 / 86.0;
-        let mut now = 0.0;
-        for _ in 0..100 {
-            now += dt;
-            tracker.observe(0.5, now, dt, &settings);
-        }
-        assert!((tracker.threshold - 1.0).abs() < 1e-3);
-        assert!(matches!(tracker.reference, OnsetReference::FluxLevel(_)));
-    }
-
-    #[test]
-    fn the_default_kernels_select_their_bands() {
+    fn the_live_detectors_describe_their_frequency_regions() {
         let settings = defaults();
-        assert!(settings.kick_contains(0));
-        assert!(settings.kick_contains(15));
-        assert!(settings.snare_contains(4));
-        assert!(!settings.snare_contains(15));
+        assert!(!settings.kick_contains(0));
+        assert!(settings.kick_contains(4));
+        assert!(!settings.kick_contains(15));
+        assert!(settings.snare_contains(8));
+        assert!(settings.snare_contains(15));
         assert!(!settings.snare_contains(1));
         assert!(settings.hat_contains(15));
         assert!(!settings.hat_contains(0));
@@ -2749,102 +3116,6 @@ mod tests {
         );
         assert!(high.residual > low.residual);
         assert!(high.residual > 0.0);
-    }
-
-    #[test]
-    fn a_kick_kernel_onset_fires_after_the_flux_peak() {
-        let settings = defaults();
-        let flux = settings.kick_onset_tracker();
-        let mut kick = KickTracker::default();
-        let dt = 1.0 / 86.0;
-        let mut now = 0.0;
-        for _ in 0..8 {
-            now += dt;
-            kick.observe(0.0, now, dt, &flux);
-        }
-        now += dt;
-        assert_eq!(kick.observe(1.0, now, dt, &flux), None);
-        now += dt;
-        let power = kick.observe(0.0, now, dt, &flux).expect("kick onset");
-        assert!(power > 0.0);
-        assert!(kick.flash > 0.0);
-    }
-
-    #[test]
-    fn a_snare_onset_chokes_the_simultaneous_kick() {
-        let mut settings = defaults();
-        settings.snare_choke = 0.5;
-        let dt = 1.0 / 86.0;
-        let mut bank = OnsetBank::new();
-        let quiet = Spectrum {
-            bands: [0.5; BAND_COUNT],
-            rms: 0.2,
-            ..Spectrum::default()
-        };
-        let abdr = [1.0; BAND_COUNT];
-        let abl = [1.0; BAND_COUNT];
-        for _ in 0..8 {
-            bank.observe(&quiet, &abdr, &abl, &settings, dt);
-        }
-        let pulse = Spectrum {
-            bands: [0.5; BAND_COUNT],
-            rms: 0.2,
-            band_excess: [1.0; BAND_COUNT],
-            ..Spectrum::default()
-        };
-        for _ in 0..4 {
-            let events = bank.observe(&pulse, &abdr, &abl, &settings, dt);
-            assert!(events.snare.is_none());
-        }
-        let events = bank.observe(&quiet, &abdr, &abl, &settings, dt);
-        assert!(events.snare.is_some(), "snare onset");
-        assert!(events.kick.is_none(), "the snare chokes the kick");
-        assert!(bank.status().kick.choked);
-    }
-
-    fn snare_fires_with_rms(rms: f32, gate_db: f32) -> bool {
-        let mut settings = defaults();
-        settings.snare_min_rms_db = gate_db;
-        let dt = 1.0 / 86.0;
-        let mut bank = OnsetBank::new();
-        let quiet = Spectrum {
-            bands: [0.5; BAND_COUNT],
-            rms,
-            ..Spectrum::default()
-        };
-        let abdr = [1.0; BAND_COUNT];
-        let abl = [1.0; BAND_COUNT];
-        for _ in 0..8 {
-            bank.observe(&quiet, &abdr, &abl, &settings, dt);
-        }
-        let pulse = Spectrum {
-            bands: [0.5; BAND_COUNT],
-            rms,
-            band_excess: [1.0; BAND_COUNT],
-            ..Spectrum::default()
-        };
-        for _ in 0..4 {
-            bank.observe(&pulse, &abdr, &abl, &settings, dt);
-        }
-        bank.observe(&quiet, &abdr, &abl, &settings, dt)
-            .snare
-            .is_some()
-    }
-
-    #[test]
-    fn the_snare_output_needs_the_absolute_rms_gate() {
-        assert!(
-            snare_fires_with_rms(0.2, -20.0),
-            "a loud snare clears the gate"
-        );
-        assert!(
-            !snare_fires_with_rms(0.01, -20.0),
-            "a quiet snare must not reach the output"
-        );
-        assert!(
-            snare_fires_with_rms(0.01, -60.0),
-            "the permissive gate still accepts the quiet snare"
-        );
     }
 
     #[test]
@@ -3002,155 +3273,6 @@ mod tests {
         );
     }
 
-    fn gap_settings() -> DetectorSettings {
-        DetectorSettings {
-            drop_kernels: DropKernels {
-                onset: [1.0; BAND_COUNT],
-            },
-            drop_gap_threshold: -18.0,
-            ..DetectorSettings::default()
-        }
-    }
-
-    #[test]
-    fn the_rms_envelope_arms_the_gap_below_the_threshold() {
-        let settings = gap_settings();
-        let dt = 1.0 / 86.0;
-        let mut now = 0.0;
-        let mut drop = DropTracker::default();
-        for _ in 0..12 {
-            now += dt;
-            drop.observe(now, 0.5, 0.0, &settings, dt);
-        }
-        assert!(!drop.eligible);
-        assert!(drop.envelope_db > settings.drop_gap_threshold);
-
-        let mut entries = 0;
-        for _ in 0..60 {
-            now += dt;
-            drop.observe(now, 0.01, 0.0, &settings, dt);
-            entries += u8::from(drop.gap_entry);
-        }
-        assert!(drop.eligible, "the quiet RMS arms the gate");
-        assert!(drop.envelope_db < settings.drop_gap_threshold);
-        assert_eq!(entries, 1, "the latch reports one entry edge");
-    }
-
-    #[test]
-    fn the_gap_gate_threshold_is_configurable() {
-        let dt = 1.0 / 86.0;
-        for (threshold, expected) in [(-30.0, false), (-20.0, true)] {
-            let settings = DetectorSettings {
-                drop_gap_threshold: threshold,
-                ..gap_settings()
-            };
-            let mut drop = DropTracker::default();
-            let mut now = 0.0;
-            for _ in 0..60 {
-                now += dt;
-                drop.observe(now, 0.05, 0.0, &settings, dt);
-            }
-            assert_eq!(drop.eligible, expected, "gate {threshold} dB");
-        }
-    }
-
-    #[test]
-    fn the_gate_latches_until_an_onset_clears_it() {
-        let settings = gap_settings();
-        let dt = 1.0 / 86.0;
-        let mut now = 0.0;
-        let mut drop = DropTracker::default();
-        for _ in 0..60 {
-            now += dt;
-            drop.observe(now, 0.01, 0.0, &settings, dt);
-        }
-        assert!(drop.eligible);
-
-        for _ in 0..30 {
-            now += dt;
-            drop.observe(now, 0.8, 0.0, &settings, dt);
-        }
-        assert!(drop.envelope_db > settings.drop_gap_threshold);
-        assert!(drop.eligible, "the gate stays latched while loud");
-
-        now += dt;
-        drop.observe(now, 0.8, 1.0, &settings, dt);
-        now += dt;
-        assert!(drop.observe(now, 0.8, 0.0, &settings, dt).is_some());
-        assert!(!drop.eligible, "the confirming onset clears the latch");
-    }
-
-    #[test]
-    fn drop_confirmation_requires_an_armed_gate() {
-        let settings = gap_settings();
-        let dt = 1.0 / 86.0;
-        let mut now = 0.0;
-        let mut drop = DropTracker::default();
-        for _ in 0..12 {
-            now += dt;
-            drop.observe(now, 0.8, 0.0, &settings, dt);
-        }
-        assert!(!drop.eligible);
-        now += dt;
-        drop.observe(now, 0.8, 1.0, &settings, dt);
-        now += dt;
-        assert_eq!(
-            drop.observe(now, 0.8, 0.0, &settings, dt),
-            None,
-            "an onset without a quiet RMS is not a drop"
-        );
-    }
-
-    #[test]
-    fn the_composite_onset_uses_its_own_flux_settings() {
-        let mut settings = gap_settings();
-        settings.drop_onset_min_threshold = 2.0;
-        let dt = 1.0 / 86.0;
-        let mut now = 0.0;
-        let mut drop = DropTracker::default();
-        for _ in 0..60 {
-            now += dt;
-            drop.observe(now, 0.01, 0.0, &settings, dt);
-        }
-        assert!(drop.eligible);
-        now += dt;
-        drop.observe(now, 0.01, 1.0, &settings, dt);
-        now += dt;
-        assert_eq!(
-            drop.observe(now, 0.01, 0.0, &settings, dt),
-            None,
-            "the dedicated minimum threshold blocks the composite onset"
-        );
-
-        settings.drop_onset_min_threshold = 0.01;
-        for _ in 0..40 {
-            now += dt;
-            drop.observe(now, 0.01, 0.0, &settings, dt);
-        }
-        now += dt;
-        drop.observe(now, 0.01, 1.0, &settings, dt);
-        now += dt;
-        assert!(drop.observe(now, 0.01, 0.0, &settings, dt).is_some());
-    }
-
-    #[test]
-    fn resetting_clears_the_rms_envelope_and_gate() {
-        let settings = gap_settings();
-        let dt = 1.0 / 86.0;
-        let mut now = 0.0;
-        let mut drop = DropTracker::default();
-        for _ in 0..60 {
-            now += dt;
-            drop.observe(now, 0.01, 0.0, &settings, dt);
-        }
-        assert!(drop.eligible);
-        drop.reset();
-        assert!(!drop.eligible);
-        assert!(!drop.envelope_ready);
-        assert_eq!(drop.envelope_db, GAP_DB_FLOOR);
-        assert_eq!(drop.rms_db, GAP_DB_FLOOR);
-    }
-
     #[test]
     fn drop_kernel_weights_stay_inside_zero_to_one() {
         let mut kernels = DropKernels::default();
@@ -3261,21 +3383,5 @@ mod tests {
         let mut settings = defaults();
         settings.kick_sequence_every = 0;
         assert!(settings.validate().is_err());
-    }
-
-    #[test]
-    fn a_flux_pulse_reports_a_positive_onset_power() {
-        let settings = FluxSettings::default();
-        let mut tracker = FluxTracker::default();
-        let dt = 1.0 / 86.0;
-        let mut now = 0.0;
-        for flux in [0.0, 0.0, 1.0, 0.0] {
-            now += dt;
-            if let Some(power) = tracker.observe(flux, now, dt, &settings) {
-                assert!(power > 0.0);
-                return;
-            }
-        }
-        panic!("expected a flux onset");
     }
 }

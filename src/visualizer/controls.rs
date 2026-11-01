@@ -958,7 +958,7 @@ impl Controls {
             self.bounds.push(physical);
             self.hovers.push(Hover {
                 rect: physical,
-                hint: "Live analyzer levels and the drop gap gate after the selected boost.",
+                hint: "Live mix levels after boost. Sustained strong spectral trend change with relative energy loss arms a gap; a strong audible bass hit confirms its return.",
             });
             let opacity = self.opacity;
             audio_gap::draw(self, &mut canvas, graph, &state, opacity);

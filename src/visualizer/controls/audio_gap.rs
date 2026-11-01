@@ -70,7 +70,7 @@ fn trace(
     plot: &Plot,
     levels: impl Iterator<Item = (f32, f32)>,
     color: Color,
-    width: f64,
+    stroke: Stroke,
 ) {
     let mut path = BezPath::new();
     for (index, (at, db)) in levels.enumerate() {
@@ -81,13 +81,9 @@ fn trace(
             path.line_to(point);
         }
     }
-    canvas.scene.stroke(
-        &Stroke::new(width),
-        Affine::scale(canvas.scale),
-        color,
-        None,
-        &path,
-    );
+    canvas
+        .scene
+        .stroke(&stroke, Affine::scale(canvas.scale), color, None, &path);
 }
 
 fn armed_intervals(canvas: &mut Canvas<'_>, plot: &Plot, history: &DebugHistory, opacity: f32) {
@@ -120,13 +116,12 @@ pub(super) fn draw(
     let history = state.history;
     let latest = history.latest();
     let locked = state.config.model_rotation == ModelRotation::Locked;
-    let gate = state.config.detectors.drop_gap_threshold;
     canvas.fill(rect, canvas.background.with_alpha(0.96 * opacity));
     canvas.rule(rect, palette.muted.with_alpha(0.45 * opacity));
     controls.label(
         canvas,
         Rect::new(rect.x0 + 8.0, rect.y0 + 4.0, rect.x0 + 70.0, rect.y0 + 18.0),
-        "GAP / dBFS",
+        "GAP / LEVEL",
         LabelStyle::Caption,
         palette.ink.with_alpha(0.85 * opacity),
     );
@@ -157,7 +152,11 @@ pub(super) fn draw(
             latest.map(|sample| sample.drop_status.envelope_db),
             palette.ink,
         ),
-        ("GATE", Some(gate), palette.ink),
+        (
+            "LOSS dB",
+            latest.map(|sample| -sample.drop_status.energy_delta_db),
+            palette.ink,
+        ),
     ]
     .into_iter()
     .enumerate()
@@ -170,7 +169,16 @@ pub(super) fn draw(
             LabelStyle::Caption,
             color.with_alpha(0.85 * opacity),
         );
-        let value = value.map_or_else(|| "--".to_owned(), |db| format!("{db:.1}"));
+        let value = value.map_or_else(
+            || "--".to_owned(),
+            |db| {
+                if index == 2 {
+                    format!("{db:.2}")
+                } else {
+                    format!("{db:.1}")
+                }
+            },
+        );
         controls.label(
             canvas,
             Rect::new(x, rect.y0 + 32.0, x + column_width, rect.y0 + 49.0),
@@ -179,6 +187,35 @@ pub(super) fn draw(
             color.with_alpha(0.95 * opacity),
         );
     }
+    let energy_summary = latest.map_or_else(
+        || "NEED -- dB  ENERGY --".to_owned(),
+        |sample| {
+            let status = &sample.drop_status;
+            format!(
+                "NEED >{:.2} dB  ENERGY {}",
+                status.mix_loss_threshold_db,
+                if -status.energy_delta_db > status.mix_loss_threshold_db {
+                    "PASS"
+                } else {
+                    "WAIT"
+                },
+            )
+        },
+    );
+    controls.label(
+        canvas,
+        Rect::new(rect.x0 + 8.0, rect.y0 + 49.0, rect.x1 - 8.0, rect.y0 + 61.0),
+        &energy_summary,
+        LabelStyle::Caption,
+        palette.muted.with_alpha(0.85 * opacity),
+    );
+    controls.label(
+        canvas,
+        Rect::new(rect.x0 + 8.0, rect.y0 + 61.0, rect.x1 - 8.0, rect.y0 + 73.0),
+        "··· REF   -- CUT: ENV MUST BE BELOW",
+        LabelStyle::Caption,
+        palette.muted.with_alpha(0.85 * opacity),
+    );
 
     let peak = history
         .samples()
@@ -187,12 +224,13 @@ pub(super) fn draw(
                 .drop_status
                 .rms_db
                 .max(sample.drop_status.envelope_db)
+                .max(sample.drop_status.envelope_db - sample.drop_status.energy_delta_db)
         })
         .fold(0.0, f32::max);
     let plot = Plot::new(
         Rect::new(
             rect.x0 + 32.0,
-            rect.y0 + 62.0,
+            rect.y0 + 75.0,
             rect.x1 - 8.0,
             rect.y1 - 22.0,
         ),
@@ -216,14 +254,6 @@ pub(super) fn draw(
             palette.muted.with_alpha(0.8 * opacity),
         );
     }
-    let gate_y = plot.y(gate);
-    canvas.scene.stroke(
-        &Stroke::new(0.9).with_dashes(0.0, [4.0, 3.0]),
-        Affine::scale(canvas.scale),
-        palette.ink.with_alpha(0.70 * opacity),
-        None,
-        &Line::new((plot.rect.x0, gate_y), (plot.rect.x1, gate_y)),
-    );
     trace(
         canvas,
         &plot,
@@ -231,7 +261,34 @@ pub(super) fn draw(
             .samples()
             .map(|sample| (sample.at, sample.drop_status.rms_db)),
         palette.muted.with_alpha(0.85 * opacity),
-        0.8,
+        Stroke::new(0.8),
+    );
+    // The energy delta records the reference used for this decision, before
+    // learning updates it. Reconstructing it keeps the history exact.
+    trace(
+        canvas,
+        &plot,
+        history.samples().map(|sample| {
+            (
+                sample.at,
+                sample.drop_status.envelope_db - sample.drop_status.energy_delta_db,
+            )
+        }),
+        palette.muted.with_alpha(0.70 * opacity),
+        Stroke::new(0.9).with_dashes(0.0, [1.0, 2.0]),
+    );
+    trace(
+        canvas,
+        &plot,
+        history.samples().map(|sample| {
+            let status = &sample.drop_status;
+            (
+                sample.at,
+                status.envelope_db - status.energy_delta_db - status.mix_loss_threshold_db,
+            )
+        }),
+        palette.ink.with_alpha(0.75 * opacity),
+        Stroke::new(1.0).with_dashes(0.0, [4.0, 2.0]),
     );
     trace(
         canvas,
@@ -240,7 +297,7 @@ pub(super) fn draw(
             .samples()
             .map(|sample| (sample.at, sample.drop_status.envelope_db)),
         palette.ink.with_alpha(0.95 * opacity),
-        1.5,
+        Stroke::new(1.5),
     );
     for (at, count) in confirmed_drops(
         history
@@ -311,7 +368,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plot_keeps_four_seconds_and_projects_the_real_gap_threshold() {
+    fn level_plot_keeps_four_seconds_and_projects_dbfs() {
         let bounds = Rect::new(20.0, 10.0, 420.0, 170.0);
         let plot = Plot::new(bounds, 12.0, -3.0);
         assert_eq!(plot.x(8.0), bounds.x0);

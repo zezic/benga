@@ -3,7 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use strum::{EnumCount, VariantArray};
 
-use super::{style_value, Property, Style, BAND_COUNT};
+use super::{
+    style_value, ArrangementSetting, BinAddress, PercussionSetting, Property, Style, BAND_COUNT,
+};
 
 /// Base term of the line-energy mix. The visualizer scales a near-opacity
 /// floor below this value against the line energy.
@@ -43,6 +45,15 @@ pub enum Detector {
 }
 
 impl Detector {
+    pub fn percussion_index(self) -> Option<usize> {
+        match self {
+            Self::Kick => Some(0),
+            Self::Snare => Some(1),
+            Self::Hat => Some(2),
+            Self::Flux | Self::Drop => None,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Self::Flux => "FLUX ONSET",
@@ -56,66 +67,44 @@ impl Detector {
     /// Parameters for a detector selected in the tree. The per-band onset
     /// analyzer builds its own parameter list.
     pub fn parameters(self) -> Vec<Parameter> {
+        if self.percussion_index().is_some() {
+            return PercussionSetting::primary()
+                .iter()
+                .chain(PercussionSetting::advanced())
+                .copied()
+                .map(|setting| Parameter::Percussion(self, setting))
+                .chain(match self {
+                    Self::Kick => vec![
+                        Parameter::KickQuakeFactor,
+                        Parameter::KickSequenceEvery,
+                        Parameter::QuakeStiffness,
+                        Parameter::QuakeDamping,
+                    ],
+                    Self::Snare => vec![
+                        Parameter::SnareFlipEvery,
+                        Parameter::SnarePoiSwitches,
+                        Parameter::PoiSwitchGap,
+                        Parameter::FlipStiffness,
+                        Parameter::FlipDamping,
+                    ],
+                    _ => Vec::new(),
+                })
+                .collect();
+        }
         match self {
             Self::Flux => unreachable!("the flux analyzer has its own panel"),
-            Self::Kick => vec![
-                Parameter::PatternArea(Detector::Kick),
-                Parameter::OnsetFlux(Detector::Kick, FluxSetting::PreGain),
-                Parameter::OnsetFlux(Detector::Kick, FluxSetting::Attack),
-                Parameter::OnsetFlux(Detector::Kick, FluxSetting::Release),
-                Parameter::OnsetFlux(Detector::Kick, FluxSetting::Average),
-                Parameter::OnsetFlux(Detector::Kick, FluxSetting::Sensitivity),
-                Parameter::OnsetFlux(Detector::Kick, FluxSetting::MinThreshold),
-                Parameter::OnsetFlux(Detector::Kick, FluxSetting::MinInterval),
-                Parameter::OnsetSuppression(Detector::Kick),
-                Parameter::KickSnareChoke,
-                Parameter::KickDropChoke,
-                Parameter::KickQuakeFactor,
-                Parameter::KickSequenceEvery,
-                Parameter::QuakeStiffness,
-                Parameter::QuakeDamping,
-            ],
-            Self::Snare => vec![
-                Parameter::PatternArea(Detector::Snare),
-                Parameter::OnsetFlux(Detector::Snare, FluxSetting::PreGain),
-                Parameter::OnsetFlux(Detector::Snare, FluxSetting::Attack),
-                Parameter::OnsetFlux(Detector::Snare, FluxSetting::Release),
-                Parameter::OnsetFlux(Detector::Snare, FluxSetting::Average),
-                Parameter::OnsetFlux(Detector::Snare, FluxSetting::Sensitivity),
-                Parameter::OnsetFlux(Detector::Snare, FluxSetting::MinThreshold),
-                Parameter::OnsetFlux(Detector::Snare, FluxSetting::MinInterval),
-                Parameter::OnsetSuppression(Detector::Snare),
-                Parameter::SnareRmsGate,
-                Parameter::SnareFlipEvery,
-                Parameter::SnarePoiSwitches,
-                Parameter::PoiSwitchGap,
-                Parameter::SnareChoke,
-                Parameter::FlipStiffness,
-                Parameter::FlipDamping,
-            ],
-            Self::Hat => vec![
-                Parameter::PatternArea(Detector::Hat),
-                Parameter::OnsetFlux(Detector::Hat, FluxSetting::PreGain),
-                Parameter::OnsetFlux(Detector::Hat, FluxSetting::Attack),
-                Parameter::OnsetFlux(Detector::Hat, FluxSetting::Release),
-                Parameter::OnsetFlux(Detector::Hat, FluxSetting::Average),
-                Parameter::OnsetFlux(Detector::Hat, FluxSetting::Sensitivity),
-                Parameter::OnsetFlux(Detector::Hat, FluxSetting::MinThreshold),
-                Parameter::OnsetFlux(Detector::Hat, FluxSetting::MinInterval),
-                Parameter::OnsetSuppression(Detector::Hat),
-            ],
-            Self::Drop => vec![
-                Parameter::DropGapThreshold,
-                Parameter::OnsetFlux(Detector::Drop, FluxSetting::PreGain),
-                Parameter::OnsetFlux(Detector::Drop, FluxSetting::Attack),
-                Parameter::OnsetFlux(Detector::Drop, FluxSetting::Release),
-                Parameter::OnsetFlux(Detector::Drop, FluxSetting::Average),
-                Parameter::OnsetFlux(Detector::Drop, FluxSetting::Sensitivity),
-                Parameter::OnsetFlux(Detector::Drop, FluxSetting::MinThreshold),
-                Parameter::OnsetFlux(Detector::Drop, FluxSetting::MinInterval),
-                Parameter::OnsetSuppression(Detector::Drop),
-                Parameter::DropQuakeFactor,
-            ],
+            Self::Kick | Self::Snare | Self::Hat => {
+                unreachable!("percussion controls handled above")
+            }
+            Self::Drop => ArrangementSetting::ALL
+                .into_iter()
+                .map(Parameter::Arrangement)
+                .chain([
+                    Parameter::DropQuakeFactor,
+                    Parameter::QuakeStiffness,
+                    Parameter::QuakeDamping,
+                ])
+                .collect(),
         }
     }
 }
@@ -743,6 +732,7 @@ impl InputShape {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Parameter {
+    Percussion(Detector, PercussionSetting),
     /// Fraction of the temporal kernel used for matching.
     PatternArea(Detector),
     /// Per-band absolute-loudness gain, curve, and amount.
@@ -756,6 +746,11 @@ pub enum Parameter {
     ExcessCap,
     /// One setting of a detector's dedicated onset tracker.
     OnsetFlux(Detector, FluxSetting),
+    OnsetBinGain(Detector, BinAddress),
+    KickLowHz,
+    KickHighHz,
+    /// Relative spectrum/energy criteria and bass-hit confirmation settings.
+    Arrangement(ArrangementSetting),
     /// How much suppression flux a detector subtracts from its onset.
     OnsetSuppression(Detector),
     KickSnareChoke,
@@ -818,6 +813,7 @@ pub enum Parameter {
 impl Parameter {
     pub fn label(self) -> &'static str {
         match self {
+            Self::Percussion(_, setting) => setting.label(),
             Self::PatternArea(_) => "KERNEL AREA",
             Self::BandAblGain(_) => "ABL GAIN",
             Self::BandAblCurve(_) => "ABL CURVE",
@@ -827,6 +823,10 @@ impl Parameter {
             Self::ExcessFloor => "EXCESS FLOOR",
             Self::ExcessCap => "EXCESS CAP",
             Self::OnsetFlux(_, setting) => setting.label(),
+            Self::OnsetBinGain(_, _) => "Bin gain",
+            Self::KickLowHz => "KICK LOW Hz",
+            Self::KickHighHz => "KICK HIGH Hz",
+            Self::Arrangement(setting) => setting.label(),
             Self::OnsetSuppression(_) => "ONS SUPPRESS",
             Self::KickSnareChoke => "SNARE CHOKE",
             Self::KickDropChoke => "DROP CHOKE",
@@ -891,6 +891,7 @@ impl Parameter {
 
     pub fn range(self) -> (f32, f32) {
         match self {
+            Self::Percussion(_, setting) => setting.range(),
             Self::PatternArea(_) => (0.1, 1.0),
             Self::BandAblGain(_) => (super::ABL_GAIN_MIN, super::ABL_GAIN_MAX),
             Self::BandAblCurve(_) => (0.0, 3.0),
@@ -899,7 +900,36 @@ impl Parameter {
             Self::ExcessRelease => (super::EXCESS_RELEASE_MIN, super::EXCESS_RELEASE_MAX),
             Self::ExcessFloor => (super::EXCESS_FLOOR_MIN, super::EXCESS_FLOOR_MAX),
             Self::ExcessCap => (super::EXCESS_CAP_MIN, super::EXCESS_CAP_MAX),
+            Self::OnsetFlux(
+                Detector::Kick | Detector::Snare | Detector::Hat,
+                FluxSetting::MinThreshold,
+            ) => (0.06, super::ONSET_THRESHOLD_MAX),
+            Self::OnsetFlux(
+                Detector::Kick | Detector::Snare | Detector::Hat,
+                FluxSetting::Average,
+            ) => (0.1, super::FLUX_AVERAGE_MAX),
+            Self::OnsetFlux(Detector::Kick, FluxSetting::MinInterval) => {
+                (0.065, super::FLUX_INTERVAL_MAX)
+            }
+            Self::OnsetFlux(Detector::Snare, FluxSetting::MinInterval) => {
+                (0.085, super::FLUX_INTERVAL_MAX)
+            }
+            Self::OnsetFlux(Detector::Hat, FluxSetting::MinInterval) => {
+                (0.025, super::FLUX_INTERVAL_MAX)
+            }
             Self::OnsetFlux(_, setting) => setting.range(),
+            Self::OnsetBinGain(_, _) => (0.0, 1.0),
+            Self::KickLowHz => (
+                super::detection::KICK_FREQUENCY_MIN_HZ,
+                super::detection::KICK_FREQUENCY_MAX_HZ
+                    - super::detection::KICK_FREQUENCY_MIN_WIDTH_HZ,
+            ),
+            Self::KickHighHz => (
+                super::detection::KICK_FREQUENCY_MIN_HZ
+                    + super::detection::KICK_FREQUENCY_MIN_WIDTH_HZ,
+                super::detection::KICK_FREQUENCY_MAX_HZ,
+            ),
+            Self::Arrangement(setting) => setting.range(),
             Self::OnsetSuppression(_) => (super::FLUX_SUPPRESSION_MIN, super::FLUX_SUPPRESSION_MAX),
             Self::KickSnareChoke | Self::KickDropChoke => (super::CHOKE_MIN, super::CHOKE_MAX),
             Self::KickQuakeFactor => (super::QUAKE_FACTOR_MIN, super::QUAKE_FACTOR_MAX),
@@ -915,7 +945,10 @@ impl Parameter {
                 super::showcase::POI_SWITCH_GAP_MIN,
                 super::showcase::POI_SWITCH_GAP_MAX,
             ),
-            Self::SnareRmsGate => (super::SNARE_RMS_GATE_MIN_DB, super::SNARE_RMS_GATE_MAX_DB),
+            Self::SnareRmsGate => (
+                super::detection::ONSET_MIX_GATE_DB,
+                super::SNARE_RMS_GATE_MAX_DB,
+            ),
             Self::SnareChoke => (super::CHOKE_MIN, super::CHOKE_MAX),
             Self::FlipStiffness
             | Self::QuakeStiffness
@@ -991,12 +1024,31 @@ impl Parameter {
 
     pub fn step(self) -> f32 {
         match self {
+            Self::Percussion(_, setting) if setting.is_filter_toggle() => 1.0,
+            Self::Percussion(_, setting) => match setting {
+                PercussionSetting::FftSize => 256.0,
+                PercussionSetting::MinReference
+                | PercussionSetting::RecentMarkers
+                | PercussionSetting::LowHz
+                | PercussionSetting::HighHz
+                | PercussionSetting::TaperHz => 1.0,
+                PercussionSetting::AdmissionEnergy => 1e-10,
+                PercussionSetting::AdmissionGrowth => 0.0001,
+                PercussionSetting::MinSharpness => 0.001,
+                PercussionSetting::AdmissionProminence | PercussionSetting::MinOutputProminence => {
+                    0.01
+                }
+                _ => 0.1,
+            },
             Self::PatternArea(_) => 0.01,
             Self::BandAblGain(_) | Self::BandAblAmount(_) | Self::ExcessCap => 0.01,
             Self::BandAblCurve(_) => 1.0,
             Self::ExcessAttack | Self::ExcessRelease => 0.005,
             Self::ExcessFloor => 0.001,
             Self::OnsetFlux(_, setting) => setting.step(),
+            Self::OnsetBinGain(_, _) => 0.01,
+            Self::KickLowHz | Self::KickHighHz => 1.0,
+            Self::Arrangement(setting) => setting.step(),
             Self::OnsetSuppression(_) => 0.01,
             Self::KickSequenceEvery | Self::SnareFlipEvery | Self::SnarePoiSwitches => 1.0,
             Self::SnareRmsGate => 1.0,
@@ -1045,6 +1097,24 @@ impl Parameter {
 
     pub fn format(self, value: f32) -> String {
         match self {
+            Self::Percussion(_, setting) if setting.is_filter_toggle() => {
+                if value >= 0.5 { "On" } else { "Off" }.to_owned()
+            }
+            Self::Percussion(_, setting) => match setting {
+                PercussionSetting::AdmissionEnergy => format!("{value:.2e} {}", setting.unit()),
+                PercussionSetting::AdmissionGrowth => format!("{value:.4} {}", setting.unit()),
+                PercussionSetting::MinSharpness => format!("{value:.3}"),
+                PercussionSetting::AdmissionProminence | PercussionSetting::MinOutputProminence => {
+                    format!("{value:.2}")
+                }
+                PercussionSetting::MinReference
+                | PercussionSetting::RecentMarkers
+                | PercussionSetting::FftSize
+                | PercussionSetting::LowHz
+                | PercussionSetting::HighHz
+                | PercussionSetting::TaperHz => format!("{value:.0} {}", setting.unit()),
+                _ => format!("{value:.1} {}", setting.unit()),
+            },
             Self::PatternArea(_) => format!("{:.0}%", value * 100.0),
             Self::BandAblGain(_) | Self::BandAblAmount(_) | Self::ExcessCap => {
                 format!("{value:.2}")
@@ -1056,6 +1126,9 @@ impl Parameter {
             Self::SnareRmsGate | Self::DropGapThreshold => format!("{value:.0} dB"),
             Self::ExcessFloor => format!("{value:.3}"),
             Self::OnsetFlux(_, setting) => setting.format(value),
+            Self::OnsetBinGain(_, _) => format!("{:.0}%", value * 100.0),
+            Self::KickLowHz | Self::KickHighHz => format!("{value:.0} Hz"),
+            Self::Arrangement(setting) => setting.format(value),
             Self::FlipStiffness
             | Self::QuakeStiffness
             | Self::FocusStiffness
@@ -1102,6 +1175,15 @@ impl Parameter {
         let (minimum, maximum) = self.range();
         let value = value.clamp(minimum, maximum);
         match self {
+            Self::Percussion(
+                _,
+                PercussionSetting::AdmissionEnergy
+                | PercussionSetting::AdmissionGrowth
+                | PercussionSetting::LowHz
+                | PercussionSetting::HighHz
+                | PercussionSetting::TaperHz,
+            ) => (value / minimum).ln() / (maximum / minimum).ln(),
+            Self::KickLowHz | Self::KickHighHz => (value / minimum).ln() / (maximum / minimum).ln(),
             Self::Attack(_)
             | Self::Release(_)
             | Self::BandAblGain(_)
@@ -1111,6 +1193,9 @@ impl Parameter {
                 (value / minimum).ln() / (maximum / minimum).ln()
             }
             Self::OnsetFlux(_, setting) if setting.is_time() => {
+                (value / minimum).ln() / (maximum / minimum).ln()
+            }
+            Self::Arrangement(setting) if setting.is_time() => {
                 (value / minimum).ln() / (maximum / minimum).ln()
             }
             _ => (value - minimum) / (maximum - minimum),
@@ -1121,6 +1206,17 @@ impl Parameter {
         let (minimum, maximum) = self.range();
         let fraction = fraction.clamp(0.0, 1.0);
         match self {
+            Self::Percussion(
+                _,
+                PercussionSetting::AdmissionEnergy
+                | PercussionSetting::AdmissionGrowth
+                | PercussionSetting::LowHz
+                | PercussionSetting::HighHz
+                | PercussionSetting::TaperHz,
+            ) => minimum * (maximum / minimum).powf(fraction),
+            Self::KickLowHz | Self::KickHighHz => (minimum * (maximum / minimum).powf(fraction))
+                .round()
+                .clamp(minimum, maximum),
             Self::Attack(_)
             | Self::Release(_)
             | Self::BandAblGain(_)
@@ -1131,6 +1227,10 @@ impl Parameter {
                 minimum * (maximum / minimum).powf(fraction)
             }
             Self::OnsetFlux(_, setting) if setting.is_time() => {
+                let fraction = (fraction * 256.0).round() / 256.0;
+                minimum * (maximum / minimum).powf(fraction)
+            }
+            Self::Arrangement(setting) if setting.is_time() => {
                 let fraction = (fraction * 256.0).round() / 256.0;
                 minimum * (maximum / minimum).powf(fraction)
             }
@@ -2371,7 +2471,7 @@ static KICK: ComputeNode = branch(
             "state",
             &[detector_branch(
                 "KICK ONSET",
-                "kernel flux peak over adaptive threshold",
+                "regional attack concentration and early energy percentiles",
                 Detector::Kick,
                 &[leaf(Input::KickOnset, "DETECTOR", "TRIGGER")],
             )],
@@ -2389,7 +2489,7 @@ static FLIP: ComputeNode = branch(
             "state",
             &[detector_branch(
                 "SNARE ONSET",
-                "kernel flux peak over adaptive threshold",
+                "regional attack concentration and early energy percentiles",
                 Detector::Snare,
                 &[
                     leaf(Input::SnareOnset, "DETECTOR", "TRIGGER"),
@@ -2461,6 +2561,56 @@ static ENTRANCE: ComputeNode = branch(
 mod tests {
     use super::*;
     use strum::{EnumCount, VariantArray};
+
+    #[test]
+    fn live_onset_controls_expose_only_effective_ranges() {
+        for (detector, interval) in [
+            (Detector::Kick, 0.065),
+            (Detector::Snare, 0.085),
+            (Detector::Hat, 0.025),
+        ] {
+            assert_eq!(
+                Parameter::OnsetFlux(detector, FluxSetting::MinThreshold).range(),
+                (0.06, super::super::ONSET_THRESHOLD_MAX)
+            );
+            assert_eq!(
+                Parameter::OnsetFlux(detector, FluxSetting::Average).range(),
+                (0.1, super::super::FLUX_AVERAGE_MAX)
+            );
+            assert_eq!(
+                Parameter::OnsetFlux(detector, FluxSetting::MinInterval).range(),
+                (interval, super::super::FLUX_INTERVAL_MAX)
+            );
+            assert_eq!(
+                Parameter::OnsetFlux(detector, FluxSetting::Sensitivity).range(),
+                (0.5, 5.0)
+            );
+            assert!(!detector.parameters().iter().any(|parameter| matches!(
+                parameter,
+                Parameter::PatternArea(_)
+                    | Parameter::OnsetSuppression(_)
+                    | Parameter::OnsetFlux(
+                        _,
+                        FluxSetting::PreGain | FluxSetting::Attack | FluxSetting::Release
+                    )
+            )));
+        }
+        assert_eq!(
+            Parameter::SnareRmsGate.range(),
+            (super::super::detection::ONSET_MIX_GATE_DB, 0.0)
+        );
+        for setting in [
+            FluxSetting::Average,
+            FluxSetting::MinThreshold,
+            FluxSetting::MinInterval,
+        ] {
+            assert_eq!(
+                Parameter::OnsetFlux(Detector::Drop, setting).range(),
+                setting.range(),
+                "legacy drop parameter range remains readable"
+            );
+        }
+    }
 
     #[test]
     fn normalized_rescaling_stops_before_the_curve() {

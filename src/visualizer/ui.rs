@@ -7,7 +7,7 @@ use std::{collections::HashMap, time::Instant};
 use strum::{EnumCount, VariantArray};
 use vello::{
     kurbo::{Affine, Point, Rect, Size},
-    peniko::{Color, Fill},
+    peniko::{Color, Fill, Mix},
     Scene,
 };
 
@@ -27,7 +27,7 @@ use crate::{
 use super::{
     controls::{ControlAction, ControlState, Controls},
     debug,
-    presentation::Presentation,
+    presentation::{AnalysisInteraction, Presentation},
     splash::Splash,
     Contribution, CreaseThreshold, DebugSelection, DebugSnapshot, DepthFade, Detector,
     DetectorSettings, DropKernel, Frame as VisualizerFrame, LineWidth, ModelComposite, ModelMotion,
@@ -447,10 +447,13 @@ impl Ui {
         let mut visualizer = Visualizer::new();
         visualizer.set_model_composite(Self::model_composite(selected));
         visualizer.set_detector_settings(detectors.clone());
-        let kick_gap_readout = Readout::label(&mut fonts, "Kick Gap");
+        let kick_gap_readout = Readout::label(&mut fonts, "Kick interval");
         let kick_gap_value = Readout::value(
             &mut fonts,
-            &format!("{:.0}ms", detectors.kick_onset_min_interval * 1000.0),
+            &format!(
+                "{:.0}ms",
+                detectors.percussion.channels[0].output_interval_ms
+            ),
         );
         let drop_gap_readout = Readout::new(&mut fonts, "Drop Gate", ["[J]", "[K]"]);
         let drop_gap_value = Readout::value(
@@ -720,12 +723,20 @@ impl Ui {
         self.controls.pointer(pointer, Instant::now());
         if pointer.is_none() {
             self.presentation_click.reset();
+            self.presentation.analysis_pointer_up();
         }
         if self.debug_pointer == pointer {
             return;
         }
         self.debug_pointer = pointer;
         if self.presentation.active() {
+            if self.analysis_interactive() {
+                if let Some((parameter, value)) = self.presentation.analysis_pointer_move(pointer) {
+                    self.set_parameter(parameter, value);
+                }
+            } else {
+                self.presentation.analysis_pointer_up();
+            }
             return;
         }
         self.update_sliders(pointer);
@@ -960,31 +971,6 @@ impl Ui {
                 }
             }
             debug::TreeAction::ToggleAdaptive(target) => self.visualizer.toggle_adaptive(target),
-            debug::TreeAction::ClearPattern(detector) => {
-                self.visualizer.clear_pattern(detector);
-                self.set_detector_settings(self.visualizer.detector_settings());
-            }
-            debug::TreeAction::TogglePatternOverlay => {
-                self.temporal_view.overlay = !self.temporal_view.overlay;
-            }
-            debug::TreeAction::TogglePatternPreview => {
-                self.temporal_view.preview = !self.temporal_view.preview;
-            }
-            debug::TreeAction::TogglePatternPause => {
-                self.temporal_view.paused = !self.temporal_view.paused;
-                if self.temporal_view.paused {
-                    self.temporal_view.frozen = Some(self.visualizer.onset_history().clone());
-                } else {
-                    self.temporal_view.frozen = None;
-                }
-                self.temporal_view.offset = 0.0;
-            }
-            debug::TreeAction::TogglePatternSuppression => {
-                self.temporal_view.kernel = match self.temporal_view.kernel {
-                    PatternKernel::Main => PatternKernel::Suppression,
-                    PatternKernel::Suppression => PatternKernel::Main,
-                };
-            }
         }
         self.clear_drag();
         self.pattern_click.reset();
@@ -1225,6 +1211,7 @@ impl Ui {
 
     pub fn end_slider_drag(&mut self) {
         self.clear_drag();
+        self.presentation.analysis_pointer_up();
     }
 
     fn slider_value(parameter: Parameter, track: Rect, x: f64) -> f32 {
@@ -1284,6 +1271,9 @@ impl Ui {
 
     pub fn set_presentation_opacity(&mut self, opacity: PresentationOpacity) {
         self.presentation_opacity = opacity;
+        if !self.analysis_interactive() {
+            self.presentation.analysis_pointer_up();
+        }
     }
 
     pub fn set_text_scale(&mut self, scale: VisualizerTextScale) {
@@ -1304,7 +1294,10 @@ impl Ui {
         self.visualizer.set_detector_settings(settings.clone());
         self.kick_gap_value = Readout::value(
             &mut self.fonts,
-            &format!("{:.0}ms", settings.kick_onset_min_interval * 1000.0),
+            &format!(
+                "{:.0}ms",
+                settings.percussion.channels[0].output_interval_ms
+            ),
         );
         self.drop_gap_value = Readout::value(
             &mut self.fonts,
@@ -1424,15 +1417,36 @@ impl Ui {
         let action = self.controls.click(point, now);
         if over_controls {
             self.presentation_click.reset();
-            action
-        } else {
-            match self
-                .presentation_click
-                .record(point, now, 6.0 * view.ui_scale())
-            {
-                ClickKind::Single => None,
-                ClickKind::Double => Some(ControlAction::Fullscreen),
+            self.presentation.analysis_pointer_up();
+            return action;
+        }
+        if self.analysis_interactive() {
+            if let Some(interaction) = self.presentation.analysis_pointer_down(point) {
+                self.presentation_click.reset();
+                match interaction {
+                    AnalysisInteraction::Parameter(parameter, value) => {
+                        self.set_parameter(parameter, value)
+                    }
+                    AnalysisInteraction::ResetBins(detector) => {
+                        self.visualizer.reset_onset_bins(detector);
+                        self.set_detector_settings(self.visualizer.detector_settings());
+                        self.face_settings = None;
+                    }
+                    AnalysisInteraction::Handled => {}
+                }
+                return None;
             }
+            if self.presentation.analysis_contains(point) {
+                self.presentation_click.reset();
+                return None;
+            }
+        }
+        match self
+            .presentation_click
+            .record(point, now, 6.0 * view.ui_scale())
+        {
+            ClickKind::Single => None,
+            ClickKind::Double => Some(ControlAction::Fullscreen),
         }
     }
 
@@ -1449,6 +1463,15 @@ impl Ui {
             || self.debug_pointer.is_none()
             || visibility == CursorVisibility::Always
             || self.controls.cursor_visible()
+            || (self.analysis_interactive()
+                && (self.presentation.analysis_dragging()
+                    || self
+                        .debug_pointer
+                        .is_some_and(|point| self.presentation.analysis_contains(point))))
+    }
+
+    fn analysis_interactive(&self) -> bool {
+        self.presentation.active() && self.presentation_opacity.factor() > 0.01
     }
 
     pub fn controls_opacity(&self) -> f32 {
@@ -1463,6 +1486,8 @@ impl Ui {
         self.controls.activate(Instant::now());
     }
 
+    /// Draws normal-alpha detector controls and the toolbar above the scene.
+    /// Returns true when either contributes to the top overlay texture.
     pub fn draw_controls(
         &mut self,
         scene: &mut Scene,
@@ -1472,7 +1497,8 @@ impl Ui {
         now: Instant,
     ) -> bool {
         scene.reset();
-        let visible = self.presentation()
+        let diagnostics_visible = self.draw_analysis_controls(scene);
+        let toolbar_visible = self.presentation()
             && self.controls.draw(
                 &mut self.fonts,
                 scene,
@@ -1488,12 +1514,38 @@ impl Ui {
                 },
                 now,
             );
-        self.presentation.set_exclusion_bounds(if visible {
+        self.presentation.set_exclusion_bounds(if toolbar_visible {
             self.controls.exclusion_bounds()
         } else {
             None
         });
-        visible
+        diagnostics_visible || toolbar_visible
+    }
+
+    fn draw_analysis_controls(&self, scene: &mut Scene) -> bool {
+        if !self.analysis_interactive() {
+            return false;
+        }
+        let Some(stage) = self.presentation.stage() else {
+            return false;
+        };
+        // These backplates must cover the model rather than add to or multiply
+        // its color. Fade the bank as a group, independently of the toolbar.
+        scene.push_layer(
+            Fill::NonZero,
+            Mix::Normal,
+            self.presentation_opacity.factor(),
+            Affine::IDENTITY,
+            &Rect::new(0.0, 0.0, stage.width, stage.height),
+        );
+        self.presentation.draw_analysis_controls(
+            scene,
+            &stage,
+            self.presentation.colors(),
+            &self.theme,
+        );
+        scene.pop_layer();
+        true
     }
 
     fn auto_theme(&mut self, now: Instant) {
@@ -1970,7 +2022,8 @@ mod tests {
     use super::*;
     use crate::render::RasterAssetCache;
     use crate::visualizer::{
-        Contribution, EnvelopeTarget, Input, MixPoint, StyleInput, TreeTarget,
+        ArrangementSetting, Contribution, EnvelopeTarget, Input, MixPoint, PercussionSetting,
+        StyleInput, TreeTarget,
     };
     use std::time::Duration;
 
@@ -1986,6 +2039,342 @@ mod tests {
             }
             assert!(layout.panel.y1 <= view.viewport.height);
         }
+    }
+
+    fn drawn_presentation_ui() -> (Ui, View) {
+        let mut ui = Ui::new(&Config::default()).expect("the bundled fonts and models load");
+        ui.set_presentation(true);
+        let view = View::fit(Size::new(1920.0, 1080.0));
+        draw_presentation_frame(&mut ui, &view);
+        (ui, view)
+    }
+
+    fn draw_presentation_frame(ui: &mut Ui, view: &View) {
+        let now = Instant::now();
+        let mut scene = Scene::new();
+        let _ = ui.draw(
+            &mut scene,
+            view,
+            FrameRateLimit::Fps120,
+            FrameTime::new(now, now + Duration::from_millis(16)),
+        );
+    }
+
+    #[test]
+    fn presentation_onset_graph_cycles_channels_without_background_actions() {
+        let (mut ui, view) = drawn_presentation_ui();
+        let graph = ui.presentation.analysis_graph_bounds().unwrap().center();
+        let now = Instant::now();
+        let settings = ui.detector_settings();
+        ui.visualizer.consume_buf(&[[0.2, -0.2]; 2048], 1.0);
+        let revision = ui.visualizer.analysis_revision();
+        assert!(revision > 0);
+        assert_eq!(ui.presentation.analysis_selected_detector(), Detector::Kick);
+        for (index, expected) in [Detector::Snare, Detector::Hat, Detector::Kick]
+            .into_iter()
+            .enumerate()
+        {
+            assert!(ui
+                .click_controls_at(&view, graph, now + Duration::from_millis(index as u64 * 10))
+                .is_none());
+            assert_eq!(ui.presentation.analysis_selected_detector(), expected);
+        }
+        assert_eq!(ui.visualizer.analysis_revision(), revision);
+        assert_eq!(ui.detector_settings(), settings);
+        let background = Point::new(10.0, 10.0);
+        assert!(ui
+            .click_controls_at(&view, background, now + Duration::from_millis(40))
+            .is_none());
+        assert!(matches!(
+            ui.click_controls_at(&view, background, now + Duration::from_millis(50)),
+            Some(ControlAction::Fullscreen)
+        ));
+    }
+
+    #[test]
+    fn presentation_detector_slider_drags_update_live_and_saved_settings() {
+        let (mut ui, view) = drawn_presentation_ui();
+        let now = Instant::now();
+        for parameter in [
+            Parameter::Arrangement(ArrangementSetting::MixLossDb),
+            Parameter::Percussion(Detector::Kick, PercussionSetting::SharpnessPercentile),
+        ] {
+            let center = ui.presentation.analysis_slider_center(parameter).unwrap();
+            let before = ui.visualizer.parameter_value(parameter);
+            assert!(ui.click_controls_at(&view, center, now).is_none());
+            let pressed = ui.visualizer.parameter_value(parameter);
+            assert_ne!(pressed, before, "the slider must edit its live parameter");
+            assert!(ui.presentation.analysis_dragging());
+            ui.set_pointer(Some(Point::new(center.x + 100.0, center.y)));
+            let dragged = ui.visualizer.parameter_value(parameter);
+            assert!(dragged > pressed);
+            ui.end_slider_drag();
+            assert!(!ui.presentation.analysis_dragging());
+            ui.set_pointer(Some(Point::new(center.x - 100.0, center.y)));
+            assert_eq!(ui.visualizer.parameter_value(parameter), dragged);
+        }
+        let graph = ui.presentation.analysis_graph_bounds().unwrap().center();
+        ui.click_controls_at(&view, graph, now);
+        draw_presentation_frame(&mut ui, &view);
+        let snare_gate = ui
+            .presentation
+            .analysis_slider_center(Parameter::Percussion(
+                Detector::Snare,
+                PercussionSetting::OutputRmsDb,
+            ))
+            .unwrap();
+        ui.click_controls_at(&view, snare_gate, now);
+        ui.end_slider_drag();
+        let detectors = ui.detector_settings();
+        assert_eq!(detectors, ui.visualizer.detector_settings());
+        assert_ne!(
+            detectors.percussion.channels[1].output_rms_db,
+            DetectorSettings::default().percussion.channels[1].output_rms_db
+        );
+        let mut config = Config::default();
+        config.detectors = detectors.clone();
+        let restored: Config = ron::from_str(&ron::to_string(&config).unwrap()).unwrap();
+        assert_eq!(
+            restored.detectors, detectors,
+            "presentation tuning survives config save/load"
+        );
+    }
+
+    #[test]
+    fn heatmap_marker_count_controls_update_saved_settings_and_respect_opacity() {
+        let (mut ui, view) = drawn_presentation_ui();
+        let now = Instant::now();
+        let more = ui.presentation.analysis_marker_count_center(true).unwrap();
+        assert!(ui.click_controls_at(&view, more, now).is_none());
+        assert_eq!(ui.detector_settings().percussion.recent_markers, 36);
+        assert_eq!(
+            ui.visualizer.detector_settings().percussion.recent_markers,
+            36
+        );
+        draw_presentation_frame(&mut ui, &view);
+        let less = ui.presentation.analysis_marker_count_center(false).unwrap();
+        ui.click_controls_at(&view, less, now);
+        assert_eq!(ui.detector_settings().percussion.recent_markers, 32);
+        ui.set_presentation_opacity(PresentationOpacity::try_from(0.0).unwrap());
+        ui.click_controls_at(&view, more, now);
+        assert_eq!(ui.detector_settings().percussion.recent_markers, 32);
+        assert!(!ui.presentation.analysis_dragging());
+    }
+
+    #[test]
+    fn presentation_physical_masks_clamp_persist_and_follow_channel() {
+        let (mut ui, view) = drawn_presentation_ui();
+        let now = Instant::now();
+        let low = ui
+            .presentation
+            .analysis_slider_center(Parameter::Percussion(
+                Detector::Kick,
+                PercussionSetting::LowHz,
+            ))
+            .expect("kick exposes its low frequency");
+        ui.click_controls_at(&view, low, now);
+        ui.set_pointer(Some(Point::new(low.x + 1000.0, low.y)));
+        ui.end_slider_drag();
+        let settings = ui.detector_settings().percussion.channels[0];
+        assert!(settings.low_hz <= settings.high_hz - 10.0 + 1e-4);
+        assert!((settings.high_hz - settings.low_hz - 10.0).abs() < 1e-4);
+
+        draw_presentation_frame(&mut ui, &view);
+        let high = ui
+            .presentation
+            .analysis_slider_center(Parameter::Percussion(
+                Detector::Kick,
+                PercussionSetting::HighHz,
+            ))
+            .expect("kick exposes its high frequency");
+        ui.click_controls_at(&view, high, now);
+        ui.set_pointer(Some(Point::new(high.x - 1000.0, high.y)));
+        let settings = ui.detector_settings().percussion.channels[0];
+        assert!(settings.high_hz >= settings.low_hz + 10.0 - 1e-4);
+        ui.set_pointer(Some(Point::new(high.x + 1000.0, high.y)));
+        ui.end_slider_drag();
+        let tuned = ui.detector_settings();
+        assert_eq!(tuned.percussion.channels[0].high_hz, 24_000.0);
+        assert_ne!(
+            tuned.percussion.channels[0].low_hz,
+            DetectorSettings::default().percussion.channels[0].low_hz
+        );
+
+        let mut config = Config::default();
+        config.detectors = tuned.clone();
+        let restored: Config = ron::from_str(&ron::to_string(&config).unwrap()).unwrap();
+        assert_eq!(
+            restored.detectors.percussion.channels[0],
+            tuned.percussion.channels[0]
+        );
+
+        let graph = ui.presentation.analysis_graph_bounds().unwrap().center();
+        for channel in [Detector::Snare, Detector::Hat, Detector::Kick] {
+            ui.click_controls_at(&view, graph, now);
+            draw_presentation_frame(&mut ui, &view);
+            assert_eq!(ui.presentation.analysis_selected_detector(), channel);
+            for setting in [PercussionSetting::LowHz, PercussionSetting::HighHz] {
+                assert!(
+                    ui.presentation
+                        .analysis_slider_center(Parameter::Percussion(channel, setting))
+                        .is_some(),
+                    "each channel exposes its own physical mask"
+                );
+            }
+        }
+        assert_eq!(ui.detector_settings(), tuned);
+    }
+
+    #[test]
+    fn presentation_bin_faders_edit_persist_and_reset_only_the_selected_detector() {
+        let (mut ui, view) = drawn_presentation_ui();
+        ui.reveal_controls();
+        let mut controls_scene = Scene::new();
+        assert!(ui.draw_controls(
+            &mut controls_scene,
+            &view,
+            &Config::default(),
+            false,
+            Instant::now()
+        ));
+        let now = Instant::now();
+        let kick_parameter = ui
+            .presentation
+            .analysis_first_bin_parameter()
+            .expect("kick bins are available before capture");
+        let kick_fader = ui
+            .presentation
+            .analysis_slider_center(kick_parameter)
+            .unwrap();
+        assert!(
+            !ui.controls.contains(kick_fader),
+            "the toolbar must not cover bin faders"
+        );
+        assert_eq!(ui.visualizer.parameter_value(kick_parameter), 1.0);
+        assert!(ui.click_controls_at(&view, kick_fader, now).is_none());
+        assert!(ui.presentation.analysis_dragging());
+        ui.set_pointer(Some(Point::new(kick_fader.x, kick_fader.y + 1000.0)));
+        ui.end_slider_drag();
+        assert_eq!(ui.visualizer.parameter_value(kick_parameter), 0.0);
+        assert_eq!(ui.detector_settings(), ui.visualizer.detector_settings());
+
+        let graph = ui.presentation.analysis_graph_bounds().unwrap().center();
+        ui.click_controls_at(&view, graph, now);
+        draw_presentation_frame(&mut ui, &view);
+        assert_eq!(
+            ui.presentation.analysis_selected_detector(),
+            Detector::Snare
+        );
+        let snare_parameter = ui.presentation.analysis_first_bin_parameter().unwrap();
+        let fader = ui
+            .presentation
+            .analysis_slider_center(snare_parameter)
+            .unwrap();
+        ui.click_controls_at(&view, fader, now);
+        ui.set_pointer(Some(Point::new(fader.x, fader.y + 1000.0)));
+        ui.end_slider_drag();
+        assert_eq!(ui.visualizer.parameter_value(snare_parameter), 0.0);
+
+        let mut config = Config::default();
+        config.detectors = ui.detector_settings();
+        let restored: Config = ron::from_str(&ron::to_string(&config).unwrap()).unwrap();
+        assert_eq!(restored.detectors.bin_gains, config.detectors.bin_gains);
+        let reset = ui.presentation.analysis_bin_reset_center().unwrap();
+        assert!(
+            !ui.controls.contains(reset),
+            "the toolbar must not cover bin reset"
+        );
+        assert!(ui.click_controls_at(&view, reset, now).is_none());
+        assert_eq!(ui.visualizer.parameter_value(snare_parameter), 1.0);
+        assert_eq!(ui.visualizer.parameter_value(kick_parameter), 0.0);
+        assert_eq!(ui.detector_settings(), ui.visualizer.detector_settings());
+    }
+
+    #[test]
+    fn presentation_bin_paging_does_not_cycle_channels_or_edit_gains() {
+        let (mut ui, view) = drawn_presentation_ui();
+        let now = Instant::now();
+        let graph = ui.presentation.analysis_graph_bounds().unwrap().center();
+        ui.click_controls_at(&view, graph, now);
+        draw_presentation_frame(&mut ui, &view);
+        let first = ui.presentation.analysis_first_bin_parameter().unwrap();
+        let settings = ui.detector_settings();
+        let next = ui.presentation.analysis_bin_next_center().unwrap();
+        assert!(ui.click_controls_at(&view, next, now).is_none());
+        draw_presentation_frame(&mut ui, &view);
+        assert_eq!(
+            ui.presentation.analysis_selected_detector(),
+            Detector::Snare
+        );
+        assert_ne!(
+            ui.presentation.analysis_first_bin_parameter().unwrap(),
+            first
+        );
+        assert_eq!(ui.detector_settings(), settings);
+        assert!(!ui.presentation.analysis_dragging());
+    }
+
+    #[test]
+    fn presentation_diagnostic_hover_and_drag_keep_the_cursor_visible() {
+        let config = Config::default();
+        let (mut ui, view) = drawn_presentation_ui();
+        let slider = ui
+            .presentation
+            .analysis_slider_center(Parameter::Arrangement(ArrangementSetting::GapHold))
+            .unwrap();
+        ui.set_pointer(Some(slider));
+        let mut scene = Scene::new();
+        let hidden_at = Instant::now() + Duration::from_secs(11);
+        assert!(ui.draw_controls(&mut scene, &view, &config, false, hidden_at));
+        assert_eq!(
+            ui.controls_opacity(),
+            0.0,
+            "the toolbar can hide while detector controls remain visible"
+        );
+        assert!(
+            !scene.encoding().draw_data.is_empty(),
+            "diagnostics must keep the normal-alpha overlay active"
+        );
+        assert!(ui.cursor_visible(CursorVisibility::AutoHide));
+        ui.click_controls_at(&view, slider, hidden_at);
+        assert!(ui.presentation.analysis_dragging());
+        ui.set_pointer(Some(Point::new(960.0, 400.0)));
+        assert!(ui.cursor_visible(CursorVisibility::AutoHide));
+        ui.end_slider_drag();
+        assert!(!ui.cursor_visible(CursorVisibility::AutoHide));
+        ui.set_pointer(None);
+        assert!(!ui.presentation.analysis_dragging());
+    }
+
+    #[test]
+    fn transparent_presentation_diagnostics_release_drag_and_ignore_pointer_input() {
+        let config = Config::default();
+        let (mut ui, view) = drawn_presentation_ui();
+        let parameter = Parameter::Arrangement(ArrangementSetting::MixLossDb);
+        let slider = ui.presentation.analysis_slider_center(parameter).unwrap();
+        ui.click_controls_at(&view, slider, Instant::now());
+        assert!(ui.presentation.analysis_dragging());
+        ui.set_presentation_opacity(PresentationOpacity::try_from(0.0).unwrap());
+        assert!(!ui.presentation.analysis_dragging());
+        let value = ui.visualizer.parameter_value(parameter);
+        ui.set_pointer(Some(Point::new(slider.x + 100.0, slider.y)));
+        assert_eq!(ui.visualizer.parameter_value(parameter), value);
+
+        let now = Instant::now() + Duration::from_secs(11);
+        let mut scene = Scene::new();
+        assert!(!ui.draw_controls(&mut scene, &view, &config, false, now));
+        assert!(
+            scene.encoding().draw_data.is_empty(),
+            "zero-opacity diagnostics must not leave a backplate"
+        );
+        assert!(!ui.cursor_visible(CursorVisibility::AutoHide));
+        let graph = ui.presentation.analysis_graph_bounds().unwrap().center();
+        assert!(ui.click_controls_at(&view, graph, now).is_none());
+        assert!(matches!(
+            ui.click_controls_at(&view, graph, now + Duration::from_millis(50)),
+            Some(ControlAction::Fullscreen)
+        ));
+        assert_eq!(ui.presentation.analysis_selected_detector(), Detector::Kick);
     }
 
     #[test]
@@ -2241,6 +2630,9 @@ mod tests {
             if let Some(config) = controls_config {
                 top_visible =
                     ui.draw_controls(&mut top_scene, view, config, false, frame_time.end());
+            } else {
+                top_scene.reset();
+                top_visible = ui.draw_analysis_controls(&mut top_scene);
             }
             last = Some(ui.draw(&mut scene, view, FrameRateLimit::Fps120, frame_time));
         }
@@ -2694,6 +3086,489 @@ mod tests {
 
     #[test]
     #[ignore = "requires a compute-capable GPU"]
+    fn renders_audio_analysis_presentation() -> anyhow::Result<()> {
+        use crate::visualizer::ArrangementSetting;
+
+        let Some(directory) = std::env::var_os("BENGA_ANALYSIS_PREVIEW_DIR") else {
+            return Ok(());
+        };
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory)?;
+        let selected_case = std::env::var("BENGA_ANALYSIS_PREVIEW_CASE").ok();
+        for (name, width, height, selector, controls) in [
+            ("normal", 1920, 1080, false, false),
+            ("selector", 1920, 1080, true, false),
+            ("controls", 1280, 720, false, true),
+            ("tall", 1024, 768, false, false),
+            ("light", 1920, 1080, false, false),
+            ("light-hover", 1920, 1080, false, false),
+            ("bins", 1920, 1080, false, false),
+            ("advanced", 1920, 1080, false, false),
+            ("quality", 1920, 1080, false, false),
+            ("analysis", 1920, 1080, false, false),
+            ("history", 1920, 1080, false, false),
+            ("heatmap", 1920, 1080, false, false),
+            ("expired", 1920, 1080, false, false),
+            ("disabled", 1920, 1080, false, false),
+            ("checkbox", 1920, 1080, false, false),
+            ("stereo", 1920, 1080, false, false),
+            ("energy-loss", 1920, 1080, false, false),
+            ("energy-loss-light", 1280, 720, false, false),
+            ("gap-timing", 1920, 1080, false, false),
+            ("gap-timing-light", 1280, 720, false, false),
+            ("lf-envelopes", 1920, 1080, false, false),
+            ("lf-envelopes-light", 1280, 720, false, false),
+            ("rms-gap", 1920, 1080, false, false),
+            ("rms-gap-light", 1280, 720, false, false),
+            ("loss-gap", 1920, 1080, false, false),
+            ("loss-gap-light", 1280, 720, false, false),
+        ] {
+            if selected_case
+                .as_deref()
+                .is_some_and(|selected| selected != name)
+            {
+                continue;
+            }
+            let mut config = Config::default();
+            if name.starts_with("energy-loss") {
+                for setting in [
+                    ArrangementSetting::MixLossDb,
+                    ArrangementSetting::ShapeDistance,
+                    ArrangementSetting::TrendChange,
+                    ArrangementSetting::ChangedFraction,
+                    ArrangementSetting::GapHold,
+                ] {
+                    config.detectors.arrangement.set(setting, setting.range().0);
+                }
+                config.detectors.arrangement.reference_time = 20.0;
+            }
+            if name.starts_with("gap-timing") {
+                let arrangement = &mut config.detectors.arrangement;
+                arrangement.mix_loss_db = 2.0;
+                arrangement.shape_distance = 0.08;
+                arrangement.trend_change = 0.03;
+                arrangement.changed_fraction = 0.10;
+                arrangement.gap_hold = 0.25;
+                arrangement.reference_time = 5.0;
+            }
+            if name.starts_with("rms-gap") {
+                // Uniform attenuation preserves shape. The independent RMS
+                // timer must arm despite strict relative shape requirements.
+                let arrangement = &mut config.detectors.arrangement;
+                arrangement.shape_distance = 0.6;
+                arrangement.trend_change = 0.3;
+                arrangement.changed_fraction = 1.0;
+                arrangement.gap_rms_db = -40.0;
+                arrangement.gap_rms_hold = 0.5;
+            }
+            if name.starts_with("loss-gap") {
+                let arrangement = &mut config.detectors.arrangement;
+                arrangement.mix_loss_db = 2.0;
+                arrangement.mix_loss_hold = 0.35;
+                arrangement.gap_hold = 4.0;
+                arrangement.shape_distance = 0.6;
+                arrangement.trend_change = 0.3;
+                arrangement.changed_fraction = 1.0;
+                arrangement.gap_rms_db = -80.0;
+            }
+            let mut ui = Ui::new(&config)?;
+            if [
+                "light",
+                "light-hover",
+                "energy-loss-light",
+                "gap-timing-light",
+                "lf-envelopes-light",
+                "rms-gap-light",
+                "loss-gap-light",
+            ]
+            .contains(&name)
+            {
+                ui.set_theme(ron::from_str("\"Tomorrow\"")?);
+            }
+            ui.set_presentation(true);
+            ui.visualizer
+                .set_parameter(Parameter::SelectorEntryKicks, 32.0);
+            ui.visualizer.set_parameter(Parameter::SnareFlipEvery, 32.0);
+            let view = View::fit(Size::new(f64::from(width), f64::from(height)));
+            let now = Instant::now();
+            let mut noise_state = 0x7136_8ab9_u32;
+            let mut timely_lf_return = false;
+            let pixels = presentation_pixels(
+                &mut ui,
+                &view,
+                if name == "bins" { 588 } else { 600 },
+                false,
+                controls.then_some(&config),
+                |frame, ui| {
+                    let mut input = Vec::with_capacity(800);
+                    for index in 0..800 {
+                        let time = (frame * 800 + index) as f32 / 48_000.0;
+                        noise_state ^= noise_state << 13;
+                        noise_state ^= noise_state >> 17;
+                        noise_state ^= noise_state << 5;
+                        let noise = noise_state as f32 / u32::MAX as f32 * 2.0 - 1.0;
+                        let kick_age = time % 0.5;
+                        let kick_phase = std::f32::consts::TAU
+                            * (48.0 * kick_age + 100.0 * 0.025 * (1.0 - (-kick_age / 0.025).exp()));
+                        let kick = 0.8 * (-kick_age / 0.06).exp() * kick_phase.sin();
+                        let snare_age = (time + 0.25) % 1.0;
+                        let snare = 0.35
+                            * (-snare_age / 0.04).exp()
+                            * (noise + (std::f32::consts::TAU * 190.0 * time).sin() * 0.5);
+                        let hat_age = time % 0.125;
+                        let hat = 0.15 * (-hat_age / 0.012).exp() * noise;
+                        let quiet = (3.0..5.0).contains(&time);
+                        let backing = 0.05 * (std::f32::consts::TAU * 700.0 * time).sin()
+                            + 0.03 * (std::f32::consts::TAU * 1400.0 * time).sin();
+                        let sample = if quiet {
+                            backing * 0.3
+                        } else {
+                            backing + kick + snare + hat
+                        };
+                        if name.starts_with("loss-gap") {
+                            // Uniform attenuation leaves the spectral shape
+                            // unchanged and stays above the absolute RMS path.
+                            let gain = if (4.5..7.0).contains(&time) {
+                                0.5
+                            } else if time >= 7.0 {
+                                0.5 + 0.5 * ((time - 7.0) / 0.12).clamp(0.0, 1.0)
+                            } else {
+                                1.0
+                            };
+                            let signal = gain
+                                * (0.24 * (std::f32::consts::TAU * 90.0 * time).sin()
+                                    + 0.156 * (std::f32::consts::TAU * 150.0 * time).sin()
+                                    + 0.05 * (std::f32::consts::TAU * 2200.0 * time).sin());
+                            input.push([signal, -signal]);
+                        } else if name.starts_with("rms-gap") {
+                            let gain = if (3.0..6.0).contains(&time) {
+                                0.02
+                            } else if time >= 6.0 {
+                                0.02 + 0.98 * ((time - 6.0) / 0.12).clamp(0.0, 1.0)
+                            } else {
+                                1.0
+                            };
+                            let signal = gain
+                                * (0.24 * (std::f32::consts::TAU * 90.0 * time).sin()
+                                    + 0.156 * (std::f32::consts::TAU * 150.0 * time).sin()
+                                    + 0.05 * (std::f32::consts::TAU * 2200.0 * time).sin());
+                            input.push([signal, -signal]);
+                        } else if name.starts_with("lf-envelopes") {
+                            // A broad 120 ms bass return must confirm without
+                            // relying on one-hop spectral flux or coverage.
+                            let bass_gain = if (3.0..6.0).contains(&time) {
+                                0.002
+                            } else if time >= 6.0 {
+                                let ramp = ((time - 6.0) / 0.12).clamp(0.0, 1.0);
+                                0.002 + (0.24 - 0.002) * ramp
+                            } else {
+                                0.24
+                            };
+                            let bass = bass_gain
+                                * ((std::f32::consts::TAU * 90.0 * time).sin()
+                                    + 0.65 * (std::f32::consts::TAU * 150.0 * time).sin());
+                            let signal = bass
+                                + 0.05 * (std::f32::consts::TAU * 2200.0 * time).sin()
+                                + noise * 0.01;
+                            input.push([signal, -signal]);
+                        } else if name.starts_with("gap-timing") {
+                            // First separate the spectral and energy evidence;
+                            // only the final section changes them together.
+                            let changed_shape = (3.0..3.8).contains(&time) || time >= 8.0;
+                            let gain = if time >= 8.0 {
+                                0.35
+                            } else if (6.0..6.8).contains(&time) {
+                                0.5
+                            } else {
+                                1.0
+                            };
+                            let (low, high) = if changed_shape {
+                                (0.005, 0.20)
+                            } else {
+                                (0.20, 0.005)
+                            };
+                            let tone = gain
+                                * (low * (std::f32::consts::TAU * 90.0 * time).sin()
+                                    + 0.03 * (std::f32::consts::TAU * 880.0 * time).sin()
+                                    + high * (std::f32::consts::TAU * 6000.0 * time).sin());
+                            input.push([tone; 2]);
+                        } else if name.starts_with("energy-loss") {
+                            // A small uniform level dip exercises the 0.25 dB
+                            // energy check without confirming a spectral gap.
+                            let amplitude = if time < 7.0 { 0.25 } else { 0.24 };
+                            let tone = amplitude * (std::f32::consts::TAU * 220.0 * time).sin();
+                            input.push([tone; 2]);
+                        } else if name == "stereo" {
+                            // Independent in-band carriers exchange energy.
+                            // The physical combined level stays steady while
+                            // left and right attack envelopes move oppositely.
+                            let within = (time - 0.25).rem_euclid(0.5);
+                            let proportion = if within < 0.12 {
+                                (within / 0.006).min(1.0)
+                            } else {
+                                (1.0 - (within - 0.12) / 0.080).max(0.0)
+                            };
+                            let pan = proportion * std::f32::consts::FRAC_PI_2;
+                            input.push([
+                                0.6 * pan.cos() * (std::f32::consts::TAU * 2500.0 * time).sin(),
+                                0.6 * pan.sin() * (std::f32::consts::TAU * 3300.0 * time).sin(),
+                            ]);
+                        } else {
+                            input.push([sample * 0.5; 2]);
+                        }
+                    }
+                    if (!selector || frame < 540) && (name != "expired" || frame < 540) {
+                        ui.consume_buf(&input, now + Duration::from_secs_f64(frame as f64 / 60.0));
+                    }
+                    if name.starts_with("lf-envelopes") {
+                        let snapshot = ui.visualizer.debug_snapshot();
+                        if frame == 330 {
+                            assert!(
+                                snapshot.drop_onset.armed,
+                                "bassless bridge must arm the gap"
+                            );
+                        }
+                        if (360..372).contains(&frame) {
+                            let status = snapshot.drop_status;
+                            timely_lf_return |= snapshot.drop_hits == 1
+                                && status.bass_fast_db > status.bass_slow_db
+                                && status.bass_fast_db >= status.bass_onset_threshold_db;
+                        }
+                    }
+                    if name.starts_with("rms-gap") {
+                        let snapshot = ui.visualizer.debug_snapshot();
+                        let status = snapshot.drop_status;
+                        if frame == 195 {
+                            assert!(
+                                !snapshot.drop_onset.armed,
+                                "RMS must stay low for its full hold"
+                            );
+                            assert!(status.gap_rms_condition_met);
+                            assert!(status.gap_rms_held_seconds < status.gap_rms_hold_seconds);
+                        }
+                        if frame == 218 {
+                            assert!(snapshot.drop_onset.armed, "RMS alone must arm the gap");
+                            assert!(
+                                !status.gap_conditions_met,
+                                "relative shape path must remain false"
+                            );
+                            assert_eq!(status.gap_rms_hold_seconds, 0.5);
+                            assert_eq!(status.gap_rms_threshold_db, -40.0);
+                        }
+                        if (360..372).contains(&frame) {
+                            timely_lf_return |= snapshot.drop_hits == 1
+                                && status.bass_fast_db > status.bass_slow_db;
+                        }
+                    }
+                    if name.starts_with("loss-gap") {
+                        let snapshot = ui.visualizer.debug_snapshot();
+                        let status = snapshot.drop_status;
+                        if frame == 285 {
+                            assert!(
+                                !snapshot.drop_onset.armed,
+                                "loss must complete its own hold"
+                            );
+                            assert!(status.mix_loss_condition_met);
+                            assert!(status.mix_loss_held_seconds < status.mix_loss_hold_seconds);
+                        }
+                        if frame == 310 {
+                            assert!(snapshot.drop_onset.armed, "loss alone must arm the gap");
+                            assert!(!status.gap_conditions_met, "shape path must remain false");
+                            assert!(
+                                !status.gap_rms_condition_met,
+                                "absolute RMS path must remain false"
+                            );
+                            assert_eq!(status.mix_loss_hold_seconds, 0.35);
+                        }
+                        if (420..432).contains(&frame) {
+                            timely_lf_return |= snapshot.drop_hits == 1
+                                && status.bass_fast_db > status.bass_slow_db;
+                        }
+                    }
+                    if name.starts_with("gap-timing") && [225, 390, 475].contains(&frame) {
+                        let snapshot = ui.visualizer.debug_snapshot();
+                        let status = snapshot.drop_status;
+                        let spectral = status.shape_distance > status.shape_distance_threshold
+                            && (status.trend_change > status.trend_change_threshold
+                                || status.changed_fraction >= status.changed_fraction_threshold);
+                        let energy = -status.energy_delta_db > status.mix_loss_threshold_db;
+                        assert!(
+                            !snapshot.drop_onset.armed,
+                            "separated evidence must stay unarmed at frame {frame}"
+                        );
+                        assert!(
+                            !status.gap_conditions_met,
+                            "no overlap at frame {frame}: {status:?}"
+                        );
+                        if frame == 225 {
+                            assert!(spectral && !energy, "early shape-only phase: {status:?}");
+                        } else if frame == 390 {
+                            assert!(energy && !spectral, "later energy-only phase: {status:?}");
+                        }
+                    }
+                    if name == "disabled" && frame == 1 {
+                        for setting in PercussionSetting::CHANNEL
+                            .into_iter()
+                            .filter(|setting| setting.is_filter_toggle())
+                        {
+                            ui.set_parameter(Parameter::Percussion(Detector::Kick, setting), 0.0);
+                        }
+                    }
+                    if name == "checkbox" && frame == 575 {
+                        let point = ui
+                            .presentation
+                            .analysis_slider_center(Parameter::Percussion(
+                                Detector::Kick,
+                                PercussionSetting::InputProminenceEnabled,
+                            ))
+                            .unwrap();
+                        ui.click_controls_at(&view, point, now);
+                        ui.set_pointer(Some(point));
+                    }
+                    if ["heatmap", "expired"].contains(&name) && frame == 1 {
+                        for _ in 0..2 {
+                            let graph = ui.presentation.analysis_graph_bounds().unwrap().center();
+                            ui.click_controls_at(&view, graph, now);
+                        }
+                    }
+                    if name == "expired" && frame == 540 {
+                        ui.visualizer.consume_buf(&vec![[0.0; 2]; 48_000 * 20], 1.0);
+                    }
+                    if name == "bins" && frame == 1 {
+                        let graph = ui.presentation.analysis_graph_bounds().unwrap().center();
+                        ui.click_controls_at(&view, graph, now);
+                    }
+                    if name == "stereo" && frame == 1 {
+                        let graph = ui.presentation.analysis_graph_bounds().unwrap().center();
+                        ui.click_controls_at(&view, graph, now);
+                    }
+                    if name == "bins" && frame == 575 {
+                        let parameter = ui.presentation.analysis_first_bin_parameter().unwrap();
+                        ui.set_parameter(parameter, 0.3);
+                    }
+                    if ["advanced", "quality", "analysis", "light-hover"].contains(&name)
+                        && frame == 575
+                    {
+                        let setting = match name {
+                            "quality" => PercussionSetting::AdmissionProminence,
+                            "analysis" => PercussionSetting::SharpnessPercentile,
+                            _ => PercussionSetting::FeatureMs,
+                        };
+                        if let Some(center) = ui
+                            .presentation
+                            .analysis_slider_center(Parameter::Percussion(Detector::Kick, setting))
+                        {
+                            ui.set_pointer(Some(center));
+                        }
+                    }
+                    if name == "history" && frame == 590 {
+                        let previous = ui.presentation.analysis_previous_event_center().unwrap();
+                        ui.click_controls_at(&view, previous, now);
+                    }
+                    if name == "stereo" && frame == 599 {
+                        let previous = ui.presentation.analysis_previous_event_center().unwrap();
+                        ui.click_controls_at(&view, previous, now);
+                        ui.set_pointer(None);
+                    }
+                    if selector && frame == 550 {
+                        ui.visualizer
+                            .set_parameter(Parameter::SelectorEntryKicks, 1.0);
+                        ui.visualizer.showcase.exit_focus();
+                        ui.visualizer.showcase.kick(&mut ui.visualizer.rng, true);
+                    }
+                    if controls && frame == 599 {
+                        ui.controls.activate(now + Duration::from_secs(10));
+                    }
+                },
+            )?;
+            if width == 1920 {
+                assert_eq!(
+                    ui.presentation.debug_analysis_count(),
+                    2,
+                    "both diagnostic instruments remain visible in {name}"
+                );
+            }
+            if name.starts_with("energy-loss") {
+                let status = ui.visualizer.debug_snapshot();
+                assert_eq!(status.drop_status.mix_loss_threshold_db, 0.25);
+                assert!(-status.drop_status.energy_delta_db > 0.25);
+                assert!(
+                    status.drop_onset.armed,
+                    "sustained energy loss must arm without a shape change"
+                );
+                assert!(!status.drop_status.gap_conditions_met);
+                assert!(status.drop_status.mix_loss_condition_met);
+            }
+            if name.starts_with("gap-timing") {
+                let snapshot = ui.visualizer.debug_snapshot();
+                assert!(
+                    snapshot.drop_onset.armed,
+                    "overlapping evidence must confirm a gap: {:?}",
+                    snapshot.drop_status
+                );
+                assert!(snapshot.drop_status.gap_conditions_met);
+                assert_eq!(snapshot.drop_status.gap_hold_seconds, 0.25);
+            }
+            if name.starts_with("lf-envelopes") {
+                let snapshot = ui.visualizer.debug_snapshot();
+                assert_eq!(snapshot.drop_hits, 1, "one broad bass return confirms once");
+                assert!(
+                    timely_lf_return,
+                    "bass return must confirm within 200 ms with envelope evidence"
+                );
+                assert!(
+                    ui.visualizer.debug_history().samples().any(|sample| {
+                        sample.drop_status.bass_fast_db > sample.drop_status.bass_slow_db + 1.0
+                    }),
+                    "history must retain the fast/slow separation used by the LF graph"
+                );
+            }
+            if name.starts_with("rms-gap") {
+                let snapshot = ui.visualizer.debug_snapshot();
+                assert_eq!(snapshot.drop_hits, 1, "the RMS-armed gap is consumed once");
+                assert!(
+                    timely_lf_return,
+                    "fresh LF return must consume the RMS-armed gap"
+                );
+                assert!(!snapshot.drop_onset.armed);
+                assert!(
+                    ui.visualizer.debug_history().samples().any(|sample| {
+                        sample.drop_onset.armed && !sample.drop_status.gap_conditions_met
+                    }),
+                    "history must show RMS-only arming"
+                );
+            }
+            if name.starts_with("loss-gap") {
+                let snapshot = ui.visualizer.debug_snapshot();
+                assert_eq!(snapshot.drop_hits, 1, "the loss-armed gap is consumed once");
+                assert!(
+                    timely_lf_return,
+                    "fresh LF return must consume the loss-armed gap"
+                );
+                assert!(!snapshot.drop_onset.armed);
+                assert!(
+                    ui.visualizer.debug_history().samples().any(|sample| {
+                        let status = sample.drop_status;
+                        sample.drop_onset.armed
+                            && status.mix_loss_held_seconds >= status.mix_loss_hold_seconds
+                            && !status.gap_conditions_met
+                            && !status.gap_rms_condition_met
+                    }),
+                    "history must retain independently sufficient loss evidence"
+                );
+            }
+            write_preview(
+                &directory.join(format!("{name}.png")),
+                width,
+                height,
+                &pixels,
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a compute-capable GPU"]
     fn renders_presentation_at_sixteen_by_nine() -> anyhow::Result<()> {
         let width = 1920;
         let height = 1080;
@@ -3019,7 +3894,10 @@ mod tests {
         assert_eq!(ui.debug_selection, Some(DebugSelection::Hat));
         let hat = debug::hat_analyzer_layout(&view, ui.text_scale);
         assert!(!hat.sliders.is_empty());
-        assert!(hat.temporal.is_some(), "the hat pattern editor is shown");
+        assert!(
+            hat.temporal.is_none(),
+            "sharp attacks have no temporal editor"
+        );
 
         assert!(ui.click_debug(&view, layout.scene_button.center()));
         assert_eq!(ui.debug_selection, Some(DebugSelection::Scene));

@@ -12,9 +12,10 @@ use vello::{
 };
 
 use crate::visualizer::{
-    ArrangementSetting, DebugHistory, DebugSample, Detector, DropStatus, OnsetBinMeter, Parameter,
-    PercussionDecision, PercussionReferencePoint, PercussionReferenceSnapshot, PercussionSetting,
-    RankInterval, Visualizer,
+    AggressionBands, ArrangementSetting, DebugHistory, DebugSample, Detector, DropStatus,
+    OnsetBinMeter, Parameter, PercussionDecision, PercussionReferencePoint,
+    PercussionReferenceSnapshot, PercussionSetting, RankInterval, SpectralAggression, Visualizer,
+    BAND_COUNT,
 };
 use crate::{
     text::{BlockAlign, Fonts, Text, TextPaint, TextPlan, UiFace},
@@ -24,7 +25,8 @@ use crate::{
 use super::{ScenePalette, Stage};
 
 const HISTORY_SECONDS: f32 = 8.0;
-const SHAPE_PANEL_HEIGHT: f64 = 860.0;
+const AGGRESSION_PANEL_HEIGHT: f64 = 128.0;
+const SHAPE_PANEL_HEIGHT: f64 = 860.0 + AGGRESSION_PANEL_HEIGHT;
 const ONSET_PANEL_HEIGHT: f64 = 730.0;
 const CONTROL_PANEL_HEIGHT: f64 = 730.0;
 const HEATMAP_TOP: f64 = 260.0;
@@ -133,6 +135,11 @@ pub(crate) enum AnalysisInteraction {
 pub(super) struct AnalysisOverlay {
     samples: VecDeque<Sample>,
     shape: DropStatus,
+    aggression: SpectralAggression,
+    aggression_bands: AggressionBands,
+    aggression_frequencies: [(f32, f32); 2],
+    shape_axis_mid_fraction: f32,
+    stiffness_scale: f32,
     decisions: VecDeque<PercussionDecision>,
     reference: PercussionReferenceSnapshot,
     audio_time: f64,
@@ -198,6 +205,22 @@ impl AnalysisOverlay {
             self.shape = DropStatus::default();
             self.no_audio = true;
         }
+        self.aggression = visualizer.spectral_aggression();
+        self.aggression_bands = visualizer.aggression_bands();
+        self.aggression_frequencies = [
+            (
+                visualizer.spectral_band_edge_hz(self.aggression_bands.lf_start),
+                visualizer.spectral_band_edge_hz(self.aggression_bands.lf_end),
+            ),
+            (
+                visualizer.spectral_band_edge_hz(self.aggression_bands.mf_start),
+                visualizer.spectral_band_edge_hz(self.aggression_bands.mf_end),
+            ),
+        ];
+        self.stiffness_scale = visualizer.spectral_stiffness_scale();
+        let low = visualizer.spectral_band_edge_hz(0);
+        let high = visualizer.spectral_band_edge_hz(BAND_COUNT);
+        self.shape_axis_mid_fraction = ((1000.0 / low).ln() / (high / low).ln()).clamp(0.0, 1.0);
         self.decisions.clear();
         self.decisions
             .extend(visualizer.percussion_decisions().iter().cloned());
@@ -237,6 +260,19 @@ impl AnalysisOverlay {
             ("axis_low", "32 Hz", 11.0, UiFace::Light),
             ("axis_mid", "1 kHz", 11.0, UiFace::Light),
             ("axis_high", "16 kHz", 11.0, UiFace::Light),
+            ("shape_top", "+1", 9.0, UiFace::Light),
+            ("shape_zero", "0", 9.0, UiFace::Light),
+            ("shape_bottom", "-1", 9.0, UiFace::Light),
+            ("aggression_lf_handle", "LF", 8.0, UiFace::SemiBold),
+            ("aggression_mf_handle", "MF", 8.0, UiFace::SemiBold),
+            ("aggression_warm", "0% WARM", 9.0, UiFace::Light),
+            ("aggression_full", "100% AGGRESSIVE", 9.0, UiFace::Light),
+            (
+                "relaxation_hint",
+                "MORE RELAXATION = SOFTER SPRINGS ON WARM SOUND",
+                9.0,
+                UiFace::Light,
+            ),
             ("raw_axis_low", "20 Hz", 10.5, UiFace::Light),
             (
                 "movement",
@@ -409,6 +445,66 @@ impl AnalysisOverlay {
         ] {
             self.cache(fonts, key, source.to_owned(), size, face);
         }
+        self.cache(
+            fonts,
+            "aggression_value",
+            if self.no_audio {
+                "AGGRESSION -- · SPRING STIFFNESS --".to_owned()
+            } else {
+                format!(
+                    "AGGRESSION {:.0}% · SPRING STIFFNESS {:.0}%",
+                    self.aggression.value * 100.0,
+                    self.stiffness_scale * 100.0,
+                )
+            },
+            12.0,
+            UiFace::SemiBold,
+        );
+        for (key, name, bands, level) in [
+            (
+                "aggression_lf",
+                "LF MAX",
+                self.aggression_bands.lf_range(),
+                self.aggression.lf_level,
+            ),
+            (
+                "aggression_mf",
+                "MF MEDIAN",
+                self.aggression_bands.mf_range(),
+                self.aggression.mf_level,
+            ),
+        ] {
+            self.cache(
+                fonts,
+                key,
+                format!(
+                    "{} B{}–{}  {}",
+                    name,
+                    bands.start + 1,
+                    bands.end,
+                    if self.no_audio {
+                        "--".to_owned()
+                    } else {
+                        format!("{level:+.2}")
+                    },
+                ),
+                10.0,
+                UiFace::SemiBold,
+            );
+        }
+        self.cache(
+            fonts,
+            "aggression_ranges",
+            format!(
+                "LF {:.0}–{:.0} Hz · MF {:.0}–{:.0} Hz · DRAG EDGES TO ADJUST",
+                self.aggression_frequencies[0].0,
+                self.aggression_frequencies[0].1,
+                self.aggression_frequencies[1].0,
+                self.aggression_frequencies[1].1,
+            ),
+            8.7,
+            UiFace::Light,
+        );
         let armed = self.samples.back().is_some_and(|sample| sample.armed);
         self.cache(
             fonts,
@@ -971,6 +1067,19 @@ impl AnalysisOverlay {
 
     fn update_sliders(&mut self, fonts: &mut Fonts, visualizer: &Visualizer, stage: &Stage) {
         let mut index = 0;
+        if let Some(panel) = self.left {
+            self.update_slider(
+                index,
+                228.0,
+                30.0,
+                panel,
+                Parameter::SpectralRelaxation,
+                fonts,
+                visualizer,
+                stage,
+            );
+            index += 1;
+        }
         if let Some(panel) = self.gap_controls {
             for setting in ArrangementSetting::ALL {
                 let top = match setting {
@@ -989,6 +1098,12 @@ impl AnalysisOverlay {
                     ArrangementSetting::BassHitThreshold => 784.0,
                     ArrangementSetting::DropMinRmsDb => 822.0,
                 };
+                let top = top
+                    + if setting == ArrangementSetting::ReferenceTime {
+                        0.0
+                    } else {
+                        AGGRESSION_PANEL_HEIGHT
+                    };
                 self.update_slider(
                     index,
                     top,
@@ -1363,6 +1478,26 @@ impl AnalysisOverlay {
     pub fn pointer_down(&mut self, point: Point) -> Option<AnalysisInteraction> {
         self.pointer = Some(point);
         self.drag = None;
+        if let Some(handles) = self.aggression_handles() {
+            let unit = self
+                .left
+                .map_or(1.0, |panel| panel.rect.height() / SHAPE_PANEL_HEIGHT);
+            if let Some((parameter, _)) = handles
+                .iter()
+                .filter(|(_, handle)| {
+                    (point.x - handle.x).abs() <= 7.0 * unit
+                        && (point.y - handle.y).abs() <= 8.0 * unit
+                })
+                .min_by(|(_, a), (_, b)| point.distance(*a).total_cmp(&point.distance(*b)))
+            {
+                let parameter = *parameter;
+                self.drag = Some(parameter);
+                return Some(AnalysisInteraction::Parameter(
+                    parameter,
+                    self.aggression_edge_at(point),
+                ));
+            }
+        }
         if let Some((parameter, enabled, _)) = self
             .sliders
             .iter()
@@ -1494,6 +1629,9 @@ impl AnalysisOverlay {
             return None;
         };
         let parameter = self.drag?;
+        if is_aggression_boundary(parameter) {
+            return Some((parameter, self.aggression_edge_at(point)));
+        }
         if let Some(slider) = self
             .bin_sliders
             .iter()
@@ -1514,6 +1652,60 @@ impl AnalysisOverlay {
     pub fn cancel_interaction(&mut self) {
         self.drag = None;
         self.pointer = None;
+    }
+
+    fn shape_plot(&self) -> Option<Rect> {
+        self.left.map(|panel| {
+            let unit = panel.rect.height() / SHAPE_PANEL_HEIGHT;
+            Rect::new(
+                panel.rect.x0 + 24.0 * unit,
+                panel.rect.y0 + 62.0 * unit,
+                panel.rect.x1 - 4.0 * unit,
+                panel.rect.y0 + 130.0 * unit,
+            )
+        })
+    }
+
+    fn aggression_edge_at(&self, point: Point) -> f32 {
+        self.shape_plot().map_or(0.0, |plot| {
+            (((point.x - plot.x0) / plot.width()).clamp(0.0, 1.0) * BAND_COUNT as f64).round()
+                as f32
+        })
+    }
+
+    fn aggression_handles(&self) -> Option<[(Parameter, Point); 4]> {
+        let plot = self.shape_plot()?;
+        let unit = self.left?.rect.height() / SHAPE_PANEL_HEIGHT;
+        Some(
+            [
+                (
+                    Parameter::AggressionLfStart,
+                    self.aggression_bands.lf_start,
+                    plot.y0 + 5.0 * unit,
+                ),
+                (
+                    Parameter::AggressionLfEnd,
+                    self.aggression_bands.lf_end,
+                    plot.y0 + 5.0 * unit,
+                ),
+                (
+                    Parameter::AggressionMfStart,
+                    self.aggression_bands.mf_start,
+                    plot.y1 - 5.0 * unit,
+                ),
+                (
+                    Parameter::AggressionMfEnd,
+                    self.aggression_bands.mf_end,
+                    plot.y1 - 5.0 * unit,
+                ),
+            ]
+            .map(|(parameter, edge, y)| {
+                (
+                    parameter,
+                    Point::new(plot.x0 + edge as f64 / BAND_COUNT as f64 * plot.width(), y),
+                )
+            }),
+        )
     }
 
     #[cfg(test)]
@@ -1627,6 +1819,12 @@ impl AnalysisOverlay {
                 ("gap_timing_group", 533.0),
                 ("gap_return_group", 708.0),
             ] {
+                let top = top
+                    + if key == "gap_reference_group" {
+                        0.0
+                    } else {
+                        AGGRESSION_PANEL_HEIGHT
+                    };
                 self.label(
                     scene,
                     key,
@@ -1817,6 +2015,14 @@ impl AnalysisOverlay {
 
     fn hover_source(&self) -> Option<&'static str> {
         let point = self.pointer?;
+        if let Some(handles) = self.aggression_handles() {
+            let unit = self.left?.rect.height() / SHAPE_PANEL_HEIGHT;
+            if let Some((parameter, _)) = handles.iter().find(|(_, handle)| {
+                (point.x - handle.x).abs() <= 7.0 * unit && (point.y - handle.y).abs() <= 8.0 * unit
+            }) {
+                return Some(parameter.analysis_hint());
+            }
+        }
         if let Some(slider) = self
             .sliders
             .iter()
@@ -2252,7 +2458,24 @@ impl AnalysisOverlay {
             palette.ink.with_alpha(0.85),
         );
         self.label(scene, "shape_key", panel, 0.0, 52.0, stage, palette.muted);
-        let plot = subrect(panel, stage, 4.0, 62.0, 4.0, 68.0);
+        let plot = subrect(panel, stage, 24.0, 62.0, 4.0, 68.0);
+        let band_width = plot.width() / self.shape.shape.len() as f64;
+        for (bands, color) in [
+            (self.aggression_bands.lf_range(), palette.accent),
+            (self.aggression_bands.mf_range(), palette.ink),
+        ] {
+            for band in bands {
+                let x = plot.x0 + band as f64 * band_width;
+                let bounds = Rect::new(x, plot.y0, x + band_width, plot.y1);
+                scene.fill(
+                    Fill::NonZero,
+                    Affine::IDENTITY,
+                    color.with_alpha(0.10),
+                    None,
+                    &bounds,
+                );
+            }
+        }
         grid(scene, plot, stage, palette);
         let baseline = plot.y0 + plot.height() * 0.5;
         rule(
@@ -2273,8 +2496,8 @@ impl AnalysisOverlay {
             let mut path = BezPath::new();
             for (index, value) in shape.iter().enumerate() {
                 let point = Point::new(
-                    plot.x0 + index as f64 / (shape.len() - 1) as f64 * plot.width(),
-                    baseline - f64::from(value.clamp(-1.0, 1.0)) * plot.height() * 0.48,
+                    plot.x0 + (index as f64 + 0.5) / shape.len() as f64 * plot.width(),
+                    baseline - f64::from(value.clamp(-1.0, 1.0)) * plot.height() * 0.5,
                 );
                 if index == 0 {
                     path.move_to(point);
@@ -2282,12 +2505,28 @@ impl AnalysisOverlay {
                     path.line_to(point);
                 }
                 if vertices {
+                    let color = if self.aggression_bands.lf_range().contains(&index) {
+                        palette.accent
+                    } else {
+                        color
+                    };
                     scene.fill(
                         Fill::NonZero,
                         Affine::IDENTITY,
                         color,
                         None,
-                        &Circle::new(point, stage.px(1.65)),
+                        &Circle::new(
+                            point,
+                            stage.px(
+                                if self.aggression_bands.lf_range().contains(&index)
+                                    || self.aggression_bands.mf_range().contains(&index)
+                                {
+                                    2.5
+                                } else {
+                                    1.65
+                                },
+                            ),
+                        ),
                     );
                 }
             }
@@ -2299,11 +2538,76 @@ impl AnalysisOverlay {
                 &path,
             );
         }
-        for (key, x) in [
-            ("axis_low", 0.0),
-            ("axis_mid", panel.width() / stage.unit * 0.55 - 11.0),
-            ("axis_high", panel.width() / stage.unit - 32.0),
+        if let Some(handles) = self.aggression_handles() {
+            for (parameter, point) in handles {
+                let low = matches!(
+                    parameter,
+                    Parameter::AggressionLfStart | Parameter::AggressionLfEnd
+                );
+                let color = if low { palette.accent } else { palette.ink };
+                let active = self.drag == Some(parameter)
+                    || self
+                        .pointer
+                        .is_some_and(|pointer| point.distance(pointer) <= stage.px(8.0));
+                scene.stroke(
+                    &if low {
+                        Stroke::new(stage.px(0.8))
+                    } else {
+                        Stroke::new(stage.px(0.8)).with_dashes(0.0, [stage.px(2.0), stage.px(2.0)])
+                    },
+                    Affine::IDENTITY,
+                    color.with_alpha(if active { 1.0 } else { 0.65 }),
+                    None,
+                    &Line::new((point.x, plot.y0), (point.x, plot.y1)),
+                );
+                scene.fill(
+                    Fill::NonZero,
+                    Affine::IDENTITY,
+                    color.with_alpha(if active { 1.0 } else { 0.85 }),
+                    None,
+                    &Rect::new(
+                        point.x - stage.px(3.5),
+                        point.y - stage.px(3.5),
+                        point.x + stage.px(3.5),
+                        point.y + stage.px(3.5),
+                    ),
+                );
+            }
+        }
+        for (key, bands, y, color) in [
+            (
+                "aggression_lf_handle",
+                self.aggression_bands.lf_range(),
+                78.0,
+                palette.accent,
+            ),
+            (
+                "aggression_mf_handle",
+                self.aggression_bands.mf_range(),
+                120.0,
+                palette.ink,
+            ),
         ] {
+            let center = (bands.start + bands.end) as f64 * 0.5;
+            let x =
+                (plot.x0 - panel.x0 + center / BAND_COUNT as f64 * plot.width()) / stage.unit - 5.0;
+            self.label(scene, key, panel, x, y, stage, color);
+        }
+        for (key, y) in [
+            ("shape_top", 65.0),
+            ("shape_zero", 99.0),
+            ("shape_bottom", 133.0),
+        ] {
+            self.label(scene, key, panel, 0.0, y, stage, palette.muted);
+        }
+        for (key, fraction, anchor) in [
+            ("axis_low", 0.0, 0.0),
+            ("axis_mid", f64::from(self.shape_axis_mid_fraction), 0.5),
+            ("axis_high", 1.0, 1.0),
+        ] {
+            let label_width = self.labels.get(key).map_or(0.0, |label| label.text.width());
+            let x =
+                (plot.x0 - panel.x0 + fraction * plot.width()) / stage.unit - anchor * label_width;
             self.label(
                 scene,
                 key,
@@ -2314,6 +2618,11 @@ impl AnalysisOverlay {
                 palette.muted.with_alpha(0.75),
             );
         }
+        self.draw_aggression(scene, panel, stage, palette);
+        let panel = panel.with_origin(Point::new(
+            panel.x0,
+            panel.y0 + stage.px(AGGRESSION_PANEL_HEIGHT),
+        ));
         self.label(
             scene,
             "movement",
@@ -2605,6 +2914,107 @@ impl AnalysisOverlay {
         self.events(scene, bass, 3, palette.ink, stage);
         self.label(scene, "hit_values", panel, 0.0, 838.0, stage, palette.muted);
         self.label(scene, "return_rms", panel, 0.0, 852.0, stage, palette.muted);
+    }
+
+    fn draw_aggression(
+        &self,
+        scene: &mut Scene,
+        panel: Rect,
+        stage: &Stage,
+        palette: ScenePalette,
+    ) {
+        self.label(
+            scene,
+            "aggression_value",
+            panel,
+            0.0,
+            164.0,
+            stage,
+            palette.ink,
+        );
+        let meter = subrect(panel, stage, 0.0, 173.0, 0.0, 6.0);
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            palette.muted.with_alpha(0.18),
+            None,
+            &meter,
+        );
+        if !self.no_audio {
+            scene.fill(
+                Fill::NonZero,
+                Affine::IDENTITY,
+                palette.accent.with_alpha(0.85),
+                None,
+                &Rect::new(
+                    meter.x0,
+                    meter.y0,
+                    meter.x0 + f64::from(self.aggression.value) * meter.width(),
+                    meter.y1,
+                ),
+            );
+        }
+        rule(
+            scene,
+            Point::new(meter.center().x, meter.y0 - stage.px(2.0)),
+            Point::new(meter.center().x, meter.y1 + stage.px(2.0)),
+            palette.muted.with_alpha(0.7),
+            stage.px(0.7),
+        );
+        self.label(
+            scene,
+            "aggression_warm",
+            panel,
+            0.0,
+            192.0,
+            stage,
+            palette.muted,
+        );
+        self.label(
+            scene,
+            "aggression_full",
+            panel,
+            panel.width() / stage.unit - 89.0,
+            192.0,
+            stage,
+            palette.muted,
+        );
+        self.label(
+            scene,
+            "aggression_lf",
+            panel,
+            0.0,
+            207.0,
+            stage,
+            palette.accent,
+        );
+        self.label(
+            scene,
+            "aggression_mf",
+            panel,
+            220.0,
+            207.0,
+            stage,
+            palette.ink,
+        );
+        self.label(
+            scene,
+            "aggression_ranges",
+            panel,
+            0.0,
+            220.0,
+            stage,
+            palette.muted,
+        );
+        self.label(
+            scene,
+            "relaxation_hint",
+            panel,
+            0.0,
+            272.0,
+            stage,
+            palette.muted,
+        );
     }
 
     fn bass_bounds(&self) -> (f32, f32) {
@@ -3530,6 +3940,7 @@ fn grid(scene: &mut Scene, plot: Rect, stage: &Stage, palette: ScenePalette) {
 
 fn slider_caption(parameter: Parameter) -> &'static str {
     match parameter {
+        Parameter::SpectralRelaxation => "Warm sound relaxation",
         Parameter::Arrangement(setting) => setting.label(),
         Parameter::Percussion(_, setting) => match setting {
             PercussionSetting::TaperHz => "Fade out by",
@@ -3547,6 +3958,16 @@ fn slider_caption(parameter: Parameter) -> &'static str {
         },
         _ => parameter.label(),
     }
+}
+
+fn is_aggression_boundary(parameter: Parameter) -> bool {
+    matches!(
+        parameter,
+        Parameter::AggressionLfStart
+            | Parameter::AggressionLfEnd
+            | Parameter::AggressionMfStart
+            | Parameter::AggressionMfEnd
+    )
 }
 
 fn decision_caption(reason: crate::visualizer::DecisionReason) -> &'static str {
@@ -4183,7 +4604,16 @@ mod tests {
                     ArrangementSetting::BassFastTime
                     | ArrangementSetting::BassSlowTime
                     | ArrangementSetting::BassHitThreshold
-                    | ArrangementSetting::DropMinRmsDb => (708.0, SHAPE_PANEL_HEIGHT),
+                    | ArrangementSetting::DropMinRmsDb => (708.0, 860.0),
+                };
+                let (section_top, section_bottom) = if *setting == ArrangementSetting::ReferenceTime
+                {
+                    (section_top, section_bottom)
+                } else {
+                    (
+                        section_top + AGGRESSION_PANEL_HEIGHT,
+                        section_bottom + AGGRESSION_PANEL_HEIGHT,
+                    )
                 };
                 let top = (slider.rect.y0 - graph.rect.y0) / unit;
                 let bottom = (slider.rect.y1 - graph.rect.y0) / unit;
@@ -4198,6 +4628,69 @@ mod tests {
                 assert!(slider.rect.x0 >= 0.0 && slider.rect.x1 <= size.width);
                 assert!(slider.rect.y0 >= 0.0 && slider.rect.y1 <= size.height);
             }
+        }
+    }
+
+    #[test]
+    fn spectral_range_handles_snap_to_bands_and_relaxation_remains_accessible() {
+        let mut fonts = Fonts::new().unwrap();
+        let mut visualizer = Visualizer::new();
+        for size in [Size::new(1920.0, 1080.0), Size::new(1280.0, 720.0)] {
+            let stage = Stage::new(size);
+            let mut overlay = AnalysisOverlay::default();
+            overlay.update(
+                0.0,
+                visualizer.debug_history(),
+                &mut fonts,
+                &stage,
+                &visualizer,
+            );
+            let panel = overlay.left.unwrap().rect;
+            let plot = overlay.shape_plot().unwrap();
+            for (parameter, handle) in overlay.aggression_handles().unwrap() {
+                let Some(AnalysisInteraction::Parameter(selected, _)) =
+                    overlay.pointer_down(handle)
+                else {
+                    panic!("band boundary must be draggable");
+                };
+                assert_eq!(selected, parameter);
+                let target = Point::new(plot.x0 + plot.width() * 5.2 / BAND_COUNT as f64, handle.y);
+                assert_eq!(overlay.pointer_move(Some(target)), Some((parameter, 5.0)));
+                assert_eq!(
+                    overlay.pointer_move(Some(Point::new(plot.x0 - 100.0, handle.y))),
+                    Some((parameter, 0.0))
+                );
+                assert_eq!(
+                    overlay.pointer_move(Some(Point::new(plot.x1 + 100.0, handle.y))),
+                    Some((parameter, BAND_COUNT as f32))
+                );
+                overlay.pointer_up();
+            }
+            let slider = overlay
+                .sliders
+                .iter()
+                .find(|slider| slider.parameter == Parameter::SpectralRelaxation)
+                .unwrap();
+            assert!(panel.contains(slider.rect.origin()));
+            assert!(panel.contains(Point::new(slider.rect.x1, slider.rect.y1)));
+            let start = Point::new(slider.track.x0, slider.track.y0);
+            let end = Point::new(slider.track.x1, slider.track.y0);
+            assert!(matches!(
+                overlay.pointer_down(start),
+                Some(AnalysisInteraction::Parameter(
+                    Parameter::SpectralRelaxation,
+                    0.0
+                ))
+            ));
+            assert_eq!(
+                overlay.pointer_move(Some(end)),
+                Some((Parameter::SpectralRelaxation, 1.0))
+            );
+            visualizer.set_parameter(Parameter::SpectralRelaxation, 1.0);
+            assert_eq!(
+                visualizer.parameter_value(Parameter::SpectralRelaxation),
+                1.0
+            );
         }
     }
 
@@ -4631,12 +5124,12 @@ mod tests {
         assert!(shape.rect.intersect(selector_log).area() > 0.0);
         for panel in [shape, gap_controls] {
             assert_eq!(panel.rect.y0, shape.rect.y0);
-            assert_eq!(panel.scale, 1.0);
+            assert_eq!(panel.scale, shape.scale);
         }
-        assert_eq!(shape.rect.height(), SHAPE_PANEL_HEIGHT);
+        assert!((shape.rect.height() - stage.px(SHAPE_PANEL_HEIGHT) * shape.scale).abs() < 1e-6);
         assert_eq!(shape.rect.y1, stage.height - stage.margin - stage.px(140.0));
         assert_eq!(onset_controls.rect.y0, onsets.rect.y0);
-        assert_eq!(onsets.rect.height(), ONSET_PANEL_HEIGHT);
+        assert!((onsets.rect.height() - stage.px(ONSET_PANEL_HEIGHT) * onsets.scale).abs() < 1e-6);
         assert_eq!(
             onsets.rect.y1,
             stage.height - stage.margin - stage.px(140.0)

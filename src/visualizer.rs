@@ -1,5 +1,6 @@
 //! Spectrum-driven pseudo-3D model visualizer.
 
+mod aggression;
 mod analysis_help;
 mod arrangement;
 #[cfg(test)]
@@ -27,6 +28,7 @@ mod transients;
 mod transition;
 mod ui;
 
+pub use aggression::{AggressionBands, SpectralAggression};
 use computation::{validate_value, MixContext};
 pub use computation::{
     BandComponent, BandRouting, ComputeNode, Contribution, ContributionSpec, Curve, Detector,
@@ -675,12 +677,15 @@ impl StyleTuning {
 }
 
 /// Everything the inspector can tune that survives a restart.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "VisualizerTuningRaw")]
 pub struct VisualizerTuning {
     pub inputs: InputTunings,
     /// Exponential decay rate of the kick envelope.
     pub kick_decay: f32,
+    /// Maximum stiffness reduction as the spectral balance becomes warm.
+    pub spectral_relaxation: f32,
+    pub aggression_bands: AggressionBands,
     pub gains: Gains,
     pub routing: BandRouting,
     pub mixer: MixerTuning,
@@ -689,17 +694,54 @@ pub struct VisualizerTuning {
     pub showcase: ShowcaseSettings,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+impl Default for VisualizerTuning {
+    fn default() -> Self {
+        Self {
+            inputs: InputTunings::default(),
+            kick_decay: 0.0,
+            spectral_relaxation: 0.75,
+            aggression_bands: AggressionBands::default(),
+            gains: Gains::default(),
+            routing: BandRouting::default(),
+            mixer: MixerTuning::default(),
+            gates: PropertyGatesTuning::default(),
+            style: StyleTuning::default(),
+            showcase: ShowcaseSettings::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct VisualizerTuningRaw {
     inputs: InputTunings,
     kick_decay: f32,
+    spectral_relaxation: f32,
+    aggression_bands: AggressionBands,
     gains: Gains,
     routing: BandRouting,
     mixer: MixerTuning,
     gates: PropertyGatesTuning,
     style: StyleTuning,
     showcase: ShowcaseSettings,
+}
+
+impl Default for VisualizerTuningRaw {
+    fn default() -> Self {
+        let tuning = VisualizerTuning::default();
+        Self {
+            inputs: tuning.inputs,
+            kick_decay: tuning.kick_decay,
+            spectral_relaxation: tuning.spectral_relaxation,
+            aggression_bands: tuning.aggression_bands,
+            gains: tuning.gains,
+            routing: tuning.routing,
+            mixer: tuning.mixer,
+            gates: tuning.gates,
+            style: tuning.style,
+            showcase: tuning.showcase,
+        }
+    }
 }
 
 impl TryFrom<VisualizerTuningRaw> for VisualizerTuning {
@@ -709,6 +751,8 @@ impl TryFrom<VisualizerTuningRaw> for VisualizerTuning {
         let tuning = Self {
             inputs: raw.inputs,
             kick_decay: raw.kick_decay,
+            spectral_relaxation: raw.spectral_relaxation,
+            aggression_bands: raw.aggression_bands,
             gains: raw.gains,
             routing: raw.routing,
             mixer: raw.mixer,
@@ -725,6 +769,12 @@ impl VisualizerTuning {
     pub fn validate(&self) -> anyhow::Result<()> {
         self.inputs.validate()?;
         validate_value(self.kick_decay, Parameter::KickDecay.range(), "kick decay")?;
+        validate_value(
+            self.spectral_relaxation,
+            Parameter::SpectralRelaxation.range(),
+            "spectral relaxation",
+        )?;
+        self.aggression_bands.validate()?;
         self.gains.validate()?;
         self.routing.validate()?;
         self.mixer.to_mixer()?;
@@ -1486,6 +1536,8 @@ pub struct Visualizer {
     frames: ShutterWindow,
     kick: f32,
     kick_decay: f32,
+    spectral_relaxation: f32,
+    aggression_bands: AggressionBands,
     flip: Spring,
     /// Number of half turns the flip target has advanced through. The count
     /// accumulates forward so a flip never rewinds to the previous turn.
@@ -1556,6 +1608,8 @@ impl Visualizer {
             frames: ShutterWindow::default(),
             kick: 0.0,
             kick_decay: tuning.kick_decay,
+            spectral_relaxation: tuning.spectral_relaxation,
+            aggression_bands: tuning.aggression_bands,
             flip: Spring::default(),
             flip_half_turns: 0,
             quake_x: Spring::default(),
@@ -1748,6 +1802,8 @@ impl Visualizer {
         self.bass_shape = inputs.bass.shape;
         self.treble_shape = inputs.treble.shape;
         self.kick_decay = tuning.kick_decay;
+        self.spectral_relaxation = tuning.spectral_relaxation;
+        self.aggression_bands = tuning.aggression_bands;
         self.gains = tuning.gains;
         self.routing = tuning.routing;
         self.mixer = tuning
@@ -1786,6 +1842,8 @@ impl Visualizer {
                 },
             },
             kick_decay: self.kick_decay,
+            spectral_relaxation: self.spectral_relaxation,
+            aggression_bands: self.aggression_bands,
             gains: self.gains,
             routing: self.routing,
             mixer: self.mixer.tuning(),
@@ -2643,6 +2701,11 @@ impl Visualizer {
             Parameter::KickLowHz => self.detectors.kick_low_hz,
             Parameter::KickHighHz => self.detectors.kick_high_hz,
             Parameter::Arrangement(setting) => self.detectors.arrangement.value(setting),
+            Parameter::SpectralRelaxation => self.spectral_relaxation,
+            Parameter::AggressionLfStart => self.aggression_bands.lf_start as f32,
+            Parameter::AggressionLfEnd => self.aggression_bands.lf_end as f32,
+            Parameter::AggressionMfStart => self.aggression_bands.mf_start as f32,
+            Parameter::AggressionMfEnd => self.aggression_bands.mf_end as f32,
             Parameter::OnsetSuppression(detector) => self.onset_suppression(detector),
             Parameter::KickSnareChoke => self.detectors.kick_snare_choke,
             Parameter::KickDropChoke => self.detectors.kick_drop_choke,
@@ -2761,6 +2824,23 @@ impl Visualizer {
                 }
             }
             Parameter::Arrangement(setting) => self.detectors.arrangement.set(setting, value),
+            Parameter::SpectralRelaxation => self.spectral_relaxation = value,
+            Parameter::AggressionLfStart => {
+                self.aggression_bands.lf_start =
+                    (value.round() as usize).min(self.aggression_bands.lf_end - 1);
+            }
+            Parameter::AggressionLfEnd => {
+                self.aggression_bands.lf_end =
+                    (value.round() as usize).clamp(self.aggression_bands.lf_start + 1, BAND_COUNT);
+            }
+            Parameter::AggressionMfStart => {
+                self.aggression_bands.mf_start =
+                    (value.round() as usize).min(self.aggression_bands.mf_end - 1);
+            }
+            Parameter::AggressionMfEnd => {
+                self.aggression_bands.mf_end =
+                    (value.round() as usize).clamp(self.aggression_bands.mf_start + 1, BAND_COUNT);
+            }
             Parameter::PatternArea(detector) => {
                 let pattern = match detector {
                     Detector::Kick => &mut self.detectors.kick_pattern,
@@ -3240,6 +3320,33 @@ impl Visualizer {
         &self.debug_history
     }
 
+    /// LF/MF balance of the same smoothed, centered shape shown in analysis.
+    pub fn spectral_aggression(&self) -> SpectralAggression {
+        SpectralAggression::from_shape(
+            &self.onsets.status().drop_status.shape,
+            self.aggression_bands,
+        )
+    }
+
+    pub fn aggression_bands(&self) -> AggressionBands {
+        self.aggression_bands
+    }
+
+    pub fn spectral_band_edge_hz(&self, edge: usize) -> f32 {
+        assert!(edge <= BAND_COUNT, "spectral band edge must exist");
+        if edge == BAND_COUNT {
+            self.analyzer.band_range(BAND_COUNT - 1).1
+        } else {
+            self.analyzer.band_range(edge).0
+        }
+    }
+
+    /// Runtime multiplier shared by the model and camera springs.
+    pub fn spectral_stiffness_scale(&self) -> f32 {
+        self.spectral_aggression()
+            .stiffness_scale(self.spectral_relaxation)
+    }
+
     /// Advance the scene from the latest analysis and rebuild the line overlay.
     #[allow(clippy::too_many_arguments)]
     pub fn update(
@@ -3266,7 +3373,9 @@ impl Visualizer {
         }
         let status = self.onsets.status();
         self.showcase.set_gap_armed(status.drop.armed);
-        self.showcase.advance(dt);
+        let stiffness_scale = self.spectral_stiffness_scale();
+        self.showcase
+            .advance_with_stiffness_scale(dt, stiffness_scale);
         self.kick *= (-dt * self.kick_decay).exp();
         if !self.property_gates.plays(Property::Kick) {
             self.kick = 0.0;
@@ -3274,7 +3383,7 @@ impl Visualizer {
         self.flip.set_target(self.flip_target());
         self.flip.advance(
             dt,
-            self.detectors.flip_stiffness,
+            self.detectors.flip_stiffness * stiffness_scale,
             self.detectors.flip_damping,
         );
         // A selector entry and a held POI entry both wait for the flip to
@@ -5081,6 +5190,106 @@ mod tests {
             "the bundled models must load"
         );
         visualizer
+    }
+
+    #[test]
+    fn aggression_uses_displayed_shape_and_is_independent_of_playback_gain() {
+        let mut quiet = Visualizer::new();
+        let mut loud = Visualizer::new();
+        let magnitudes = std::array::from_fn(|band| match band {
+            0..=3 => 0.01,
+            7..=10 => 0.3,
+            _ => 0.1,
+        });
+        for (visualizer, gain) in [(&mut quiet, 0.01), (&mut loud, 1.0)] {
+            visualizer.observe(
+                Spectrum {
+                    linear_bands: magnitudes.map(|value| value * gain),
+                    rms: 0.2 * gain,
+                    ..Spectrum::default()
+                },
+                1.0 / 60.0,
+            );
+            let shape = visualizer.onsets.status().drop_status.shape;
+            assert_eq!(
+                visualizer.spectral_aggression(),
+                SpectralAggression::from_shape(&shape, visualizer.aggression_bands())
+            );
+        }
+        assert!(
+            (quiet.spectral_aggression().value - loud.spectral_aggression().value).abs() < 1e-6
+        );
+        assert_eq!(quiet.spectral_aggression().value, 0.0);
+        quiet.reset_audio();
+        assert_eq!(quiet.spectral_aggression(), SpectralAggression::default());
+    }
+
+    #[test]
+    fn warm_spectral_shape_slows_the_model_flip_without_changing_tuning() {
+        let mut warm = loaded_visualizer();
+        let mut aggressive = loaded_visualizer();
+        for (visualizer, low, mid) in [(&mut warm, 0.01, 1.0), (&mut aggressive, 1.0, 0.01)] {
+            visualizer.set_parameter(Parameter::SpectralRelaxation, 0.75);
+            visualizer.set_detector_settings(DetectorSettings {
+                snare_flip_every: 1,
+                ..DetectorSettings::default()
+            });
+            visualizer.observe(
+                Spectrum {
+                    linear_bands: std::array::from_fn(|band| match band {
+                        0..=3 => low,
+                        7..=10 => mid,
+                        _ => 0.1,
+                    }),
+                    rms: 0.2,
+                    ..Spectrum::default()
+                },
+                1.0 / 60.0,
+            );
+            visualizer.handle_action(Action::Snare, 0.0, 0.75);
+            let tuning = visualizer.tuning();
+            let stiffness = visualizer.detectors.flip_stiffness;
+            visualizer.update(
+                AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(0.05)),
+                ShutterFrames::try_from(1.0).unwrap(),
+                0.05,
+                &Palette::from_theme(ThemeId::default()),
+                (1280.0, 720.0),
+                1.0,
+                1.0,
+            );
+            assert_eq!(visualizer.tuning(), tuning);
+            assert_eq!(visualizer.detectors.flip_stiffness, stiffness);
+        }
+        assert_eq!(warm.spectral_stiffness_scale(), 0.25);
+        assert_eq!(aggressive.spectral_stiffness_scale(), 1.0);
+        assert!(warm.flip.value() > 0.0);
+        assert!(warm.flip.value() < aggressive.flip.value() * 0.5);
+        warm.set_parameter(Parameter::SpectralRelaxation, 0.0);
+        assert_eq!(warm.spectral_stiffness_scale(), 1.0);
+    }
+
+    #[test]
+    fn aggression_range_controls_keep_nonempty_bands_and_restore_tuning() {
+        let mut visualizer = Visualizer::new();
+        visualizer.set_parameter(Parameter::AggressionLfStart, 16.0);
+        assert_eq!(visualizer.aggression_bands().lf_start, 3);
+        visualizer.set_parameter(Parameter::AggressionLfEnd, 0.0);
+        assert_eq!(visualizer.aggression_bands().lf_end, 4);
+        visualizer.set_parameter(Parameter::AggressionMfEnd, 16.0);
+        visualizer.set_parameter(Parameter::AggressionMfStart, 16.0);
+        assert_eq!(visualizer.aggression_bands().mf_start, 15);
+        visualizer.set_parameter(Parameter::AggressionMfEnd, 0.0);
+        assert_eq!(visualizer.aggression_bands().mf_end, 16);
+        visualizer.set_parameter(Parameter::SpectralRelaxation, 2.0);
+        assert_eq!(visualizer.spectral_relaxation, 1.0);
+        visualizer.set_parameter(Parameter::SpectralRelaxation, f32::NAN);
+        assert_eq!(visualizer.spectral_relaxation, 1.0);
+        let tuning = visualizer.tuning();
+        let mut restored = Visualizer::new();
+        restored.set_tuning(tuning.clone());
+        assert_eq!(restored.tuning(), tuning);
+        assert!(restored.aggression_bands().validate().is_ok());
     }
 
     /// Loads a visualizer on the model before a model with resolvable POIs,

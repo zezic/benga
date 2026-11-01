@@ -74,6 +74,9 @@ impl Parameter {
         match self {
             Self::Percussion(_, setting) => setting.hint(),
             Self::Arrangement(setting) => setting.hint(),
+            Self::SpectralRelaxation => "How much warm sound softens the model flip and POI camera springs, including entry, orbit, field of view and look-at position. At 0% stiffness stays unchanged; at 100% warm sound can reduce it to 5%. Full aggression always keeps the chosen stiffness. Aggression compares the maximum LF band with the median MF band on the centered spectral shape.",
+            Self::AggressionLfStart | Self::AggressionLfEnd => "Drag the LF boundary to choose the bands used for the low-frequency maximum. Boundaries snap to spectral band edges and keep at least one band selected. The range saves automatically.",
+            Self::AggressionMfStart | Self::AggressionMfEnd => "Drag the MF boundary to choose the bands used for the mid-frequency median. Boundaries snap to spectral band edges and keep at least one band selected. The range saves automatically.",
             Self::OnsetBinGain(_, _) => "Reduce this frequency's contribution to the selected instrument. At 100% it is unchanged; at 0% it is ignored. The playing music is unaffected.",
             _ => "Adjust this setting by dragging its slider. Its value is saved automatically.",
         }

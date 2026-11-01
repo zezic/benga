@@ -795,25 +795,38 @@ impl Showcase {
         }
     }
 
+    #[cfg(test)]
     pub fn advance(&mut self, dt: f32) {
+        self.advance_with_stiffness_scale(dt, 1.0);
+    }
+
+    /// Relax the camera and POI springs without changing their authored tuning.
+    /// Damping stays fixed so lower stiffness produces a more sluggish response.
+    pub fn advance_with_stiffness_scale(&mut self, dt: f32, stiffness_scale: f32) {
+        assert!(stiffness_scale.is_finite(), "spring scale must be finite");
+        let stiffness_scale = stiffness_scale.clamp(0.05, 1.0);
         let settings = &self.settings;
+        let focus_stiffness = settings.focus_stiffness * stiffness_scale;
+        let motion_stiffness = settings.motion_stiffness * stiffness_scale;
+        let orbit_stiffness = settings.orbit_stiffness * stiffness_scale;
+        let dolly_stiffness = settings.dolly_stiffness * stiffness_scale;
         self.blend
-            .advance(dt, settings.focus_stiffness, settings.focus_damping);
+            .advance(dt, focus_stiffness, settings.focus_damping);
         self.motion
-            .advance(dt, settings.motion_stiffness, settings.motion_damping);
+            .advance(dt, motion_stiffness, settings.motion_damping);
         for spring in &mut self.center {
-            spring.advance(dt, settings.focus_stiffness, settings.focus_damping);
+            spring.advance(dt, focus_stiffness, settings.focus_damping);
         }
         self.radius
-            .advance(dt, settings.focus_stiffness, settings.focus_damping);
+            .advance(dt, focus_stiffness, settings.focus_damping);
         self.orbit_yaw
-            .advance(dt, settings.orbit_stiffness, settings.orbit_damping);
+            .advance(dt, orbit_stiffness, settings.orbit_damping);
         self.orbit_pitch
-            .advance(dt, settings.orbit_stiffness, settings.orbit_damping);
+            .advance(dt, orbit_stiffness, settings.orbit_damping);
         self.fov
-            .advance(dt, settings.dolly_stiffness, settings.dolly_damping);
+            .advance(dt, dolly_stiffness, settings.dolly_damping);
         self.slide
-            .advance(dt, settings.focus_stiffness, settings.focus_damping);
+            .advance(dt, focus_stiffness, settings.focus_damping);
         if self.mode == ShowcaseMode::Poi
             && !self.entry_settled
             && !self.focus_entry_held
@@ -1544,6 +1557,133 @@ mod tests {
         assert!((frame.focus.blend - 1.0).abs() < 0.02);
         assert!(frame.highlight_part.is_some() || frame.focus.center.length() > 0.0);
         assert!(frame.focus.fov > 0.0 && frame.focus.fov < std::f32::consts::PI);
+    }
+
+    #[test]
+    fn relaxation_slows_entry_and_kick_driven_camera_changes() {
+        let mut normal = showcase();
+        let mut relaxed = showcase();
+        let tuning = normal.settings.clone();
+        let mut normal_rng = Rng::new(80);
+        let mut relaxed_rng = Rng::new(80);
+        assert!(normal.enter_focus(&mut normal_rng, 0.75));
+        assert!(relaxed.enter_focus(&mut relaxed_rng, 0.75));
+
+        for _ in 0..6 {
+            normal.advance(1.0 / 60.0);
+            relaxed.advance_with_stiffness_scale(1.0 / 60.0, 0.25);
+        }
+        assert!(relaxed.frame().focus.blend < normal.frame().focus.blend);
+        assert!(relaxed.frame().focus.model_motion > normal.frame().focus.model_motion);
+        assert!(!relaxed.entry_settled);
+        let entry_target = relaxed.orbit_yaw.target();
+        relaxed.kick(&mut relaxed_rng, true);
+        assert_eq!(relaxed.orbit_yaw.target(), entry_target);
+
+        for _ in 0..600 {
+            normal.advance(1.0 / 60.0);
+            relaxed.advance_with_stiffness_scale(1.0 / 60.0, 0.25);
+        }
+        assert!(normal.entry_settled && relaxed.entry_settled);
+        normal.kick(&mut normal_rng, true);
+        relaxed.kick(&mut relaxed_rng, true);
+        for _ in 0..6 {
+            normal.advance(1.0 / 60.0);
+            relaxed.advance_with_stiffness_scale(1.0 / 60.0, 0.25);
+        }
+        for (normal, relaxed) in [
+            (&normal.orbit_yaw, &relaxed.orbit_yaw),
+            (&normal.orbit_pitch, &relaxed.orbit_pitch),
+            (&normal.fov, &relaxed.fov),
+        ] {
+            assert!(
+                (relaxed.target() - relaxed.value()).abs()
+                    > (normal.target() - normal.value()).abs(),
+                "relaxed orbit and FOV changes take longer to approach the target"
+            );
+        }
+        assert_eq!(normal.settings, tuning);
+        assert_eq!(relaxed.settings, tuning);
+    }
+
+    #[test]
+    fn relaxation_slows_the_camera_look_at_point_and_framing_on_poi_switches() {
+        let make_showcase = || {
+            let mut showcase = Showcase::new(ShowcaseSettings::default());
+            showcase.set_model(
+                vec![
+                    FocusPoi::new(
+                        "first".to_owned(),
+                        Anchor {
+                            center: Vec3::new(0.6, 0.4, 0.2),
+                            radius: 0.1,
+                            ..anchor(0.0, None)
+                        },
+                        false,
+                    ),
+                    FocusPoi::new(
+                        "second".to_owned(),
+                        Anchor {
+                            center: Vec3::new(-0.3, -0.2, -0.1),
+                            radius: 0.3,
+                            ..anchor(0.0, None)
+                        },
+                        false,
+                    ),
+                ],
+                1,
+            );
+            showcase
+        };
+        let mut normal = make_showcase();
+        let mut relaxed = make_showcase();
+        let mut normal_rng = Rng::new(81);
+        let mut relaxed_rng = Rng::new(81);
+        normal.enter_focus(&mut normal_rng, 0.75);
+        relaxed.enter_focus(&mut relaxed_rng, 0.75);
+        for _ in 0..240 {
+            normal.advance(1.0 / 60.0);
+            relaxed.advance(1.0 / 60.0);
+        }
+        normal.select_next_poi(&mut normal_rng);
+        relaxed.select_next_poi(&mut relaxed_rng);
+        for _ in 0..6 {
+            normal.advance(1.0 / 60.0);
+            relaxed.advance_with_stiffness_scale(1.0 / 60.0, 0.25);
+        }
+        for (normal, relaxed) in normal
+            .center
+            .iter()
+            .zip(&relaxed.center)
+            .chain(std::iter::once((&normal.radius, &relaxed.radius)))
+        {
+            assert!(
+                (relaxed.target() - relaxed.value()).abs()
+                    > (normal.target() - normal.value()).abs(),
+                "the look-at point and framing must approach a new POI more slowly"
+            );
+        }
+    }
+
+    #[test]
+    fn full_stiffness_scale_keeps_the_existing_camera_response() {
+        let mut normal = showcase();
+        let mut scaled = showcase();
+        let mut normal_rng = Rng::new(82);
+        let mut scaled_rng = Rng::new(82);
+        normal.enter_focus(&mut normal_rng, 0.75);
+        scaled.enter_focus(&mut scaled_rng, 0.75);
+        for _ in 0..240 {
+            normal.advance(1.0 / 60.0);
+            scaled.advance_with_stiffness_scale(1.0 / 60.0, 1.0);
+            let normal_frame = normal.frame().focus;
+            let scaled_frame = scaled.frame().focus;
+            assert_eq!(normal_frame.blend, scaled_frame.blend);
+            assert_eq!(normal_frame.model_motion, scaled_frame.model_motion);
+            assert_eq!(normal_frame.orbit_yaw, scaled_frame.orbit_yaw);
+            assert_eq!(normal_frame.orbit_pitch, scaled_frame.orbit_pitch);
+            assert_eq!(normal_frame.fov, scaled_frame.fov);
+        }
     }
 
     #[test]

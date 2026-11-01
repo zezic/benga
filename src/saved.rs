@@ -242,6 +242,13 @@ mod tests {
             .motion_fade_power
             .adjusted(crate::frame_schedule::Adjustment::Increase);
         config.edit().tuning.kick_decay = 4.5;
+        config.edit().tuning.spectral_relaxation = 0.9;
+        config.edit().tuning.aggression_bands = crate::visualizer::AggressionBands {
+            lf_start: 1,
+            lf_end: 5,
+            mf_start: 8,
+            mf_end: 12,
+        };
         config.edit().tuning.gains[crate::visualizer::Gain::SpinBand] = 2.5;
         config.edit().tuning.routing[crate::visualizer::BandComponent::Spin] = 9;
         config.flush_if_due(config.last_write + SAVE_INTERVAL - Duration::from_millis(1))?;
@@ -255,6 +262,18 @@ mod tests {
         assert_eq!(
             Saved::<Config>::load(path, None)?.frame_rate_limit,
             FrameRateLimit::VSync
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn older_settings_receive_default_aggression_ranges_and_relaxation() -> anyhow::Result<()> {
+        let config: Config = ron::from_str("(tuning: (kick_decay: 4.5))")?;
+        assert_eq!(config.tuning.kick_decay, 4.5);
+        assert_eq!(config.tuning.spectral_relaxation, 0.75);
+        assert_eq!(
+            config.tuning.aggression_bands,
+            crate::visualizer::AggressionBands::default()
         );
         Ok(())
     }
@@ -314,6 +333,12 @@ mod tests {
             "(motion_fade_power: 4.1)",
             "(tuning: (kick_decay: -1.0))",
             "(tuning: (showcase: (focus_stiffness: 0.0)))",
+            "(tuning: (spectral_relaxation: -0.1))",
+            "(tuning: (spectral_relaxation: 1.1))",
+            "(tuning: (spectral_relaxation: NaN))",
+            "(tuning: (aggression_bands: (lf_start: 4, lf_end: 4)))",
+            "(tuning: (aggression_bands: (mf_start: 10, mf_end: 7)))",
+            "(tuning: (aggression_bands: (mf_end: 17)))",
             "(tuning: (showcase: (selector_attenuation: 2.0)))",
             "(tuning: (showcase: (poi_attenuation: 2.0)))",
             "(tuning: (showcase: (poi_switch_gap: 11.0)))",

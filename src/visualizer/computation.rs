@@ -751,6 +751,12 @@ pub enum Parameter {
     KickHighHz,
     /// Relative spectrum/energy criteria and bass-hit confirmation settings.
     Arrangement(ArrangementSetting),
+    /// Maximum spring relaxation as spectral aggression falls.
+    SpectralRelaxation,
+    AggressionLfStart,
+    AggressionLfEnd,
+    AggressionMfStart,
+    AggressionMfEnd,
     /// How much suppression flux a detector subtracts from its onset.
     OnsetSuppression(Detector),
     KickSnareChoke,
@@ -827,6 +833,11 @@ impl Parameter {
             Self::KickLowHz => "KICK LOW Hz",
             Self::KickHighHz => "KICK HIGH Hz",
             Self::Arrangement(setting) => setting.label(),
+            Self::SpectralRelaxation => "RELAXATION",
+            Self::AggressionLfStart => "LF START",
+            Self::AggressionLfEnd => "LF END",
+            Self::AggressionMfStart => "MF START",
+            Self::AggressionMfEnd => "MF END",
             Self::OnsetSuppression(_) => "ONS SUPPRESS",
             Self::KickSnareChoke => "SNARE CHOKE",
             Self::KickDropChoke => "DROP CHOKE",
@@ -930,6 +941,11 @@ impl Parameter {
                 super::detection::KICK_FREQUENCY_MAX_HZ,
             ),
             Self::Arrangement(setting) => setting.range(),
+            Self::SpectralRelaxation => (0.0, 1.0),
+            Self::AggressionLfStart
+            | Self::AggressionLfEnd
+            | Self::AggressionMfStart
+            | Self::AggressionMfEnd => (0.0, super::BAND_COUNT as f32),
             Self::OnsetSuppression(_) => (super::FLUX_SUPPRESSION_MIN, super::FLUX_SUPPRESSION_MAX),
             Self::KickSnareChoke | Self::KickDropChoke => (super::CHOKE_MIN, super::CHOKE_MAX),
             Self::KickQuakeFactor => (super::QUAKE_FACTOR_MIN, super::QUAKE_FACTOR_MAX),
@@ -1050,6 +1066,11 @@ impl Parameter {
             Self::OnsetBinGain(_, _) => 0.01,
             Self::KickLowHz | Self::KickHighHz => 1.0,
             Self::Arrangement(setting) => setting.step(),
+            Self::SpectralRelaxation => 0.01,
+            Self::AggressionLfStart
+            | Self::AggressionLfEnd
+            | Self::AggressionMfStart
+            | Self::AggressionMfEnd => 1.0,
             Self::OnsetSuppression(_) => 0.01,
             Self::KickSequenceEvery | Self::SnareFlipEvery | Self::SnarePoiSwitches => 1.0,
             Self::SnareRmsGate => 1.0,
@@ -1131,6 +1152,11 @@ impl Parameter {
             Self::OnsetBinGain(_, _) => format!("{:.0}%", value * 100.0),
             Self::KickLowHz | Self::KickHighHz => format!("{value:.0} Hz"),
             Self::Arrangement(setting) => setting.format(value),
+            Self::SpectralRelaxation => format!("{:.0}%", value * 100.0),
+            Self::AggressionLfStart
+            | Self::AggressionLfEnd
+            | Self::AggressionMfStart
+            | Self::AggressionMfEnd => format!("{value:.0}"),
             Self::FlipStiffness
             | Self::QuakeStiffness
             | Self::FocusStiffness

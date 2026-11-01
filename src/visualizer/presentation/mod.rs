@@ -299,7 +299,7 @@ impl Presentation {
         } else {
             self.graphs.draw(scene, stage, palette);
         }
-        let normal_alpha = if self.poi_mode { 0.25 } else { 1.0 };
+        let normal_alpha = if self.poi_mode { 0.1 } else { 1.0 };
         self.normal.draw(
             scene,
             raster_assets,

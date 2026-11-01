@@ -968,31 +968,41 @@ impl AnimatedText {
         let Some(points) = self.plate_points(stage) else {
             return;
         };
-        let path = path_from_points(&points);
-        let clip = if let Some(mask) =
-            plate_mask.filter(|_| motion.length() >= PLATE_PLAIN_SWEEP_PIXELS)
-        {
-            let hull = path_from_points(&shifted_hull(&points, motion * 0.5));
-            let brush = ImageBrush::new(mask.image.clone()).with_alpha(alpha);
+        let mask = plate_mask.filter(|_| motion.length() >= PLATE_PLAIN_SWEEP_PIXELS);
+        let clip = if mask.is_some() {
+            path_from_points(&shifted_hull(&points, motion * 0.5))
+        } else {
+            path_from_points(&points)
+        };
+        // Punch the glyphs out at full strength, then fade the finished plate.
+        // Isolation keeps the knockout from erasing earlier scene content.
+        // Pad the group bounds so its clip does not antialias the plate twice.
+        scene.push_layer(
+            Fill::NonZero,
+            BlendMode::default(),
+            alpha,
+            transform,
+            &clip.control_box().inflate(1.0, 1.0),
+        );
+        if let Some(mask) = mask {
+            let brush = ImageBrush::new(mask.image.clone());
             let brush_transform = transform.inverse() * Affine::scale(1.0 / mask.scale);
             scene.fill(
                 Fill::NonZero,
                 transform,
                 &brush,
                 Some(brush_transform),
-                &hull,
+                &clip,
             );
-            hull
         } else {
             scene.fill(
                 Fill::NonZero,
                 transform,
-                palette.ink.with_alpha(alpha),
+                palette.ink.with_alpha(1.0),
                 None,
-                &path,
+                &clip,
             );
-            path
-        };
+        }
         scene.push_layer(
             Fill::NonZero,
             BlendMode {
@@ -1009,12 +1019,13 @@ impl AnimatedText {
                 (origin.x, origin.y)
             });
         if self.phase == TextPhase::Visible {
-            plan.draw_alpha(scene, text_transform, Color::BLACK, alpha, TextPaint::Fill);
+            plan.draw_alpha(scene, text_transform, Color::BLACK, 1.0, TextPaint::Fill);
         } else {
             plan.draw_animated(scene, text_transform, TextPaint::Fill, |index, glyph| {
-                self.glyph_style(index, glyph.id, time, alpha, Color::BLACK)
+                self.glyph_style(index, glyph.id, time, 1.0, Color::BLACK)
             });
         }
+        scene.pop_layer();
         scene.pop_layer();
     }
 
@@ -1356,6 +1367,208 @@ mod tests {
                 "vertical padding {top}/{bottom} leaves the text floating"
             );
         }
+    }
+
+    #[test]
+    #[ignore = "requires a compute-capable GPU"]
+    fn hole_text_preserves_cutout_when_attenuated() -> anyhow::Result<()> {
+        use crate::render::{PlateInstance, PlateMask};
+        use vello::{util::RenderContext, wgpu, RenderParams};
+
+        let width = 256u32;
+        let height = 128u32;
+        let stage = stage();
+        let mut fonts = Fonts::new()?;
+        let mut rng = Rng::new(31);
+        let mut text = AnimatedText::new(
+            "HOLE",
+            64.0,
+            UiFace::SemiBold,
+            BlockAlign::Left,
+            None,
+            1.0,
+            PaintStyle::Hole,
+        )
+        .with_backdrop(Backdrop {
+            padding: [12.0; 4],
+            cut: [false; 4],
+            cut_size: 0.0,
+        });
+        text.layout(&mut fonts, &stage, &mut rng);
+        let transform = Affine::translate((24.0, 24.0));
+        let palette = ScenePalette::placeholder();
+        let mut context = RenderContext::new();
+        let id = pollster::block_on(crate::render::prepare_device(
+            &mut context,
+            None,
+            wgpu::DeviceDescriptor::default(),
+        ))?;
+        let device = &context.devices[id];
+        let texture = device.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Hole text attenuation"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let mut renderer = crate::render::renderer(&device.device)?;
+        let motion = Vec2::new(12.0, 8.0);
+        let points: Vec<_> = text
+            .plate_points(&stage)
+            .expect("the text has a plate")
+            .into_iter()
+            .map(|point| transform * point)
+            .collect();
+        let hull = path_from_points(&shifted_hull(&points, motion * 0.5));
+        let bounds = hull.control_box().inflate(1.0, 1.0);
+        let lines = plate_lines(&points);
+        let mut instance = PlateInstance {
+            bounds: [
+                bounds.x0 as f32,
+                bounds.y0 as f32,
+                bounds.x1 as f32,
+                bounds.y1 as f32,
+            ],
+            motion: [motion.x as f32, motion.y as f32],
+            edge_count: lines.len() as u32,
+            ..Default::default()
+        };
+        for (edge, (normal, offset)) in instance.edges.iter_mut().zip(lines) {
+            *edge = [normal.x as f32, normal.y as f32, offset as f32, 0.0];
+        }
+        let mut mask = PlateMask::new(&device.device, &mut renderer, width, height);
+        mask.render(&device.device, &device.queue, &[instance], palette.ink);
+        let mask_image = mask.image();
+        let readback = device.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Hole text readback"),
+            size: u64::from(width * height * 4),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut render = |text: &AnimatedText,
+                          alpha,
+                          underlay: Option<[u8; 3]>,
+                          motion|
+         -> anyhow::Result<Vec<u8>> {
+            let mut scene = Scene::new();
+            if let Some([red, green, blue]) = underlay {
+                scene.fill(
+                    Fill::NonZero,
+                    Affine::IDENTITY,
+                    Color::from_rgb8(red, green, blue),
+                    None,
+                    &Rect::new(0.0, 0.0, f64::from(width), f64::from(height)),
+                );
+            }
+            text.draw_with_motion(
+                &mut scene,
+                transform,
+                &stage,
+                palette,
+                alpha,
+                0.0,
+                motion,
+                Some(&mask_image),
+            );
+            renderer.render_to_texture(
+                &device.device,
+                &device.queue,
+                &scene,
+                &view,
+                &RenderParams {
+                    base_color: Color::TRANSPARENT,
+                    width,
+                    height,
+                    antialiasing_method: crate::render::ANTIALIASING,
+                },
+            )?;
+            let mut encoder = device.device.create_command_encoder(&Default::default());
+            encoder.copy_texture_to_buffer(
+                texture.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &readback,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(width * 4),
+                        rows_per_image: Some(height),
+                    },
+                },
+                texture.size(),
+            );
+            device.queue.submit([encoder.finish()]);
+            let (tx, rx) = std::sync::mpsc::channel();
+            readback
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
+            device.device.poll(wgpu::PollType::wait_indefinitely())?;
+            rx.recv()??;
+            let pixels = readback.slice(..).get_mapped_range()?.to_vec();
+            readback.unmap();
+            Ok(pixels)
+        };
+
+        for animated in [false, true] {
+            if animated {
+                text.enter(CharEffect::Fade, &mut rng);
+                text.advance(text.duration * 0.5);
+                assert_eq!(text.phase(), TextPhase::Appear);
+            } else {
+                text.phase = TextPhase::Visible;
+            }
+            for motion in [Vec2::ZERO, motion] {
+                let reference = render(&text, 1.0, None, motion)?;
+                assert!(
+                    reference
+                        .chunks_exact(4)
+                        .filter(|pixel| pixel[3] == 255)
+                        .count()
+                        > 1_000,
+                    "the test must render the plate"
+                );
+                for alpha in [0.25, 0.5, 1.0] {
+                    for underlay in [None, Some([31, 69, 127])] {
+                        let actual = render(&text, alpha, underlay, motion)?;
+                        let mut max_error = 0.0f32;
+                        for (expected, actual) in
+                            reference.chunks_exact(4).zip(actual.chunks_exact(4))
+                        {
+                            let coverage = f32::from(expected[3]) / 255.0 * alpha;
+                            for channel in 0..4 {
+                                // Compare associated colors because Vello stores straight alpha.
+                                let expected = if channel == 3 {
+                                    if underlay.is_some() {
+                                        255.0
+                                    } else {
+                                        coverage * 255.0
+                                    }
+                                } else {
+                                    let base = underlay.map_or(0.0, |rgb| f32::from(rgb[channel]));
+                                    f32::from(expected[channel]) * coverage
+                                        + base * (1.0 - coverage)
+                                };
+                                let actual = if channel == 3 {
+                                    f32::from(actual[3])
+                                } else {
+                                    f32::from(actual[channel]) * f32::from(actual[3]) / 255.0
+                                };
+                                max_error = max_error.max((expected - actual).abs());
+                            }
+                        }
+                        assert!(max_error <= 2.0, "cutout changed by {max_error}/255 at alpha {alpha}, animated {animated}, motion {motion:?}, underlay {underlay:?}");
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     #[test]

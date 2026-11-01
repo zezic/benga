@@ -3,7 +3,7 @@
 use std::{sync::mpsc::Receiver, time::Instant};
 
 use audio::capture_stream;
-use config::{Config, CursorVisibility, PreampDb, PreampStep};
+use config::{Config, CursorVisibility, PreampDb};
 use frame_schedule::{
     Adjustment, FrameKind, FrameSchedule, FrameTime, Occlusion, RedrawPermit, SurfaceArea,
 };
@@ -44,7 +44,6 @@ impl ActiveWindow {
         let chrome = Chrome::new(&render.window)?;
         let mut view = View::fit(render.viewport());
         view.set_ui_scale(render.window.scale_factor());
-        view.set_top_inset(chrome.height());
         let visualizer_renderer =
             visualizer::Renderer::new(&render.device().device, render.format());
         Ok(Self {
@@ -59,17 +58,10 @@ impl ActiveWindow {
 enum Setting {
     Theme,
     PresentationOpacity,
-    Preamp,
     FrameRate,
     Shutter,
-    DropGapThreshold,
-    DepthFade,
-    NearOpacity,
-    CreaseThreshold,
     LineWidth,
     Zoom,
-    MotionOpacity,
-    MotionFadePower,
 }
 
 struct App {
@@ -108,44 +100,9 @@ impl App {
                 self.ui
                     .set_presentation_opacity(settings.presentation_opacity);
             }
-            Setting::Preamp => {
-                let step = if self.modifiers.shift_key() {
-                    PreampStep::Fine
-                } else {
-                    PreampStep::Coarse
-                };
-                settings.preamp_db = settings.preamp_db.adjusted(adjustment, step);
-                self.ui.set_preamp(settings.preamp_db);
-            }
             Setting::FrameRate => {
                 settings.frame_rate_limit = settings.frame_rate_limit.adjusted(adjustment);
                 self.frames.limit_changed(Instant::now());
-            }
-            Setting::DropGapThreshold => {
-                let mut detectors = self.ui.detector_settings();
-                let step = visualizer::Parameter::DropGapThreshold.step();
-                let delta = match adjustment {
-                    Adjustment::Decrease => -step,
-                    Adjustment::Increase => step,
-                };
-                detectors.drop_gap_threshold = (detectors.drop_gap_threshold + delta).clamp(
-                    visualizer::DROP_GAP_THRESHOLD_MIN,
-                    visualizer::DROP_GAP_THRESHOLD_MAX,
-                );
-                settings.detectors = detectors.clone();
-                self.ui.set_detector_settings(detectors);
-            }
-            Setting::DepthFade => {
-                settings.depth_fade = settings.depth_fade.adjusted(adjustment);
-                self.ui.set_depth_fade(settings.depth_fade);
-            }
-            Setting::NearOpacity => {
-                settings.near_opacity = settings.near_opacity.adjusted(adjustment);
-                self.ui.set_near_opacity(settings.near_opacity);
-            }
-            Setting::CreaseThreshold => {
-                settings.crease_threshold = settings.crease_threshold.adjusted(adjustment);
-                self.ui.set_crease_threshold(settings.crease_threshold);
             }
             Setting::Zoom => {
                 settings.zoom = settings.zoom.adjusted(adjustment);
@@ -157,14 +114,6 @@ impl App {
             Setting::LineWidth => {
                 settings.line_width = settings.line_width.adjusted(adjustment);
                 self.ui.set_line_width(settings.line_width);
-            }
-            Setting::MotionOpacity => {
-                settings.motion_opacity = settings.motion_opacity.adjusted(adjustment);
-                self.ui.set_motion_opacity(settings.motion_opacity);
-            }
-            Setting::MotionFadePower => {
-                settings.motion_fade_power = settings.motion_fade_power.adjusted(adjustment);
-                self.ui.set_motion_fade_power(settings.motion_fade_power);
             }
         }
     }
@@ -248,10 +197,7 @@ impl App {
             ControlAction::Restore(theme) => {
                 self.ui.theme_preferences_mut().restore(theme);
             }
-            ControlAction::DeveloperMode => {
-                self.ui.set_presentation(false);
-                self.ui.set_debug(true);
-            }
+            ControlAction::ToggleAnalyzers => self.ui.toggle_analyzers(),
             ControlAction::Manage => {}
         }
         self.sync_theme_preferences();
@@ -293,18 +239,12 @@ impl App {
                 *view = View::fit(render.viewport());
                 view.set_zoom(self.settings.zoom);
                 view.set_ui_scale(render.window.scale_factor());
-                view.set_top_inset(if fullscreen { 0.0 } else { chrome.height() });
                 self.frames.resized(size.into(), Instant::now());
                 self.ui.set_plate_mask(Some(render.plate_mask_image()));
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 view.set_ui_scale(scale_factor);
                 chrome.refresh_native_metrics(&render.window);
-                view.set_top_inset(if render.window.fullscreen().is_some() {
-                    0.0
-                } else {
-                    chrome.height()
-                });
             }
             WindowEvent::Occluded(occluded) => {
                 let occlusion = if occluded {
@@ -367,12 +307,8 @@ impl App {
                     }
                     if self.desktop.open || self.desktop.contains(self.mouse) {
                         self.exit_requested |= self.desktop.click(self.mouse, self.settings.edit());
-                    } else if self.ui.presentation() {
-                        if let Some(action) = self.ui.click_controls(view, self.mouse) {
-                            self.apply_control(action);
-                        }
-                    } else {
-                        self.ui.click_debug(view, self.mouse);
+                    } else if let Some(action) = self.ui.click_controls(view, self.mouse) {
+                        self.apply_control(action);
                     }
                 }
                 ElementState::Released => {
@@ -476,13 +412,7 @@ impl App {
                     MouseScrollDelta::LineDelta(_, y) => f64::from(y),
                     MouseScrollDelta::PixelDelta(position) => position.y / 30.0,
                 };
-                if self.ui.presentation() {
-                    self.ui.scroll_controls(lines);
-                } else {
-                    let zoom = self.settings.zoom.scaled((1.0 + lines / 10.0).max(0.1));
-                    self.settings.edit().zoom = zoom;
-                    view.set_zoom(zoom);
-                }
+                self.ui.scroll_controls(lines);
             }
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
                 if let PhysicalKey::Code(key) = event.physical_key {
@@ -495,121 +425,12 @@ impl App {
                         } else {
                             self.desktop.open = true;
                         }
-                        return Ok(());
-                    }
-                    if self.desktop.open {
-                        if key == KeyCode::Escape && !event.repeat {
+                    } else if key == KeyCode::Escape && !event.repeat {
+                        if self.desktop.open {
                             self.desktop.close(self.settings.edit());
-                        }
-                        return Ok(());
-                    }
-                    if self.ui.presentation() {
-                        if key == KeyCode::Escape && !event.repeat {
+                        } else {
                             self.set_fullscreen(false);
                         }
-                        return Ok(());
-                    }
-                    match key {
-                        KeyCode::Escape => self.ui.clear_debug_selection(),
-                        KeyCode::KeyC => {
-                            self.adjust_setting(Setting::Shutter, Adjustment::Decrease)
-                        }
-                        KeyCode::KeyV => {
-                            self.adjust_setting(Setting::Shutter, Adjustment::Increase)
-                        }
-                        KeyCode::Minus | KeyCode::NumpadSubtract if !event.repeat => {
-                            let scale = self
-                                .settings
-                                .visualizer_text_scale
-                                .adjusted(Adjustment::Decrease);
-                            self.settings.edit().visualizer_text_scale = scale;
-                            self.ui.set_text_scale(scale);
-                        }
-                        KeyCode::Equal | KeyCode::NumpadAdd if !event.repeat => {
-                            let scale = self
-                                .settings
-                                .visualizer_text_scale
-                                .adjusted(Adjustment::Increase);
-                            self.settings.edit().visualizer_text_scale = scale;
-                            self.ui.set_text_scale(scale);
-                        }
-                        KeyCode::KeyB if !event.repeat => {
-                            self.ui.cycle_debug_refresh();
-                        }
-                        KeyCode::KeyD if !event.repeat => {
-                            self.ui.set_debug(!self.ui.debug());
-                        }
-                        KeyCode::KeyG if !event.repeat => {
-                            self.ui.set_timeline(!self.ui.timeline());
-                        }
-                        KeyCode::KeyJ => {
-                            self.adjust_setting(Setting::DropGapThreshold, Adjustment::Decrease)
-                        }
-                        KeyCode::KeyK => {
-                            self.adjust_setting(Setting::DropGapThreshold, Adjustment::Increase)
-                        }
-                        KeyCode::KeyO => {
-                            self.adjust_setting(Setting::DepthFade, Adjustment::Decrease)
-                        }
-                        KeyCode::KeyP => {
-                            self.adjust_setting(Setting::DepthFade, Adjustment::Increase)
-                        }
-                        KeyCode::KeyU => {
-                            self.adjust_setting(Setting::NearOpacity, Adjustment::Decrease)
-                        }
-                        KeyCode::KeyI => {
-                            self.adjust_setting(Setting::NearOpacity, Adjustment::Increase)
-                        }
-                        KeyCode::Comma => {
-                            self.adjust_setting(Setting::CreaseThreshold, Adjustment::Decrease)
-                        }
-                        KeyCode::Period => {
-                            self.adjust_setting(Setting::CreaseThreshold, Adjustment::Increase)
-                        }
-                        KeyCode::Backslash if !event.repeat => self.ui.next_model(),
-                        KeyCode::KeyT if !event.repeat => {
-                            let model_motion = self.settings.model_motion.toggled();
-                            self.settings.edit().model_motion = model_motion;
-                            self.ui.set_model_motion(model_motion);
-                        }
-                        KeyCode::Semicolon => {
-                            self.adjust_setting(Setting::LineWidth, Adjustment::Decrease)
-                        }
-                        KeyCode::Quote => {
-                            self.adjust_setting(Setting::LineWidth, Adjustment::Increase)
-                        }
-                        KeyCode::KeyL => {
-                            self.adjust_setting(Setting::MotionOpacity, Adjustment::Decrease)
-                        }
-                        KeyCode::KeyR => {
-                            self.adjust_setting(Setting::MotionOpacity, Adjustment::Increase)
-                        }
-                        KeyCode::KeyY => {
-                            let adjustment = if self.modifiers.shift_key() {
-                                Adjustment::Decrease
-                            } else {
-                                Adjustment::Increase
-                            };
-                            self.adjust_setting(Setting::MotionFadePower, adjustment)
-                        }
-                        KeyCode::KeyF if !event.repeat => self.ui.set_presentation(true),
-                        KeyCode::KeyA => self.adjust_setting(Setting::Theme, Adjustment::Decrease),
-                        KeyCode::KeyS => self.adjust_setting(Setting::Theme, Adjustment::Increase),
-                        KeyCode::BracketLeft => {
-                            self.adjust_setting(Setting::PresentationOpacity, Adjustment::Decrease)
-                        }
-                        KeyCode::BracketRight => {
-                            self.adjust_setting(Setting::PresentationOpacity, Adjustment::Increase)
-                        }
-                        KeyCode::KeyZ => self.adjust_setting(Setting::Preamp, Adjustment::Decrease),
-                        KeyCode::KeyX => self.adjust_setting(Setting::Preamp, Adjustment::Increase),
-                        KeyCode::KeyQ => {
-                            self.adjust_setting(Setting::FrameRate, Adjustment::Decrease)
-                        }
-                        KeyCode::KeyW => {
-                            self.adjust_setting(Setting::FrameRate, Adjustment::Increase)
-                        }
-                        _ => {}
                     }
                 }
             }
@@ -630,7 +451,6 @@ impl App {
                 }
                 let now = Instant::now();
                 let fullscreen = render.window.fullscreen().is_some();
-                view.set_top_inset(if fullscreen { 0.0 } else { chrome.height() });
                 if self.desktop.open
                     || chrome.is_hovered(
                         render.viewport(),
@@ -881,7 +701,6 @@ fn main() -> anyhow::Result<()> {
     let settings =
         Saved::<Config>::load(config::config_file()?, Some(config::legacy_config_file()?))?;
     let mut ui = Ui::new(&settings)?;
-    ui.set_presentation(true);
     if profile.is_some() {
         ui.dismiss_startup();
     }

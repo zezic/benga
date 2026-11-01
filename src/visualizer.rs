@@ -7,7 +7,6 @@ mod arrangement;
 mod benchmark;
 mod computation;
 mod controls;
-mod debug;
 mod detection;
 mod geometry;
 mod model;
@@ -1208,31 +1207,8 @@ fn input_dependencies(input: Input) -> Vec<Dependency> {
     }
 }
 
-/// A band, a property, or the per-band onset analyzer selected in the
-/// analysis panel.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DebugSelection {
-    Band(usize),
-    Property(Property),
-    Flux,
-    Hat,
-    Scene,
-}
-
-impl DebugSelection {
-    pub fn color(self, palette: Palette) -> Color {
-        match self {
-            Self::Band(index) => palette.vivid(index),
-            Self::Property(property) => palette.vivid(property.index()),
-            Self::Flux => palette.vivid(9),
-            Self::Hat => palette.vivid(11),
-            Self::Scene => palette.vivid(3),
-        }
-    }
-}
-
-/// One sampled frame of every analysis value shown by the inspector. Samples
-/// are recorded at display rate, independent of the panel's refresh rate.
+/// One sampled frame of the audio and scene analysis shared by presentation
+/// graphs and optional analyzers. Samples are recorded at display rate.
 #[derive(Clone, Copy, Debug)]
 pub struct DebugSample {
     /// Display time in seconds.

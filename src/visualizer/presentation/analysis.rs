@@ -4055,7 +4055,7 @@ fn attack_db(energy: f32, duration: f32) -> f32 {
     10.0 * (energy / duration.max(1e-6)).max(1e-12).log10()
 }
 
-fn stereo_envelope_amplitudes(point: &crate::visualizer::EnvelopePoint) -> [f32; 2] {
+pub(super) fn stereo_envelope_amplitudes(point: &crate::visualizer::EnvelopePoint) -> [f32; 2] {
     if point.left_amplitude == 0.0 && point.right_amplitude == 0.0 && point.amplitude > 0.0 {
         // Older diagnostic points contain only the physical combined level.
         [point.amplitude; 2]
@@ -4064,7 +4064,7 @@ fn stereo_envelope_amplitudes(point: &crate::visualizer::EnvelopePoint) -> [f32;
     }
 }
 
-fn stereo_backgrounds(event: &PercussionDecision) -> [f32; 2] {
+pub(super) fn stereo_backgrounds(event: &PercussionDecision) -> [f32; 2] {
     if event.background_stereo_power == [0.0; 2] && event.background_power > 0.0 {
         [event.background_power; 2]
     } else {
@@ -4133,7 +4133,10 @@ fn percussion_row_height() -> f64 {
     ((CONTROL_PANEL_HEIGHT - 28.0 - groups.len() as f64 * 18.0 - 10.0) / rows as f64).min(24.0)
 }
 
-fn heatmap_feature_areas(plot: Rect, reference: &PercussionReferenceSnapshot) -> [Option<Rect>; 2] {
+pub(super) fn heatmap_feature_areas(
+    plot: Rect,
+    reference: &PercussionReferenceSnapshot,
+) -> [Option<Rect>; 2] {
     let thresholds = reference.thresholds;
     let effective = heatmap_position(
         plot,
@@ -4206,7 +4209,10 @@ fn heatmap_sharpness_threshold_caption(reference: &PercussionReferenceSnapshot) 
     }
 }
 
-fn heatmap_cloud_bounds(plot: Rect, reference: &PercussionReferenceSnapshot) -> Option<Rect> {
+pub(super) fn heatmap_cloud_bounds(
+    plot: Rect,
+    reference: &PercussionReferenceSnapshot,
+) -> Option<Rect> {
     if reference.cloud_boundary.is_none() && reference.sharpness_cloud_boundary.is_none() {
         return None;
     }
@@ -4287,7 +4293,7 @@ fn heatmap_cloud_caption(reference: &PercussionReferenceSnapshot) -> String {
         })
 }
 
-fn heatmap_position(
+pub(super) fn heatmap_position(
     plot: Rect,
     reference: &PercussionReferenceSnapshot,
     sharpness: f32,
@@ -4305,7 +4311,7 @@ fn heatmap_position(
     )
 }
 
-fn heatmap_recent_points(
+pub(super) fn heatmap_recent_points(
     reference: &PercussionReferenceSnapshot,
     requested: usize,
 ) -> &[PercussionReferencePoint] {

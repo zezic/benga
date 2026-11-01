@@ -16,85 +16,23 @@ fn draw_retained_frame(ui: &mut Ui, view: &View, origin: Instant, index: u64) ->
 }
 
 #[test]
-fn presentation_retains_background_when_hidden_line_readout_changes() -> anyhow::Result<()> {
+fn analyzer_visibility_keeps_the_presentation_background_retained() -> anyhow::Result<()> {
     let mut ui = Ui::new(&Config::default())?;
-    ui.set_presentation(true);
-    let view = View::fit(Size::new(5120.0, 2880.0));
+    let view = View::fit(Size::new(1920.0, 1080.0));
     let origin = Instant::now();
     assert!(draw_retained_frame(&mut ui, &view, origin, 0));
+    assert!(!ui.analyzers_visible());
+    ui.toggle_analyzers();
+    assert!(ui.analyzers_visible());
     assert!(!draw_retained_frame(&mut ui, &view, origin, 1));
-
-    // Force the same cache-miss branch reached when a model transition changes
-    // the selected line count. This readout is absent from the presentation face.
-    ui.line_count = usize::MAX;
-    assert!(
-        !draw_retained_frame(&mut ui, &view, origin, 2),
-        "a hidden line-count readout must not invalidate the retained presentation background"
-    );
-    Ok(())
-}
-
-#[test]
-fn leaving_presentation_refreshes_hidden_readouts_before_painting_hud() -> anyhow::Result<()> {
-    let mut ui = Ui::new(&Config::default())?;
-    ui.set_presentation(true);
-    let view = View::fit(Size::new(1280.0, 720.0));
-    let origin = Instant::now();
-    let _ = draw_retained_frame(&mut ui, &view, origin, 0);
-    ui.line_count = usize::MAX;
-    ui.scene_name = "stale hidden HUD".to_owned();
-    ui.model_position = None;
-    let _ = draw_retained_frame(&mut ui, &view, origin, 1);
-
-    ui.set_presentation(false);
-    assert!(draw_retained_frame(&mut ui, &view, origin, 2));
-    assert_eq!(ui.line_count, ui.visualizer.line_count());
-    assert_eq!(ui.scene_name, ui.visualizer.scene_name());
-    assert_eq!(ui.model_position, ui.visualizer.model_position());
-    Ok(())
-}
-
-#[test]
-fn visible_hud_still_rebuilds_for_a_changed_line_readout() -> anyhow::Result<()> {
-    let mut ui = Ui::new(&Config::default())?;
-    ui.set_presentation(false);
-    let view = View::fit(Size::new(1280.0, 720.0));
-    let origin = Instant::now();
-    let _ = draw_retained_frame(&mut ui, &view, origin, 0);
-    ui.line_count = usize::MAX;
-    assert!(draw_retained_frame(&mut ui, &view, origin, 1));
-    assert_eq!(ui.line_count, ui.visualizer.line_count());
-    Ok(())
-}
-
-#[test]
-fn presentation_pauses_debug_work_and_exit_refreshes_the_first_visible_snapshot(
-) -> anyhow::Result<()> {
-    let mut ui = Ui::new(&Config::default())?;
-    ui.set_presentation(false);
-    ui.set_debug(true);
-    let view = View::fit(Size::new(1280.0, 720.0));
-    let origin = Instant::now();
-    let _ = draw_retained_frame(&mut ui, &view, origin, 0);
-    assert!(ui.debug_snapshot.is_some());
-
-    ui.debug_refresh = DebugRefresh::Hz1;
-    ui.debug_clock = 0.125;
-    ui.set_presentation(true);
-    let _ = draw_retained_frame(&mut ui, &view, origin, 1);
-    assert_eq!(ui.debug_clock, 0.125);
-
-    ui.set_presentation(false);
-    assert!(ui.debug_snapshot.is_none());
-    let _ = draw_retained_frame(&mut ui, &view, origin, 2);
-    assert!(ui.debug_snapshot.is_some());
-    assert_eq!(ui.debug_clock, 0.0);
+    ui.toggle_analyzers();
+    assert!(!ui.analyzers_visible());
+    assert!(!draw_retained_frame(&mut ui, &view, origin, 2));
     Ok(())
 }
 
 fn transitioning_presentation_rebuilds() -> anyhow::Result<(usize, usize)> {
     let mut ui = Ui::new(&Config::default())?;
-    ui.set_presentation(true);
     ui.visualizer.load_models();
     // Identical long edges create a deterministic heavy model without relying
     // on which bundled model happens to be first in the shuffled catalog.

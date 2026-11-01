@@ -62,7 +62,7 @@ pub enum ControlAction {
     SaveDefault,
     Manage,
     Restore(ThemeId),
-    DeveloperMode,
+    ToggleAnalyzers,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -315,6 +315,7 @@ pub struct ControlState<'a> {
     pub theme: ThemeId,
     pub model: &'a str,
     pub fullscreen: bool,
+    pub analyzers_visible: bool,
     pub palette: ScenePalette,
     pub background: Color,
     pub history: &'a DebugHistory,
@@ -554,7 +555,7 @@ impl Controls {
             .find(|target| {
                 target.rect.contains(point)
                     && match target.action {
-                        ControlAction::DeveloperMode => self.modifiers && !over_manager,
+                        ControlAction::ToggleAnalyzers => self.modifiers && !over_manager,
                         ControlAction::Restore(_) => self.manager_open,
                         _ => !over_manager,
                     }
@@ -1016,15 +1017,19 @@ impl Controls {
                 &mut canvas,
                 rect,
                 Choice::new(
-                    "Developer: exit presentation",
-                    ControlAction::DeveloperMode,
-                    false,
+                    if state.analyzers_visible {
+                        "Developer: hide analyzers"
+                    } else {
+                        "Developer: show analyzers"
+                    },
+                    ControlAction::ToggleAnalyzers,
+                    state.analyzers_visible,
                 ),
                 true,
             );
             self.hovers.push(Hover {
                 rect: canvas.physical(rect),
-                hint: "Leave presentation mode and open the developer controls.",
+                hint: "Show or hide the audio analyzers and their tuning controls.",
             });
         }
         let hint = self
@@ -1193,6 +1198,17 @@ mod tests {
         config: &Config,
         now: Instant,
     ) -> bool {
+        draw_with_analyzers(controls, fonts, view, config, now, false)
+    }
+
+    fn draw_with_analyzers(
+        controls: &mut Controls,
+        fonts: &mut Fonts,
+        view: &View,
+        config: &Config,
+        now: Instant,
+        analyzers_visible: bool,
+    ) -> bool {
         let history = DebugHistory::default();
         controls.draw(
             fonts,
@@ -1203,6 +1219,7 @@ mod tests {
                 theme: config.theme,
                 model: "Model",
                 fullscreen: false,
+                analyzers_visible,
                 palette: ScenePalette::choose(
                     &super::super::Palette::from_theme(config.theme),
                     crate::theme::Theme::new(config.theme).colors,
@@ -1310,7 +1327,7 @@ mod tests {
         assert!(controls
             .targets
             .iter()
-            .any(|target| matches!(target.action, ControlAction::DeveloperMode)));
+            .any(|target| matches!(target.action, ControlAction::ToggleAnalyzers)));
         Ok(())
     }
 
@@ -1357,7 +1374,40 @@ mod tests {
     }
 
     #[test]
-    fn releasing_modifiers_invalidates_the_developer_button_before_redraw() -> anyhow::Result<()> {
+    fn analyzer_button_requires_modifiers_and_reports_visibility() -> anyhow::Result<()> {
+        let now = Instant::now();
+        let mut fonts = Fonts::new()?;
+        let config = Config::default();
+        let view = View::fit(vello::kurbo::Size::new(1920.0, 1080.0));
+        let mut controls = Controls::new(now);
+        let has_toggle = |controls: &Controls| {
+            controls
+                .targets
+                .iter()
+                .any(|target| matches!(target.action, ControlAction::ToggleAnalyzers))
+        };
+        draw(&mut controls, &mut fonts, &view, &config, now);
+        assert!(!has_toggle(&controls));
+        controls.modifiers(true, now);
+        draw(&mut controls, &mut fonts, &view, &config, now);
+        assert!(has_toggle(&controls));
+        assert!(controls
+            .text
+            .keys()
+            .any(|(label, _)| label == "Developer: show analyzers"));
+        draw_with_analyzers(&mut controls, &mut fonts, &view, &config, now, true);
+        assert!(controls
+            .text
+            .keys()
+            .any(|(label, _)| label == "Developer: hide analyzers"));
+        controls.modifiers(false, now);
+        draw(&mut controls, &mut fonts, &view, &config, now);
+        assert!(!has_toggle(&controls));
+        Ok(())
+    }
+
+    #[test]
+    fn releasing_modifiers_invalidates_the_analyzer_button_before_redraw() -> anyhow::Result<()> {
         let now = Instant::now();
         let mut fonts = Fonts::new()?;
         let config = config_with_disliked(20);
@@ -1369,7 +1419,7 @@ mod tests {
             controls.modifiers(true, now);
             draw(&mut controls, &mut fonts, &view, &config, now);
             let developer = target(&controls, |action| {
-                matches!(action, ControlAction::DeveloperMode)
+                matches!(action, ControlAction::ToggleAnalyzers)
             });
             let manage = target(&controls, |action| matches!(action, ControlAction::Manage));
             let manager = controls.manager_rect.expect("manager is visible");
@@ -1378,7 +1428,7 @@ mod tests {
             controls.modifiers(false, now);
             assert!(!matches!(
                 controls.click(developer.center(), now),
-                Some(ControlAction::DeveloperMode)
+                Some(ControlAction::ToggleAnalyzers)
             ));
             assert!(matches!(
                 controls.click(manage.center(), now),
@@ -1571,7 +1621,7 @@ mod tests {
             controls.modifiers(true, now);
             draw(&mut controls, &mut fonts, &view, &config, now);
             let developer = target(&controls, |action| {
-                matches!(action, ControlAction::DeveloperMode)
+                matches!(action, ControlAction::ToggleAnalyzers)
             });
             assert_eq!(developer.intersect(graph).area(), 0.0);
             controls.manager_open = true;

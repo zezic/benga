@@ -25,6 +25,7 @@ use crate::render::{PlateInstance, PlateMaskImage, MAX_PLATE_EDGES, MAX_PLATE_IN
 use super::super::{detection::Spring, Rng, Visualizer};
 use super::{
     color::ScenePalette,
+    poi_motion::{advance_springs, Coast, CARD_COAST_SECONDS},
     stage::Stage,
     text::{plate_lines, AnimatedText, Backdrop, CharEffect, PaintStyle, PLATE_PLAIN_SWEEP_PIXELS},
 };
@@ -86,6 +87,10 @@ struct PoiCard {
     anchor: Point,
     spring_x: Spring,
     spring_y: Spring,
+    coast: Option<Coast>,
+    exit_clock_scale: f32,
+    focus_alpha: f32,
+    use_plate_mask: bool,
     drift_phase: f32,
     drift_amp: (f64, f64),
     barcode: Option<u64>,
@@ -93,12 +98,21 @@ struct PoiCard {
 
 impl PoiCard {
     fn any_visible(&self) -> bool {
-        self.texts.iter().any(|text| !text.text.is_hidden())
+        !self.coast.is_some_and(|coast| coast.finished())
+            && self.texts.iter().any(|text| !text.text.is_hidden())
     }
 
     fn rect(&self) -> Rect {
-        let x = f64::from(self.spring_x.value());
-        let y = f64::from(self.spring_y.value());
+        let center = self.coast.map_or_else(
+            || {
+                Point::new(
+                    f64::from(self.spring_x.value()),
+                    f64::from(self.spring_y.value()),
+                )
+            },
+            |coast| coast.position(),
+        );
+        let (x, y) = (center.x, center.y);
         Rect::new(
             x - self.width * 0.5,
             y - self.height * 0.5,
@@ -109,9 +123,14 @@ impl PoiCard {
 
     /// Screen displacement the card covers during one backdrop exposure.
     fn exposure_motion(&self) -> Vec2 {
-        Vec2::new(
-            f64::from(self.spring_x.velocity()),
-            f64::from(self.spring_y.velocity()),
+        self.coast.map_or_else(
+            || {
+                Vec2::new(
+                    f64::from(self.spring_x.velocity()),
+                    f64::from(self.spring_y.velocity()),
+                )
+            },
+            |coast| coast.velocity(),
         ) * CARD_EXPOSURE_SECONDS
     }
 
@@ -178,16 +197,6 @@ impl PoiScene {
         self.outgoing_fact || self.content.as_ref().is_some_and(|content| content.is_fact)
     }
 
-    pub fn hide(&mut self) {
-        self.key = None;
-        self.content = None;
-        self.cards.clear();
-        self.outgoing.clear();
-        self.outgoing_fact = false;
-        self.plate_instances.clear();
-        self.markers.clear();
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
@@ -204,7 +213,10 @@ impl PoiScene {
     ) {
         self.time += dt;
         if self.model_id.as_deref() != model_id {
-            self.hide();
+            self.exit_cards(rng);
+            self.key = None;
+            self.content = None;
+            self.markers.clear();
             self.model_id = model_id.map(str::to_owned);
         }
         let target = target_id.filter(|_| weapon.is_some());
@@ -233,12 +245,11 @@ impl PoiScene {
                     self.cards = build_cards(spec, stage, fonts, rng, false);
                     self.place_cards(visualizer, stage, true);
                 }
-                self.outgoing.clear();
             }
         } else if self.key.is_some() {
+            self.exit_cards(rng);
             self.key = None;
             self.content = None;
-            self.exit_cards(rng);
         }
 
         self.stage_unit = stage.unit;
@@ -250,14 +261,14 @@ impl PoiScene {
         }
         for card in &mut self.outgoing {
             for text in &mut card.texts {
-                text.text.advance(dt);
+                text.text.advance(dt * card.exit_clock_scale);
             }
         }
+        self.update_flow(dt, visualizer, stage);
         self.outgoing.retain(PoiCard::any_visible);
         if self.outgoing.is_empty() {
             self.outgoing_fact = false;
         }
-        self.update_flow(dt, visualizer, stage);
         self.collect_plate_instances(stage);
         if hat_trigger {
             if let Some(content) = &self.content {
@@ -277,11 +288,19 @@ impl PoiScene {
             self.outgoing_fact = true;
         }
         for mut card in self.cards.drain(..) {
+            let mut exit_duration = 0.0_f32;
             for text in &mut card.texts {
                 if !text.text.is_hidden() {
                     text.text.leave(text.exit_effect, rng);
+                    exit_duration = exit_duration.max(text.text.exit_duration);
                 }
             }
+            card.exit_clock_scale = exit_duration.max(0.01) / CARD_COAST_SECONDS;
+            card.coast = Some(Coast::from_springs(
+                &card.spring_x,
+                &card.spring_y,
+                CARD_COAST_SECONDS,
+            ));
             self.outgoing.push(card);
         }
     }
@@ -303,8 +322,6 @@ impl PoiScene {
 
     fn update_flow(&mut self, dt: f32, visualizer: &Visualizer, stage: &Stage) {
         let air = stage.px(112.0);
-        let stiffness = 80.0;
-        let damping = 10.0;
         let time = f64::from(self.time);
         for card in &mut self.cards {
             card.anchor = card_anchor(visualizer, stage, card.vertex);
@@ -314,12 +331,13 @@ impl PoiScene {
                 (time * 0.24 + f64::from(card.drift_phase) * 1.7).cos() * card.drift_amp.1;
             card.spring_x.set_target((base_x + drift_x) as f32);
             card.spring_y.set_target((base_y + drift_y) as f32);
-            card.spring_x.advance(dt, stiffness, damping);
-            card.spring_y.advance(dt, stiffness, damping);
+            advance_springs(&mut card.spring_x, &mut card.spring_y, dt);
+            card.focus_alpha = smoothstep(visualizer.showcase_focus_blend());
         }
         for card in &mut self.outgoing {
-            card.spring_x.advance(dt, stiffness, damping);
-            card.spring_y.advance(dt, stiffness, damping);
+            if let Some(coast) = &mut card.coast {
+                coast.advance(dt, card.width, card.height, stage);
+            }
         }
     }
 
@@ -330,9 +348,22 @@ impl PoiScene {
     /// Collects the moving hole plates whose coverage the GPU mask renders.
     fn collect_plate_instances(&mut self, stage: &Stage) {
         self.plate_instances.clear();
-        for card in self.cards.iter().chain(&self.outgoing) {
+        for card in self.cards.iter_mut().chain(&mut self.outgoing) {
             let motion = card.exposure_motion();
+            card.use_plate_mask = true;
             if motion.length() < PLATE_PLAIN_SWEEP_PIXELS {
+                continue;
+            }
+            let needed = card
+                .texts
+                .iter()
+                .filter(|text| text.text.plate_points(stage).is_some())
+                .count();
+            if self.plate_instances.len() + needed > MAX_PLATE_INSTANCES {
+                // A longer coast can overlap several generations of cards.
+                // Keep all text visible using its vector plate fallback when
+                // the bounded GPU mask bank is occupied by newer cards.
+                card.use_plate_mask = false;
                 continue;
             }
             for (text, origin) in card.text_origins(stage) {
@@ -413,11 +444,7 @@ impl PoiScene {
     }
 
     pub fn occluders(&self, stage: &Stage) -> Vec<Rect> {
-        let pad = stage.px(12.0);
-        let mut rects = Vec::new();
-        for card in self.cards.iter().chain(&self.outgoing) {
-            rects.push(inflate(card.rect(), pad));
-        }
+        let mut rects = self.card_occluders(stage);
         if self.is_visible() {
             let air = stage.px(104.0);
             let mut anchored = BTreeSet::new();
@@ -435,6 +462,17 @@ impl PoiScene {
         rects
     }
 
+    /// Static instruments make room for visible callouts, without inheriting
+    /// the much larger anchor keepouts used to arrange floating content.
+    pub(super) fn card_occluders(&self, stage: &Stage) -> Vec<Rect> {
+        let pad = stage.px(12.0);
+        self.cards
+            .iter()
+            .chain(&self.outgoing)
+            .map(|card| inflate(card.rect(), pad))
+            .collect()
+    }
+
     pub fn draw(
         &self,
         scene: &mut Scene,
@@ -447,18 +485,17 @@ impl PoiScene {
             return;
         }
         let alpha = smoothstep(focus_blend);
-        if alpha <= 0.001 {
-            return;
-        }
         for card in &self.outgoing {
             if card.any_visible() {
+                let alpha = card.focus_alpha * card.coast.map_or(1.0, |coast| coast.alpha());
+                draw_leader(scene, stage, palette, card.anchor, card.rect(), alpha);
                 draw_card(
                     scene,
                     stage,
                     palette,
                     card.anchor,
                     card,
-                    alpha * 0.8,
+                    alpha,
                     self.time,
                     plate_mask,
                 );
@@ -478,7 +515,13 @@ impl PoiScene {
             );
         }
         let mut drawn = BTreeSet::new();
-        for card in self.outgoing.iter().chain(&self.cards) {
+        for card in &self.outgoing {
+            if drawn.insert(card.vertex) {
+                let alpha = card.focus_alpha * card.coast.map_or(1.0, |coast| coast.alpha());
+                draw_anchor(scene, stage, palette, card.anchor, alpha);
+            }
+        }
+        for card in &self.cards {
             if drawn.insert(card.vertex) {
                 draw_anchor(scene, stage, palette, card.anchor, alpha);
             }
@@ -489,7 +532,7 @@ impl PoiScene {
     }
 }
 
-fn card_anchor(visualizer: &Visualizer, stage: &Stage, vertex: Option<u16>) -> Point {
+pub(super) fn card_anchor(visualizer: &Visualizer, stage: &Stage, vertex: Option<u16>) -> Point {
     let anchor = vertex
         .and_then(|vertex| visualizer.vertex_screen(vertex))
         .map_or(Point::new(stage.width * 0.5, stage.height * 0.5), |point| {
@@ -851,6 +894,10 @@ fn build_cards(
             anchor: Point::ORIGIN,
             spring_x: Spring::default(),
             spring_y: Spring::default(),
+            coast: None,
+            exit_clock_scale: 1.0,
+            focus_alpha: 0.0,
+            use_plate_mask: true,
             drift_phase: rng.unit() * TAU,
             drift_amp: (
                 stage.px(3.0 + f64::from(rng.unit()) * 4.0),
@@ -930,7 +977,7 @@ fn draw_card(
             alpha,
             time,
             motion,
-            plate_mask,
+            plate_mask.filter(|_| card.use_plate_mask),
         );
     }
     if let Some(seed) = card.barcode {
@@ -1053,7 +1100,7 @@ fn draw_barcode(
     }
 }
 
-fn draw_leader(
+pub(super) fn draw_leader(
     scene: &mut Scene,
     stage: &Stage,
     palette: ScenePalette,
@@ -1106,7 +1153,13 @@ fn draw_leader(
     );
 }
 
-fn draw_anchor(scene: &mut Scene, stage: &Stage, palette: ScenePalette, anchor: Point, alpha: f32) {
+pub(super) fn draw_anchor(
+    scene: &mut Scene,
+    stage: &Stage,
+    palette: ScenePalette,
+    anchor: Point,
+    alpha: f32,
+) {
     let radius = stage.px(8.0);
     let width = (stage.unit * 1.2).max(0.8);
     scene.stroke(
@@ -1194,4 +1247,240 @@ fn hash_str(value: &str) -> u64 {
 fn smoothstep(value: f32) -> f32 {
     let value = value.clamp(0.0, 1.0);
     value * value * (3.0 - 2.0 * value)
+}
+
+#[cfg(test)]
+mod motion_tests {
+    use super::*;
+    use crate::{
+        audio::timeline::{AudioInterval, AudioTime},
+        config::ShutterFrames,
+        theme::{Theme, ThemeId},
+        visualizer::{ModelMotion, ModelRotation, Palette},
+    };
+    use vello::kurbo::Size;
+
+    fn update_cards(
+        scene: &mut PoiScene,
+        visualizer: &Visualizer,
+        fonts: &mut Fonts,
+        stage: &Stage,
+        rng: &mut Rng,
+        dt: f32,
+        target: Option<&str>,
+    ) {
+        scene.update(
+            dt,
+            visualizer.model_id(),
+            target,
+            visualizer.weapon(),
+            visualizer.comedy_spec(),
+            visualizer,
+            fonts,
+            stage,
+            rng,
+            false,
+        );
+    }
+
+    #[test]
+    fn static_occluders_keep_visible_cards_without_reserving_their_anchor_air() -> anyhow::Result<()>
+    {
+        let stage = Stage::new(Size::new(1920.0, 1080.0));
+        let mut visualizer = Visualizer::new();
+        visualizer.load_models();
+        for _ in 0..64 {
+            if visualizer.model_id() == Some("rif_ak47") {
+                break;
+            }
+            visualizer.next_model();
+        }
+        let mut rng = Rng::new(7);
+        assert!(visualizer.showcase.enter_focus(&mut rng, 1.1));
+        visualizer.update(
+            AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0)),
+            ShutterFrames::try_from(1.0).unwrap(),
+            1.0 / 60.0,
+            &Palette::from_theme(ThemeId::default()),
+            (1920.0, 1080.0),
+            1.0,
+            1.0,
+        );
+        let mut fonts = Fonts::new()?;
+        let mut scene = PoiScene::default();
+        update_cards(
+            &mut scene,
+            &visualizer,
+            &mut fonts,
+            &stage,
+            &mut rng,
+            1.0,
+            visualizer.showcase_target_id(),
+        );
+        assert!(scene.cards.iter().any(PoiCard::any_visible));
+        let physical = scene.card_occluders(&stage);
+        let floating = scene.occluders(&stage);
+        assert_eq!(physical.len(), scene.cards.len());
+        for (card, reserved) in scene.cards.iter().zip(&physical) {
+            assert_eq!(
+                reserved.intersect(card.rect()),
+                card.rect(),
+                "static graphs still clear the entire visible card"
+            );
+        }
+        let anchor = scene.cards[0].anchor;
+        let mut empty_anchor_air = None;
+        for x in [-80.0, -40.0, 0.0, 40.0, 80.0] {
+            for y in [-80.0, -40.0, 0.0, 40.0, 80.0] {
+                let point = anchor + Vec2::new(stage.px(x), stage.px(y));
+                if point.x >= stage.margin
+                    && point.x <= stage.width - stage.margin
+                    && point.y >= stage.margin
+                    && point.y <= stage.height - stage.margin
+                    && floating.iter().any(|rect| rect.contains(point))
+                    && physical.iter().all(|rect| !rect.contains(point))
+                {
+                    empty_anchor_air = Some(point);
+                }
+            }
+        }
+        assert!(
+            empty_anchor_air.is_some(),
+            "anchor breathing room remains available to static instruments"
+        );
+        update_cards(
+            &mut scene,
+            &visualizer,
+            &mut fonts,
+            &stage,
+            &mut rng,
+            0.05,
+            None,
+        );
+        assert!(scene.cards.is_empty() && !scene.outgoing.is_empty());
+        let physical = scene.card_occluders(&stage);
+        for (card, reserved) in scene.outgoing.iter().zip(&physical) {
+            assert_eq!(
+                reserved.intersect(card.rect()),
+                card.rect(),
+                "coasting cards retain their physical reservation"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn defocused_cards_preserve_velocity_and_keep_drawing_after_focus_is_zero() -> anyhow::Result<()>
+    {
+        let stage = Stage::new(Size::new(1920.0, 1080.0));
+        let mut visualizer = Visualizer::new();
+        visualizer.load_models();
+        for _ in 0..64 {
+            if visualizer.model_id() == Some("rif_ak47") {
+                break;
+            }
+            visualizer.next_model();
+        }
+        assert_eq!(visualizer.model_id(), Some("rif_ak47"));
+        visualizer.set_model_motion(ModelMotion::Still);
+        visualizer.set_model_rotation(ModelRotation::Locked);
+        let mut rng = Rng::new(7);
+        assert!(visualizer.showcase.enter_focus(&mut rng, 1.1));
+        let mut fonts = Fonts::new()?;
+        let mut scene = PoiScene::default();
+        let palette = Palette::from_theme(ThemeId::default());
+        for frame in 0..120 {
+            let start = AudioTime::ZERO.shifted(frame as f64 / 60.0);
+            visualizer.update(
+                AudioInterval::new(start, start.shifted(1.0 / 60.0)),
+                ShutterFrames::try_from(1.0).unwrap(),
+                1.0 / 60.0,
+                &palette,
+                (1920.0, 1080.0),
+                1.0,
+                1.0,
+            );
+            update_cards(
+                &mut scene,
+                &visualizer,
+                &mut fonts,
+                &stage,
+                &mut rng,
+                1.0 / 60.0,
+                visualizer.showcase_target_id(),
+            );
+        }
+        assert!(!scene.cards.is_empty());
+        scene.cards[0].spring_x.impulse(100.0);
+        let previous = scene.cards[0].rect();
+        let anchor = scene.cards[0].anchor;
+        let speed = scene.cards[0].spring_x.velocity();
+        visualizer.showcase.exit_focus();
+        update_cards(
+            &mut scene,
+            &visualizer,
+            &mut fonts,
+            &stage,
+            &mut rng,
+            0.05,
+            None,
+        );
+        assert!(scene.cards.is_empty());
+        assert!(!scene.outgoing.is_empty());
+        let coast = scene.outgoing[0].coast.unwrap();
+        assert!(coast.velocity().x > 0.0 && coast.velocity().x < f64::from(speed));
+        assert!(scene.outgoing[0].rect().x0 > previous.x0);
+        assert_eq!(scene.outgoing[0].anchor, anchor);
+        let before_model_change = scene.outgoing[0].rect().center();
+        visualizer.next_model();
+        update_cards(
+            &mut scene,
+            &visualizer,
+            &mut fonts,
+            &stage,
+            &mut rng,
+            0.05,
+            None,
+        );
+        assert_eq!(scene.outgoing[0].anchor, anchor);
+        assert!(
+            scene.outgoing[0]
+                .rect()
+                .center()
+                .distance(before_model_change)
+                < f64::from(speed) * 0.051
+        );
+        update_cards(
+            &mut scene,
+            &visualizer,
+            &mut fonts,
+            &stage,
+            &mut rng,
+            0.15,
+            None,
+        );
+        assert!(
+            scene.is_visible(),
+            "cards have their own coast/fade tail after defocus"
+        );
+        let colors = Theme::new(ThemeId::default()).colors;
+        let colors = ScenePalette::choose(&palette, colors, &mut rng);
+        let mut drawn = Scene::new();
+        scene.draw(&mut drawn, &stage, colors, 0.0, None);
+        assert!(
+            !drawn.encoding().draw_data.is_empty(),
+            "new zero focus blend must not hide the outgoing cards"
+        );
+        update_cards(
+            &mut scene,
+            &visualizer,
+            &mut fonts,
+            &stage,
+            &mut rng,
+            0.25,
+            None,
+        );
+        assert!(!scene.is_visible());
+        Ok(())
+    }
 }

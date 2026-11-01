@@ -26,7 +26,7 @@ Audio capture:
 
 ## Controls
 
-Benga starts in presentation mode. Move the mouse to reveal the controls; hover
+Benga runs in presentation mode. Move the mouse to reveal the controls; hover
 any control for a hint. They fade after 5 seconds of inactivity.
 
 - Browse models and themes, lock the current model, or enable automatic colors.
@@ -38,7 +38,33 @@ any control for a hint. They fade after 5 seconds of inactivity.
 Music drives the model's motion, part highlights, and close-ups of points of
 interest. Energy drops change the model unless Model Lock is enabled.
 
-Presentation mode includes two live audio instruments in the side columns.
+Music also introduces temporary graph compositions into the presentation. These
+include live spectral shape, aggression, energy, bass envelopes, onset timelines,
+and percussion heatmaps. Attack envelopes update with each newly registered
+attack for their instrument. Heatmap groups choose one to three distinct
+instruments (kick, snare, hat), with independently varied square, wide, or tall
+maps and sizes.
+Graph headings use thin text with space above each plot, retaining the original
+axis legends. Compositions assemble and dissolve on musical events. Up to two
+compositions can coexist; each has an 18–28-second protected hold, then waits
+for another 48–96 onset
+events before leaving. Quiet passages have a 75–105-second lifetime limit.
+Static formations survive POI switches when their space stays clear. In POI
+close-ups, additional graphs follow model vertices alongside the floating
+cards, using the same spring motion, anchor markers, and leader lines. On
+defocus, floating cards coast and fade for 0.5 seconds; vertex graphs retain
+their 1.1-second coasting fade. Vertex graphs move freely over the scene. Static
+formations make room for cards and controls. Maps, envelopes, timelines, and
+other plots can assemble into compact formations whose rectangles follow
+shared rows, columns, and gapped grid spans, including asymmetric layouts. Some compositions
+pair two tight formations with a wider gap between them. Heatmaps retain their
+square, wide, or tall proportions.
+Aggression uses a slim horizontal meter in a wide, shallow panel.
+
+The detailed analyzers start hidden on every launch. Hold any modifier key to
+reveal **Developer: show analyzers** above the toolbar; click it to show the two
+live audio instruments and their tuning controls. The same button hides them.
+Scene graph compositions pause while the detailed analyzers are open.
 The left instrument shows the level-normalized spectrum against its slow
 reference, spectral trend changes, mix energy, bass attacks, and the armed gap
 state. The right instrument shows regional attack candidates,
@@ -160,22 +186,8 @@ kick and snare. The other optional filters start off. Controls save automaticall
 Revision 3 resets old percussion masks
 and input curves while retaining gap/drop, motion, and theme preferences.
 
-For developer controls, hold any modifier key and click **Developer: exit
-presentation**. Common shortcuts:
-
-| Key | Action |
-| --- | --- |
-| `F` | Return to presentation mode |
-| `D` | Toggle the audio analyzer and parameter inspector |
-| `G` | Toggle the onset/drop timeline |
-| `A` / `S` | Previous / next theme |
-| `\` | Next model |
-| `T` | Toggle model motion blur |
-| `C` / `V` | Decrease / increase shutter exposure |
-| `Q` / `W` | Previous / next FPS limit |
-
-The developer HUD shows the remaining shortcuts. Click a band or property in
-the analyzer to inspect and tune it.
+Press `F1` to open help. The presentation toolbar provides the visual controls;
+the former developer mode and its band/property inspector are removed.
 
 ## Settings
 

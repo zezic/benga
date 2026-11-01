@@ -600,9 +600,6 @@ fn measures_full_presentation_pipeline() -> anyhow::Result<()> {
             };
             let mut ui = Ui::new(&config)?;
             ui.dismiss_startup();
-            ui.set_presentation(true);
-            ui.set_debug(false);
-            ui.set_timeline(false);
             let mut view = View::fit(Size::new(f64::from(width), f64::from(height)));
             view.set_ui_scale(2.0);
             view.set_zoom(config.zoom);

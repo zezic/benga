@@ -11,7 +11,6 @@ use vello::{kurbo::Size, Scene};
 
 fn main() -> anyhow::Result<()> {
     let mut ui = Ui::new(&Config::default())?;
-    ui.set_presentation(true);
     ui.audio_event(AudioEvent::Config { samplerate: 48_000 });
     let view = View::fit(Size::new(1920.0, 1080.0));
     let mut scene = Scene::new();

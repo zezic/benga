@@ -1,17 +1,22 @@
-//! Presentation mode: viewport-relative typography and infographics drawn over
-//! the wireframe while the debug HUD and its hotkeys are suppressed.
+//! Viewport-relative typography, musical graphs, and optional audio analyzers.
 
 mod analysis;
 mod color;
 mod decorations;
+mod graphs;
 mod normal;
+mod plots;
 mod poi;
+mod poi_graphs;
+mod poi_motion;
 mod selector;
 mod stage;
 mod text;
 
 pub(super) use analysis::AnalysisInteraction;
 pub use color::ScenePalette;
+#[cfg(test)]
+pub(super) use graphs::FormationPreview;
 pub use normal::NormalScene;
 pub use poi::PoiScene;
 pub use selector::SelectorOverlay;
@@ -23,13 +28,15 @@ use vello::{
 };
 
 use crate::{
-    render::{PlateMaskImage, RasterAsset}, text::Fonts, theme::{Theme, ThemeColors}, visualizer::Palette,
+    render::{PlateMaskImage, RasterAsset},
+    text::Fonts,
+    theme::{Theme, ThemeColors},
+    visualizer::Palette,
 };
 
 use super::{showcase::ShowcaseMode, Parameter, Rng, TriggerCounts, Visualizer};
 
 pub struct Presentation {
-    active: bool,
     time: f32,
     stage: Option<Stage>,
     rng: Rng,
@@ -45,6 +52,9 @@ pub struct Presentation {
     focus_blend: f32,
     micro: Vec<MicroFx>,
     analysis: analysis::AnalysisOverlay,
+    analyzers_visible: bool,
+    graphs: graphs::GraphCompositions,
+    poi_graphs: poi_graphs::PoiGraphs,
     exclusion: Option<Rect>,
 }
 
@@ -68,7 +78,6 @@ impl Presentation {
         let mut rng = Rng::new(0x7072_6573_656e_7421);
         let colors = ScenePalette::choose(palette, colors, &mut rng);
         Self {
-            active: false,
             time: 0.0,
             stage: None,
             rng,
@@ -84,27 +93,23 @@ impl Presentation {
             focus_blend: 0.0,
             micro: Vec::new(),
             analysis: analysis::AnalysisOverlay::default(),
+            analyzers_visible: false,
+            graphs: graphs::GraphCompositions::default(),
+            poi_graphs: poi_graphs::PoiGraphs::default(),
             exclusion: None,
         }
     }
 
-    pub fn active(&self) -> bool {
-        self.active
+    pub fn analyzers_visible(&self) -> bool {
+        self.analyzers_visible
     }
 
-    pub fn set_active(&mut self, active: bool) {
-        self.active = active;
-        if active {
-            self.last_triggers = None;
-        } else {
+    pub fn set_analyzers_visible(&mut self, visible: bool) {
+        if self.analyzers_visible != visible {
+            self.analyzers_visible = visible;
             self.analysis.cancel_interaction();
-            self.colors_ready = false;
-            self.model_id = None;
-            self.poi_key = None;
-            self.last_triggers = None;
-            self.selector.hide();
-            self.poi.hide();
-            self.micro.clear();
+            self.graphs.clear();
+            self.poi_graphs.clear();
         }
     }
 
@@ -113,7 +118,7 @@ impl Presentation {
     }
 
     pub(super) fn analysis_pointer_down(&mut self, point: Point) -> Option<AnalysisInteraction> {
-        self.active
+        self.analyzers_visible
             .then(|| self.analysis.pointer_down(point))
             .flatten()
     }
@@ -122,7 +127,7 @@ impl Presentation {
         &mut self,
         point: Option<Point>,
     ) -> Option<(Parameter, f32)> {
-        self.active
+        self.analyzers_visible
             .then(|| self.analysis.pointer_move(point))
             .flatten()
     }
@@ -132,11 +137,11 @@ impl Presentation {
     }
 
     pub(super) fn analysis_contains(&self, point: Point) -> bool {
-        self.active && self.analysis.contains(point)
+        self.analyzers_visible && self.analysis.contains(point)
     }
 
     pub(super) fn analysis_dragging(&self) -> bool {
-        self.active && self.analysis.dragging()
+        self.analyzers_visible && self.analysis.dragging()
     }
 
     /// Reserves screen space for an interactive overlay above the presentation.
@@ -166,9 +171,6 @@ impl Presentation {
             .is_some_and(|current| same_stage(&current, &stage))
         {
             self.stage = Some(stage);
-        }
-        if !self.active {
-            return;
         }
         let model_id = visualizer.model_id();
         let mode = visualizer.showcase_mode();
@@ -235,8 +237,25 @@ impl Presentation {
         let mut occluders = self.selector.occluders(&stage);
         occluders.extend(self.poi.occluders(&stage));
         occluders.extend(self.exclusion);
-        self.analysis
-            .update(dt, visualizer.debug_history(), fonts, &stage, visualizer);
+        if self.analyzers_visible {
+            self.analysis
+                .update(dt, visualizer.debug_history(), fonts, &stage, visualizer);
+        } else {
+            self.poi_graphs
+                .update(dt, visualizer, fonts, &stage, &mut self.rng);
+            let mut graph_occluders = self.selector.occluders(&stage);
+            graph_occluders.extend(self.poi.card_occluders(&stage));
+            graph_occluders.extend(self.exclusion);
+            self.graphs.update(
+                dt,
+                visualizer,
+                fonts,
+                &stage,
+                &mut self.rng,
+                &graph_occluders,
+            );
+            occluders.extend(self.graphs.occluders());
+        }
         self.normal
             .set_fact_hidden(self.poi.shows_fact(), &mut self.rng);
         self.normal
@@ -286,10 +305,11 @@ impl Presentation {
         palette: ScenePalette,
         plate_mask: Option<&PlateMaskImage>,
     ) {
-        if !self.active {
-            return;
+        if self.analyzers_visible {
+            self.analysis.draw(scene, stage, palette);
+        } else {
+            self.graphs.draw(scene, stage, palette);
         }
-        self.analysis.draw(scene, stage, palette);
         let normal_alpha = if self.poi_mode { 0.25 } else { 1.0 };
         self.normal.draw(
             scene,
@@ -302,6 +322,10 @@ impl Presentation {
         self.selector.draw(scene, stage, palette);
         self.poi
             .draw(scene, stage, palette, self.focus_blend, plate_mask);
+        if !self.analyzers_visible {
+            self.poi_graphs
+                .draw(scene, stage, palette, self.focus_blend);
+        }
         for fx in &self.micro {
             draw_micro(scene, stage, palette, fx);
         }
@@ -313,9 +337,9 @@ impl Presentation {
         scene: &mut Scene,
         stage: &Stage,
         palette: ScenePalette,
-        theme: &Theme
+        theme: &Theme,
     ) {
-        if self.active {
+        if self.analyzers_visible {
             self.analysis.draw_controls(scene, stage, palette, theme);
         }
     }
@@ -334,8 +358,67 @@ impl Presentation {
     }
 
     #[cfg(test)]
+    pub(super) fn preview_graphs(
+        &mut self,
+        visualizer: &Visualizer,
+        fonts: &mut Fonts,
+        stage: &Stage,
+        seed: u64,
+    ) -> usize {
+        let mut occluders = self.selector.occluders(stage);
+        occluders.extend(self.poi.card_occluders(stage));
+        occluders.extend(self.exclusion);
+        self.graphs
+            .preview_spawn(visualizer, fonts, stage, &mut Rng::new(seed), &occluders);
+        self.graphs.occluders().len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn preview_formation(
+        &mut self,
+        visualizer: &Visualizer,
+        fonts: &mut Fonts,
+        stage: &Stage,
+        seed: u64,
+        preview: FormationPreview,
+    ) -> usize {
+        let mut occluders = self.selector.occluders(stage);
+        occluders.extend(self.poi.card_occluders(stage));
+        occluders.extend(self.exclusion);
+        self.graphs.preview_formation(
+            visualizer,
+            fonts,
+            stage,
+            &mut Rng::new(seed),
+            &occluders,
+            preview,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn poi_graph_count(&self) -> usize {
+        self.poi_graphs.count()
+    }
+
+    #[cfg(test)]
+    pub(super) fn preview_poi_graphs(
+        &mut self,
+        visualizer: &Visualizer,
+        fonts: &mut Fonts,
+        stage: &Stage,
+        seed: u64,
+    ) -> usize {
+        self.poi_graphs
+            .preview_spawn(visualizer, fonts, stage, &mut Rng::new(seed))
+    }
+
+    #[cfg(test)]
     pub fn debug_analysis_count(&self) -> usize {
-        self.analysis.panel_count()
+        if self.analyzers_visible {
+            self.analysis.panel_count()
+        } else {
+            0
+        }
     }
 
     #[cfg(test)]

@@ -18,18 +18,18 @@ For a Hann window, each side’s positive-frequency power bin is divided by
 `N * sum(window²)` and doubled except at DC and Nyquist. An attenuation fader is
 an amplitude gain and enters regional power as `gain²`.
 
-Kick selects 60–200 Hz. Snare has unit **power** weight over 2–5 kHz and a raised
-cosine taper to zero at 10 kHz. Hat selects 5–16 kHz. The mask is analytically
-integrated over each bin's physical support; unavailable frequencies are clipped
+Kick selects 20–200 Hz. Snare has unit **power** weight over approximately
+615–3,386 Hz and a raised cosine taper to zero at approximately 5,954 Hz. Hat
+selects 5–16 kHz. The mask is analytically integrated over each bin's physical support; unavailable frequencies are clipped
 at Nyquist. A mask with no support reports unavailable, emits no observations or
 hits, and still ages its previous reference. Fractional bin weights do not add
 frequency resolution or make finite-window leakage disappear.
 
-The fast branch compares 256/512 samples at 48 kHz and defaults to 512. The
+The fast branch compares 256/512 samples at 48 kHz and defaults to 256. The
 1 ms hop is rounded to an integer sample count. Transform sizes scale to the
 nearest power of two at other rates. The kick uses an independent longer window
-because 256/512 samples cannot reliably select 60–200 Hz. The phase experiment
-measured a 60 Hz regional power spread of 0.900 / 0.338 / 0.0011 / 0.0067 for
+because 256/512 samples cannot reliably select the low-frequency kick region.
+The phase experiment measured a 60 Hz regional power spread of 0.900 / 0.338 / 0.0011 / 0.0067 for
 256/512/1024/2048 samples across 32 phases. Actual bin width and window duration
 are exposed in the inspector, including their sample-rate-dependent values.
 
@@ -42,7 +42,7 @@ subtracted from the sample clock.
 ## Candidate boundaries and state
 
 Each side has an envelope `A_c`, an exponential smoothing of `sqrt(P_c)` with a
-1 ms time constant. Growth is rectified separately,
+configurable time constant (default 5 ms). Growth is rectified separately,
 `d_c = max(A_c[n] - A_c[n-1], 0)`, then combined as
 `d = sqrt((d_L² + d_R²) / 2)`. The mixed display level remains
 `sqrt((A_L² + A_R²) / 2)` and never substitutes for this movement measurement.
@@ -59,31 +59,28 @@ constant. These are extraction helpers, never final score thresholds.
 The boundary is established before admission energy, output RMS, physical
 sharpness, or percentile gates. One preceding envelope/power sample supplies
 bounded pre-roll. The causal background power immediately preceding that hop
-is frozen separately for left and right for the entire candidate. The state progresses through idle,
-collecting, finalizing, and rearming. A settling envelope rearms after 12 ms;
+is frozen separately for left and right for the entire candidate. The state
+progresses through idle, collecting, finalizing, and rearming. A settling
+envelope rearms after 2 ms by default;
 settling uses actual envelope growth rather than its adaptive noise floor, so
 learning a long ramp as background cannot restart it when it becomes loud.
 Continuing downward tails can rearm above silence, allowing new attacks over a
 sustained bed.
 
-Lobes closer than the 6 ms merge interval remain one candidate. A fresh rise
-after a local trough can start another bounded pending event. If two feature
+Lobes closer than the merge interval (default 2 ms) remain one candidate. A
+fresh rise after a local trough can start another bounded pending event. If two feature
 windows overlap, both records explicitly carry `overlapping feature windows`
-and are excluded from learning and output. This conservative policy preserves
-the second candidate in diagnostics, without claiming either fixed window is
-isolated source energy. It can miss very rapid rolls; changing this policy would
-require evidence for a source-excess estimator. Up to eight events per channel
+and can be excluded from learning and output with the overlap filter. That
+filter starts disabled, allowing mixed-window measurements without claiming
+either fixed window is isolated source energy. Up to eight events per channel
 can be pending, with fixed sample/segment storage and no hop-time allocation.
 
 ## Observed concentration and fixed-window energy
 
-The feature spike began with a 24 ms horizon and a 5 ms concentration interval.
-The final kick horizon is **44 ms**; snare and hat retain 24 ms. Concentration
-is 5 ms on all three. This change follows a measured failure of the initial
-low-frequency prefix: the 2,048-point Hann kick front end with a 24 ms horizon
-assigned higher concentration to smooth 30 ms ramps than fast attacks. A 40 ms
-horizon still had slight overlap at 44.1 kHz. At 44 ms, the front-end matrix
-separates the tested fast and smooth attacks while meeting the emission target.
+All three channels default to a **48 ms** feature horizon and a 5 ms
+concentration interval. Earlier front-end experiments used a 44 ms kick horizon
+and 24 ms snare/hat horizons; their measured results are retained below as
+validation evidence for those settings.
 Each hop contributes the RMS-combined positive left/right growth `d` uniformly
 over its actual time interval. Sharpness is the largest growth integral in any 5 ms interval,
 divided by total positive growth in the full feature window. Maxima are evaluated
@@ -115,26 +112,24 @@ Per-bin positive excess would reduce cancellation but could overcount pitch
 motion as new energy; it was not silently substituted. Neither estimator is
 source-separated instrument energy.
 
-Admission requires meaningful absolute attack energy, actual positive envelope
-growth, and local prominence. For every hop, calculate positive side excursions
+Admission requires valid finite measurements and meaningful nonzero growth.
+Its optional energy, growth, and local-prominence gates apply when enabled.
+For every hop, calculate positive side excursions
 `e_c = max(A_c - sqrt(B_c), 0)`. The admitted growth is the smaller of total
 positive stereo growth, `max_t sqrt((e_L² + e_R²) / 2)`, and the physical mixed
 peak. Prominence divides this bounded growth by the mixed peak. This prevents a
 tiny crackle from borrowing a loud bed's stale background difference. Smooth
 notes are allowed to learn. Physical concentration, final output prominence,
 absolute attack level,
-fixed-horizon mix RMS, and output interval are separate output gates; an
-upper-ranked smooth or quiet population does not bypass them.
+fixed-horizon mix RMS, and output interval are separate output gates when
+enabled; an upper-ranked smooth or quiet population does not bypass them.
 
-The admission prominence floor is 0.08; the separate final output prominence
-floor is 0.55 for kick and 0.16 for snare/hat. A stationary broadband-noise
-fixture initially produced four false hits in three seconds: kick prominence
-0.43/0.50 and snare/hat prominence 0.13/0.10. The final contrast floors reject
-those stochastic fluctuations while still learning them. They do not compare
-one instrument against another. A weaker kick over a strong sustained signal
-inside the same selected mask can be missed by this conservative contrast gate;
-it is exposed for tuning rather than hidden as classifier confidence. A loud
-440 Hz bed does not prevent the tested 120 Hz kicks from emitting.
+The saved admission prominence floors are 0.01 for kick and 0.08 for snare/hat;
+output prominence floors are 0.0 for kick and 0.16 for snare/hat. Both prominence
+filters start disabled. When enabled, these gates compare an attack with its
+local background, never one instrument with another. A weaker attack over a
+strong sustained signal inside the same mask can be missed by a contrast gate;
+its threshold is exposed for tuning rather than hidden as classifier confidence.
 
 ## Paired references and decisions
 
@@ -157,7 +152,8 @@ as the interval `[count(<value)/N, count(<=value)/N]`.
 Before eight paired observations exist, both ranks/cutoffs are undefined.
 Absolute-quality rules can emit provisional hits during this warmup; they are
 identical before and after warmup. Silence and unavailable channels expire their
-references normally into warmup. The default lifetime is 15 seconds. Capacity is
+references normally into warmup. Default lifetimes are 30.3 seconds for kick,
+15.5 seconds for snare, and 14.9 seconds for hat. Capacity is
 8,192 observations per instrument; if exceeded, the oldest pair is removed and
 the effective retained span and truncation are reported. Timing is `f64` audio
 time, so a day-long capture does not quantize short intervals.
@@ -176,8 +172,9 @@ inspection uses that saved reference; the live distribution is explicitly
 different. Strength sent to the established visualizer is bounded to 0.15–1.0;
 linear energy and ranks remain separate diagnostics.
 Creation identity (`candidate_id`) is separate from the monotonically increasing
-publication cursor (`id`): a later-created 24 ms snare can complete before a
-pending 44 ms kick without making a display or trace reader skip that kick.
+publication cursor (`id`): with different configured feature horizons, a
+later-created snare can complete before a pending kick without making a display
+or trace reader skip that kick.
 Preamp epoch changes preserve both identities and saved decisions on the
 continuing audio clock. A full stream reset starts a new clock and history.
 Pending-queue exhaustion produces an explicit capacity rejection with no invented
@@ -204,7 +201,9 @@ uses its fixed fallback even when the other axis has supported bounds.
 Each cloud axis has an independent checkbox beside its percentage control.
 **Cloud energy top area** X% sets `max_db - (max_db - min_db) * X / 100`, converted back to attack
 energy using the feature horizon. **Cloud sharpness top area** sets
-`max_sharpness - (max_sharpness - min_sharpness) * Y / 100`. Both default to 25%.
+`max_sharpness - (max_sharpness - min_sharpness) * Y / 100`. Default
+energy/sharpness areas are 20.6%/13.1% for kick, 13%/9.8% for snare, and
+25%/25% for hat.
 These are fractions of the displayed logarithmic energy height and linear
 sharpness width, not percentiles of observations. Zero requires the highest
 edge; 100% admits the full supported span. Equality and values above either
@@ -216,7 +215,7 @@ and cloud sharpness checkboxes choose the participating branches directly;
 neither requires the legacy fixed-floor checkbox. A disabled cloud branch does
 not automatically satisfy OR.
 Before an axis has support its fixed floor participates as a fallback, still
-using OR. Both cloud checkboxes default to off; when both are off, the original
+using OR. Both cloud checkboxes default to on; when both are off, the original
 AND of enabled fixed floors applies. Their legacy switches affect this fixed
 mode only. Input quality, output prominence, mix level, independent percentiles,
 and spacing remain separate requirements. Support is independent of percentile
@@ -245,8 +244,10 @@ refractory candidate still learns when it passes admission. The candidate cannot
 raise its own threshold. Each optional input and trigger filter has a persisted
 on/off switch. A disabled filter contributes no cutoff; its configured value is
 retained for later re-enabling. Valid finite data and meaningful nonzero growth
-remain prerequisites for measuring an attack. The default switches preserve the
-previous detector behavior. During warmup (default eight observations), unavailable
+remain prerequisites for measuring an attack. Factory defaults enable input
+energy, attack level, and output spacing on all channels, plus mix RMS on kick
+and snare. The growth, prominence, fixed sharpness, percentile, and overlap
+filters start disabled. During warmup (default eight observations), unavailable
 percentiles are bypassed and an otherwise valid hit is provisional. Setting a
 percentile to zero disables only that comparison.
 
@@ -274,13 +275,16 @@ a historical trigger can sit outside the current live feature-pass region.
 
 ## Deterministic evidence
 
+The measurements below record earlier validation settings, including 44 ms kick
+and 24 ms snare/hat horizons and fixed concentration/prominence gates.
+
 Run the causal feature fixture suite without decoding music:
 
 ```sh
 cargo test --lib visualizer::transients::tests -- --nocapture
 ```
 
-All 21 classifier tests pass. A 2 ms linear rise measures concentration
+All 37 causal feature tests pass. A 2 ms linear rise measures concentration
 1.0; a 24 ms linear rise measures 5/24. After equalizing their **measured prefix
 energies**, these concentrations remain distinct. Doubling amplitude multiplies
 energy by four without changing concentration. Hops of 0.5/0.7/1.0/1.3/2.0 ms

@@ -51,10 +51,20 @@ struct Population {
 mod tests {
     use super::*;
 
+    /// Pin the 24 ms feature and fixed-floor recipe used by these causal fixtures.
+    fn fixed_floor_channel_settings() -> PercussionChannelSettings {
+        PercussionChannelSettings {
+            feature_ms: 24.0,
+            min_sharpness: 0.40,
+            min_output_prominence: 0.16,
+            ..fixed_floor_test_settings().channels[0]
+        }
+    }
+
     /// Small causal fixture runner used to settle the feature contract without
     /// percentile tuning or the frequency front end confounding the features.
     fn feature(rise: f32, gain: f32, dt: f32) -> Candidate {
-        let settings = PercussionChannelSettings::default();
+        let settings = fixed_floor_channel_settings();
         let mut candidate = Candidate::new(1, 0.0, 0.0, 0.0, 0.0);
         let mut elapsed = 0.0;
         while elapsed < settings.feature_ms * 0.001 - 1e-7 {
@@ -93,7 +103,7 @@ mod tests {
 
     #[test]
     fn energy_integrates_hops_once_and_clips_background_crossings() {
-        let settings = PercussionChannelSettings::default();
+        let settings = fixed_floor_channel_settings();
         let mut candidate = Candidate::new(1, 0.0, 0.25, 1.0, 1.0);
         for _ in 0..24 {
             candidate.push(1.0, 1.0, 1.0, 0.001, &settings);
@@ -107,7 +117,7 @@ mod tests {
 
     #[test]
     fn stereo_growth_and_energy_are_rectified_before_combining_sides() {
-        let settings = PercussionChannelSettings::default();
+        let settings = fixed_floor_channel_settings();
         let build = |gain: f32| {
             let mut candidate = Candidate::new_stereo(
                 1,
@@ -178,7 +188,7 @@ mod tests {
             min_reference: 1,
             sharpness_percentile: 100.0,
             energy_percentile: 100.0,
-            ..PercussionChannelSettings::default()
+            ..fixed_floor_channel_settings()
         };
         let first = channel.finish(feature(0.002, 0.1, 0.001), 0, 1.0, &settings);
         assert!(first.admitted && first.eligible && first.provisional);
@@ -202,7 +212,7 @@ mod tests {
             min_reference: 1,
             sharpness_percentile: 0.0,
             energy_percentile: 0.0,
-            ..PercussionChannelSettings::default()
+            ..fixed_floor_channel_settings()
         };
         assert!(
             channel
@@ -229,7 +239,7 @@ mod tests {
             min_reference: 1,
             sharpness_percentile: 100.0,
             energy_percentile: 100.0,
-            ..PercussionChannelSettings::default()
+            ..fixed_floor_channel_settings()
         };
         let first = channel.finish(feature(0.002, 0.1, 0.001), 0, 1.0, &settings);
         let close = channel.finish(feature(0.002, 0.099, 0.001), 0, 2.0, &settings);
@@ -246,7 +256,7 @@ mod tests {
         let settings = PercussionChannelSettings {
             memory_seconds: 60.0,
             min_reference: 1,
-            ..PercussionChannelSettings::default()
+            ..fixed_floor_channel_settings()
         };
         for index in 0..REFERENCE_CAPACITY + 8 {
             population.insert(
@@ -290,7 +300,7 @@ mod tests {
         let settings = PercussionChannelSettings {
             memory_seconds: 1.0,
             min_reference: 1,
-            ..PercussionChannelSettings::default()
+            ..fixed_floor_channel_settings()
         };
         let mut population = Population::default();
         for index in 0..100 {
@@ -373,7 +383,7 @@ mod tests {
             min_reference: 1,
             sharpness_percentile: 100.0,
             energy_percentile: 100.0,
-            ..PercussionChannelSettings::default()
+            ..fixed_floor_channel_settings()
         };
         let mut population = Population::default();
         population.insert(
@@ -438,7 +448,7 @@ mod tests {
             cloud_enabled: true,
             cloud_min_count: 3,
             cloud_top_percent: 25.0,
-            ..PercussionChannelSettings::default()
+            ..fixed_floor_channel_settings()
         };
         let mut population = Population::default();
         assert!(population.snapshot(0.0, &settings).cloud_boundary.is_none());
@@ -515,7 +525,7 @@ mod tests {
             cloud_enabled: true,
             cloud_min_count: 3,
             memory_seconds: 1.0,
-            ..PercussionChannelSettings::default()
+            ..fixed_floor_channel_settings()
         };
         let mut population = Population::default();
         for (index, bin) in [17, 17, 17, 9, 9, 9].into_iter().enumerate() {
@@ -945,7 +955,7 @@ mod tests {
         let settings = PercussionChannelSettings {
             output_rms_db: 0.0,
             min_reference: 1,
-            ..PercussionChannelSettings::default()
+            ..fixed_floor_channel_settings()
         };
         let mut channel = Channel::default();
         let mut candidate = feature(0.002, 0.1, 0.001);
@@ -970,7 +980,7 @@ mod tests {
     #[test]
     fn changing_recent_marker_count_preserves_populations_epochs_and_decisions() {
         let mut detector = SharpOnsets::default();
-        let mut settings = PercussionSettings::default();
+        let mut settings = fixed_floor_test_settings();
         feed_envelope(&mut detector, &settings, 0.0, 0.2, |at| {
             if (0.05..0.07).contains(&at) {
                 0.2
@@ -1001,16 +1011,16 @@ mod tests {
             energy_percentile: 0.0,
             output_interval_ms: 5.0,
             min_reference: 1,
-            ..PercussionChannelSettings::default()
+            ..fixed_floor_channel_settings()
         };
         PercussionSettings {
             channels: [channel; 3],
-            ..PercussionSettings::default()
+            ..fixed_floor_test_settings()
         }
     }
 
     fn contrast_candidate() -> Candidate {
-        let settings = PercussionChannelSettings::default();
+        let settings = fixed_floor_channel_settings();
         let mut candidate = Candidate::new(1, 0.0, 0.08_f32.powi(2), 0.08, 0.08_f32.powi(2));
         for index in 0..24 {
             let amplitude = 0.08 + 0.02 * (((index + 1) as f32 * 0.001) / 0.002).min(1.0);
@@ -1231,7 +1241,7 @@ mod tests {
     #[test]
     fn repeated_equal_attacks_create_one_observation_each_without_tail_duplicates() {
         let mut detector = SharpOnsets::default();
-        let settings = PercussionSettings::default();
+        let settings = fixed_floor_test_settings();
         feed_envelope(&mut detector, &settings, 0.0, 4.0, |at| {
             if at < 0.2 {
                 return 0.0;
@@ -1253,7 +1263,7 @@ mod tests {
     #[test]
     fn slow_attack_does_not_restart_when_it_later_crosses_admission_or_rms() {
         let mut detector = SharpOnsets::default();
-        let settings = PercussionSettings::default();
+        let settings = fixed_floor_test_settings();
         feed_envelope(&mut detector, &settings, 0.0, 0.6, |at| {
             ((at - 0.1) / 0.12).clamp(0.0, 1.0) * 0.2
         });
@@ -1279,7 +1289,7 @@ mod tests {
         let mut channel = Channel::default();
         let settings = PercussionChannelSettings {
             min_reference: 1,
-            ..PercussionChannelSettings::default()
+            ..fixed_floor_channel_settings()
         };
         for index in 0..40 {
             let decision = channel.finish(feature(0.120, 0.5, 0.001), 0, index as f64, &settings);
@@ -1292,7 +1302,7 @@ mod tests {
     #[test]
     fn tiny_crackle_over_loud_bed_does_not_borrow_background_energy() {
         let mut channel = Channel::default();
-        let settings = PercussionChannelSettings::default();
+        let settings = fixed_floor_channel_settings();
         let mut candidate = Candidate::new(1, 0.0, 0.01, 0.7, 0.49);
         for _ in 0..24 {
             candidate.push(0.70001, 0.490014, 0.49, 0.001, &settings);
@@ -1305,7 +1315,7 @@ mod tests {
     #[test]
     fn close_attacks_remain_explicit_records_with_overlap_rejections() {
         let mut detector = SharpOnsets::default();
-        let mut settings = PercussionSettings::default();
+        let mut settings = fixed_floor_test_settings();
         for channel in &mut settings.channels {
             channel.rearm_ms = 3.0;
         }
@@ -1335,7 +1345,7 @@ mod tests {
     #[test]
     fn epoch_resets_are_local_and_cutoff_changes_preserve_observations() {
         let mut detector = SharpOnsets::default();
-        let mut settings = PercussionSettings::default();
+        let mut settings = fixed_floor_test_settings();
         feed_envelope(&mut detector, &settings, 0.0, 0.2, |at| {
             if (0.05..0.07).contains(&at) {
                 0.2
@@ -1357,7 +1367,7 @@ mod tests {
     #[test]
     fn audio_time_expiry_runs_on_unavailable_channels_and_after_day_long_clocks() {
         let mut detector = SharpOnsets::default();
-        let settings = PercussionSettings::default();
+        let settings = fixed_floor_test_settings();
         feed_envelope(&mut detector, &settings, 86_400.0, 0.2, |at| {
             if (0.05..0.07).contains(&at) {
                 0.2
@@ -1382,7 +1392,7 @@ mod tests {
 
     fn production(seconds: f32, mut sample: impl FnMut(f32) -> f32) -> SharpOnsets {
         use super::super::percussion_spectrum::PercussionAnalyzer;
-        let settings = PercussionSettings::default();
+        let settings = fixed_floor_test_settings();
         let mut analyzer = PercussionAnalyzer::new(48_000);
         analyzer.set_settings(&settings);
         let mut detector = SharpOnsets::default();
@@ -1489,7 +1499,7 @@ mod tests {
     #[test]
     fn mixed_horizons_publish_a_monotonic_cursor_without_losing_candidate_identity() {
         let mut detector = SharpOnsets::default();
-        let mut settings = PercussionSettings::default();
+        let mut settings = fixed_floor_test_settings();
         settings.channels[0].feature_ms = 40.0;
         feed_envelope(&mut detector, &settings, 0.0, 0.2, |at| {
             if (0.05..0.06).contains(&at) {
@@ -1580,7 +1590,7 @@ mod tests {
             0.02,
             0.001,
             1.01,
-            &PercussionChannelSettings::default(),
+            &fixed_floor_channel_settings(),
             0,
             &mut candidate_id,
             &mut publication_id,
@@ -1592,7 +1602,7 @@ mod tests {
         assert!(!decisions[0].admitted && !decisions[0].eligible);
         assert_eq!(decisions[0].sharpness_rank, None);
         let mut detector = SharpOnsets::default();
-        let settings = PercussionSettings::default();
+        let settings = fixed_floor_test_settings();
         feed_envelope(&mut detector, &settings, 0.0, 0.2, |at| {
             if (0.05..0.07).contains(&at) {
                 0.2

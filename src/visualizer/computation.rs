@@ -1815,12 +1815,26 @@ impl Mixer {
 
 /// Persisted mixer adjustments: term modes, constant values, and user-added
 /// inputs. Anything absent keeps its built-in definition.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MixerTuning {
     modes: Vec<MixModeTuning>,
     constants: Vec<ConstantTuning>,
     extras: BTreeMap<MixPoint, Vec<ExtraTuning>>,
+}
+
+impl Default for MixerTuning {
+    fn default() -> Self {
+        Self {
+            modes: vec![MixModeTuning {
+                point: MixPoint::SpinSpeed,
+                index: 0,
+                mix: Mix::Mul,
+            }],
+            constants: Vec::new(),
+            extras: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]

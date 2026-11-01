@@ -57,7 +57,7 @@ pub const SEQUENCE_EVERY_MAX: u32 = 32;
 pub(super) const ONSET_MIX_GATE_DB: f32 = -27.0;
 pub const SNARE_RMS_GATE_MIN_DB: f32 = -60.0;
 pub const SNARE_RMS_GATE_MAX_DB: f32 = 0.0;
-pub const SNARE_RMS_GATE_DEFAULT_DB: f32 = -24.0;
+pub const SNARE_RMS_GATE_DEFAULT_DB: f32 = -27.0;
 /// Allowed gap gate level in dBFS.
 pub const DROP_GAP_THRESHOLD_MIN: f32 = -60.0;
 pub const DROP_GAP_THRESHOLD_MAX: f32 = 0.0;
@@ -733,20 +733,20 @@ pub struct ArrangementSettings {
 impl Default for ArrangementSettings {
     fn default() -> Self {
         Self {
-            mix_loss_db: 2.0,
-            mix_loss_hold: 1.2,
-            shape_distance: 0.12,
-            trend_change: 0.055,
+            mix_loss_db: 1.0,
+            mix_loss_hold: 0.906454,
+            shape_distance: 0.2,
+            trend_change: 0.075,
             changed_fraction: 0.25,
-            gap_hold: 1.2,
-            gap_rms_db: -40.0,
+            gap_hold: 0.05,
+            gap_rms_db: -24.0,
             gap_rms_hold: 0.5,
-            reference_time: 5.0,
-            bass_fast_time: 0.020,
-            bass_slow_time: 0.250,
-            bass_hit_threshold: 0.12,
-            drop_min_rms_db: -26.0,
-            drop_refractory: 8.0,
+            reference_time: 0.5,
+            bass_fast_time: 0.05005731,
+            bass_slow_time: 0.5005731,
+            bass_hit_threshold: 0.35,
+            drop_min_rms_db: -24.0,
+            drop_refractory: 1.0164245,
         }
     }
 }
@@ -983,12 +983,38 @@ impl FrequencyGainProfile {
 }
 
 /// Independent detector attenuation curves. Channels are kick, snare, and hat.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PercussionBinGains {
     pub kick: FrequencyGainProfile,
     pub snare: FrequencyGainProfile,
     pub hat: FrequencyGainProfile,
+}
+
+impl Default for PercussionBinGains {
+    fn default() -> Self {
+        Self {
+            kick: FrequencyGainProfile {
+                points: [
+                    (0.0, 1.0),
+                    (23.437, 0.06374729),
+                    (23.438, 0.0637074),
+                    (46.875, 0.22908208),
+                    (46.876, 0.9999574),
+                    (70.312, 0.37381178),
+                    (70.313, 0.3737849),
+                    (93.75, 0.6631906),
+                    (93.751, 1.0),
+                    (117.188, 1.0),
+                ]
+                .into_iter()
+                .map(|(hz, gain)| BinGainPoint { hz, gain })
+                .collect(),
+            },
+            snare: FrequencyGainProfile::default(),
+            hat: FrequencyGainProfile::default(),
+        }
+    }
 }
 
 impl PercussionBinGains {
@@ -1125,15 +1151,15 @@ impl Default for DetectorSettings {
             bin_gains: PercussionBinGains::default(),
             band_onset: [BandOnsetSettings::default(); BAND_COUNT],
             excess: RelativeExcessSettings::default(),
-            kick_low_hz: 102.614056,
-            kick_high_hz: 223.14035,
+            kick_low_hz: 20.0,
+            kick_high_hz: 302.0,
             kick_pattern: TemporalPattern::kick_initial(),
             kick_onset_pre_gain: 0.2977303,
             kick_onset_attack: 0.004782859,
             kick_onset_release: 0.010084573,
-            kick_onset_average: 0.6,
-            kick_onset_sensitivity: 1.0,
-            kick_onset_min_threshold: 0.16,
+            kick_onset_average: 0.7738249,
+            kick_onset_sensitivity: 5.0,
+            kick_onset_min_threshold: 0.25,
             kick_onset_min_interval: 0.09,
             kick_onset_suppression: 0.0,
             kick_snare_choke: 0.099999994,
@@ -1145,8 +1171,8 @@ impl Default for DetectorSettings {
             snare_onset_attack: 0.001,
             snare_onset_release: 0.005,
             snare_onset_average: 0.6,
-            snare_onset_sensitivity: 1.0,
-            snare_onset_min_threshold: 0.14,
+            snare_onset_sensitivity: 5.0,
+            snare_onset_min_threshold: 0.06,
             snare_onset_min_interval: 0.10,
             snare_onset_suppression: 0.099999994,
             snare_min_rms_db: SNARE_RMS_GATE_DEFAULT_DB,
@@ -1159,19 +1185,19 @@ impl Default for DetectorSettings {
             hat_onset_pre_gain: 4.0,
             hat_onset_attack: 0.001,
             hat_onset_release: 0.005,
-            hat_onset_average: 0.6,
-            hat_onset_sensitivity: 1.0,
-            hat_onset_min_threshold: 0.16,
+            hat_onset_average: 0.29895896,
+            hat_onset_sensitivity: 5.0,
+            hat_onset_min_threshold: 0.25,
             hat_onset_min_interval: 0.03,
             hat_onset_suppression: 0.0,
             drop_kernels: DropKernels::default(),
-            drop_gap_threshold: -21.0,
+            drop_gap_threshold: -26.0,
             drop_onset_pre_gain: 1.0054638,
             drop_onset_attack: 0.024582442,
             drop_onset_release: 0.05,
-            drop_onset_average: 0.2,
-            drop_onset_sensitivity: 1.5,
-            drop_onset_min_threshold: 0.125,
+            drop_onset_average: 1.2924675,
+            drop_onset_sensitivity: 2.0,
+            drop_onset_min_threshold: 0.05,
             drop_onset_min_interval: 0.14,
             drop_onset_suppression: 0.5,
             drop_quake_factor: 22.13,
@@ -2046,7 +2072,7 @@ impl TryFrom<DetectorSettingsRaw> for DetectorSettings {
                 // incompatible regional gain curves and frequency masks.
                 settings.percussion = PercussionSettings::default();
                 settings.bin_gains = PercussionBinGains::default();
-                log::info!("Percussion revision 3: reset masks to 60–200 / 2000–10000 / 5000–16000 Hz and input gains to unity; arrangement and motion preferences retained");
+                log::info!("Percussion revision 3: restored factory frequency masks and input gain curves; arrangement and motion preferences retained");
             }
             if needs_migration {
                 // Validate the original recipe before migrating score units:
@@ -2789,7 +2815,7 @@ mod tests {
             "(arrangement:(mix_loss_db:3.5,gap_hold:2.0,gap_rms_hold:0.75))",
         ] {
             let settings: DetectorSettings = ron::from_str(saved).unwrap();
-            assert_eq!(settings.arrangement.mix_loss_hold, 1.2);
+            assert_eq!(settings.arrangement.mix_loss_hold, 0.906454);
         }
         let mut settings: DetectorSettings =
             ron::from_str("(arrangement:(mix_loss_db:3.5,gap_hold:2.0,gap_rms_hold:0.75))")
@@ -2807,7 +2833,7 @@ mod tests {
         assert_eq!(ArrangementSetting::MixLossHold.format(1.2), "1.20 s");
         assert!(ArrangementSetting::MixLossHold.is_time());
         let status = DropStatus::default();
-        assert_eq!(status.mix_loss_hold_seconds, 1.2);
+        assert_eq!(status.mix_loss_hold_seconds, 0.906454);
         assert_eq!(status.mix_loss_held_seconds, 0.0);
         assert!(!status.mix_loss_condition_met);
     }
@@ -2842,7 +2868,7 @@ mod tests {
             "(arrangement:(mix_loss_db:0.25,shape_distance:0.01,gap_hold:0.05))",
         ] {
             let restored: DetectorSettings = ron::from_str(saved).unwrap();
-            assert_eq!(restored.arrangement.gap_rms_db, -40.0);
+            assert_eq!(restored.arrangement.gap_rms_db, -24.0);
             assert_eq!(restored.arrangement.gap_rms_hold, 0.5);
         }
         let restored: DetectorSettings =
@@ -2896,8 +2922,8 @@ mod tests {
     fn lf_envelope_controls_default_for_saved_configs_and_round_trip_custom_times() {
         for saved in ["()", "(arrangement:(gap_hold:0.05,bass_hit_threshold:0.1))"] {
             let settings: DetectorSettings = ron::from_str(saved).unwrap();
-            assert_eq!(settings.arrangement.bass_fast_time, 0.020);
-            assert_eq!(settings.arrangement.bass_slow_time, 0.250);
+            assert_eq!(settings.arrangement.bass_fast_time, 0.05005731);
+            assert_eq!(settings.arrangement.bass_slow_time, 0.5005731);
         }
         let mut settings = DetectorSettings::default();
         settings
@@ -2914,15 +2940,15 @@ mod tests {
         assert!(ArrangementSetting::BassFastTime.is_time());
         assert!(ArrangementSetting::BassSlowTime.is_time());
         let defaults = DropStatus::default();
-        assert_eq!(defaults.bass_fast_seconds, 0.020);
-        assert_eq!(defaults.bass_slow_seconds, 0.250);
+        assert_eq!(defaults.bass_fast_seconds, 0.05005731);
+        assert_eq!(defaults.bass_slow_seconds, 0.5005731);
     }
 
     #[test]
     fn lf_envelope_controls_keep_the_edited_time_separated_and_validate_saved_pairs() {
         let mut settings = ArrangementSettings::default();
         settings.set(ArrangementSetting::BassSlowTime, 0.020);
-        assert_eq!(settings.bass_fast_time, 0.020);
+        assert_eq!(settings.bass_fast_time, 0.05005731);
         assert_eq!(settings.bass_slow_time, settings.bass_fast_time + 0.005);
         settings.validate().unwrap();
         let slow_before_edit = settings.bass_slow_time;
@@ -3004,7 +3030,7 @@ mod tests {
                 .filter(|&band| settings.kick_contains(band))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(selected(&defaults), [3, 4]);
+        assert_eq!(selected(&defaults), [0, 1, 2, 3, 4, 5]);
         let custom = DetectorSettings {
             kick_low_hz: 50.0,
             kick_high_hz: 110.0,
@@ -3062,8 +3088,8 @@ mod tests {
     fn temporal_settings_migrate_score_units_but_preserve_motion_and_energy_preferences() {
         let legacy = "(kick_onset_min_threshold:0.027,kick_onset_average:1.2,snare_min_rms_db:-29.0,kick_quake_factor:17.0)";
         let migrated: DetectorSettings = ron::from_str(legacy).unwrap();
-        assert_eq!(migrated.kick_onset_min_threshold, 0.16);
-        assert_eq!(migrated.kick_onset_average, 0.6);
+        assert_eq!(migrated.kick_onset_min_threshold, 0.25);
+        assert_eq!(migrated.kick_onset_average, 0.7738249);
         assert_eq!(migrated.snare_min_rms_db, -29.0);
         assert_eq!(migrated.kick_quake_factor, 17.0);
         let tuned = DetectorSettings {
@@ -3081,7 +3107,7 @@ mod tests {
     #[test]
     fn the_live_detectors_describe_their_frequency_regions() {
         let settings = defaults();
-        assert!(!settings.kick_contains(0));
+        assert!(settings.kick_contains(0));
         assert!(settings.kick_contains(4));
         assert!(!settings.kick_contains(15));
         assert!(settings.snare_contains(8));

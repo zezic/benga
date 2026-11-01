@@ -1226,6 +1226,9 @@ mod tests {
 
     fn config_with_disliked(count: usize) -> Config {
         let mut config = Config::default();
+        for theme in ThemeId::all() {
+            config.theme_preferences.restore(theme);
+        }
         for theme in ThemeId::all()
             .filter(|theme| *theme != config.theme)
             .take(count)

@@ -184,6 +184,9 @@ mod tests {
         assert_eq!(*config, Config::default());
         config.flush()?;
         assert!(!path.exists());
+        for theme in benga::theme::ThemeId::all() {
+            config.edit().theme_preferences.restore(theme);
+        }
         config.edit().preamp_db = PreampDb::try_from(-12.0)?;
         config.edit().zoom = crate::config::Zoom::try_from(1.7)?;
         config.edit().frame_rate_limit = FrameRateLimit::Fps55;
@@ -205,7 +208,7 @@ mod tests {
         assert_eq!(preferences.random(manual_theme, 0.0), Some(light_theme));
         assert_eq!(config.theme, startup_theme);
         config.edit().fullscreen = true;
-        config.edit().cursor_visibility = crate::config::CursorVisibility::Always;
+        config.edit().cursor_visibility = crate::config::CursorVisibility::AutoHide;
         config.edit().model_rotation = crate::visualizer::ModelRotation::Locked;
         config.edit().visualizer_text_scale = config
             .visualizer_text_scale
@@ -273,10 +276,10 @@ mod tests {
     fn older_settings_receive_default_aggression_ranges_and_relaxation() -> anyhow::Result<()> {
         let config: Config = ron::from_str("(tuning: (kick_decay: 4.5))")?;
         assert_eq!(config.tuning.kick_decay, 4.5);
-        assert_eq!(config.tuning.spectral_relaxation, 0.75);
-        assert_eq!(config.tuning.lf_boost_gain, 1.0);
-        assert_eq!(config.tuning.spectrum_amount, 1.0);
-        assert_eq!(config.tuning.aggression_falloff, 3.0);
+        assert_eq!(config.tuning.spectral_relaxation, 1.0);
+        assert_eq!(config.tuning.lf_boost_gain, 4.0);
+        assert_eq!(config.tuning.spectrum_amount, 0.65999997);
+        assert_eq!(config.tuning.aggression_falloff, 0.5);
         assert_eq!(
             config.tuning.aggression_bands,
             crate::visualizer::AggressionBands::default()
@@ -391,7 +394,7 @@ mod tests {
         assert!(!missing.fullscreen);
         assert_eq!(
             missing.cursor_visibility,
-            crate::config::CursorVisibility::AutoHide
+            crate::config::CursorVisibility::Always
         );
         assert_eq!(
             missing.model_rotation,

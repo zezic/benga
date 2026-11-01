@@ -100,7 +100,7 @@ impl Zoom {
 
 impl Default for Zoom {
     fn default() -> Self {
-        Self(1.0)
+        Self(1.5379000000000003)
     }
 }
 
@@ -234,7 +234,7 @@ pub struct PresentationOpacity(f32);
 
 impl Default for PresentationOpacity {
     fn default() -> Self {
-        Self(1.0)
+        Self(0.99999994)
     }
 }
 
@@ -278,8 +278,8 @@ impl PresentationOpacity {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CursorVisibility {
-    Always,
     #[default]
+    Always,
     AutoHide,
 }
 
@@ -366,6 +366,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn factory_defaults_match_the_seed_config() -> anyhow::Result<()> {
+        let seed: Config = ron::from_str(include_str!("../tests/fixtures/factory-defaults.ron"))?;
+        assert_eq!(Config::default(), seed);
+        assert_eq!(ron::from_str::<Config>("()")?, seed);
+        assert!(!seed.onboarding_seen);
+        Ok(())
+    }
+
+    #[test]
     fn legacy_detail_thinning_is_ignored_without_changing_other_settings() -> anyhow::Result<()> {
         let expected: Config = ron::from_str("(zoom: 1.7, shutter_frames: 4.0)")?;
         for strength in ["0.0", "0.5", "1.0", "1.7", "2.0", "-0.1", "2.1"] {
@@ -382,7 +391,7 @@ mod tests {
 
     #[test]
     fn zoom_preserves_camera_bounds_across_dials_and_wheel_scaling() {
-        let normal = Zoom::default();
+        let normal = Zoom::try_from(1.0).unwrap();
         assert_eq!(normal.factor(), 1.0);
         assert_eq!(normal.adjusted(Adjustment::Increase).factor(), 1.1);
         assert_eq!(normal.scaled(2.0).factor(), 2.0);

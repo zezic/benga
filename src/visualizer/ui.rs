@@ -2094,6 +2094,11 @@ mod tests {
     #[test]
     fn presentation_detector_slider_drags_update_live_and_saved_settings() {
         let (mut ui, view) = drawn_presentation_ui();
+        let mut settings = ui.detector_settings();
+        settings.percussion.channels[0].filters.sharpness_percentile = true;
+        settings.percussion.channels[0].sharpness_percentile = 60.0;
+        ui.set_detector_settings(settings);
+        draw_presentation_frame(&mut ui, &view);
         let now = Instant::now();
         for parameter in [
             Parameter::Arrangement(ArrangementSetting::MixLossDb),
@@ -2250,7 +2255,7 @@ mod tests {
             !ui.controls.contains(kick_fader),
             "the toolbar must not cover bin faders"
         );
-        assert_eq!(ui.visualizer.parameter_value(kick_parameter), 1.0);
+        assert_eq!(ui.visualizer.parameter_value(kick_parameter), 0.0637074);
         assert!(ui.click_controls_at(&view, kick_fader, now).is_none());
         assert!(ui.presentation.analysis_dragging());
         ui.set_pointer(Some(Point::new(kick_fader.x, kick_fader.y + 1000.0)));
@@ -2757,7 +2762,7 @@ mod tests {
                 MotionOpacity::default(),
                 MotionFadePower::default(),
             ),
-            "MODEL [\\] 2/3   BLUR [T] ON   WIDTH [;] [']  60%   FLOOR [L] [R]   0%   POWER [Y] 0.5"
+            "MODEL [\\] 2/3   BLUR [T] ON   WIDTH [;] [']  70%   FLOOR [L] [R]   0%   POWER [Y] 0.5"
         );
     }
 
@@ -2843,7 +2848,10 @@ mod tests {
         assert_ne!(ui.selected_theme().tone(), config.theme.tone());
         assert_eq!(ui.theme_preferences, manual);
         ui.choose_tone(config.theme.tone());
-        assert_eq!(ui.selected_theme(), config.theme);
+        assert_eq!(
+            ui.selected_theme(),
+            manual.remembered(config.theme.tone()).unwrap()
+        );
         Ok(())
     }
 

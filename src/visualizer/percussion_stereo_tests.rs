@@ -2,6 +2,17 @@
 //! waveform. Channel motion is measured before its positive changes combine.
 use super::*;
 
+fn fixed_floor_settings() -> DetectorSettings {
+    let mut settings = DetectorSettings {
+        percussion: percussion::fixed_floor_test_settings(),
+        ..DetectorSettings::default()
+    };
+    for channel in 0..3 {
+        settings.bin_gains.reset(channel);
+    }
+    settings
+}
+
 fn stream(
     rate: usize,
     seconds: f64,
@@ -48,7 +59,7 @@ fn attack(age: f64, instrument: usize, side: usize, phase: f64) -> f64 {
 #[test]
 fn a_new_side_attack_is_not_canceled_by_the_other_sides_decay() {
     for instrument in [1, 2] {
-        let result = stream(48_000, 0.30, 137, DetectorSettings::default(), |time| {
+        let result = stream(48_000, 0.30, 137, fixed_floor_settings(), |time| {
             let transition = ((time - 0.15) / 0.004).clamp(0.0, 1.0);
             let angle = transition * std::f64::consts::FRAC_PI_2;
             [
@@ -93,7 +104,7 @@ fn centered_panned_antiphase_and_wide_hf_hits_emit_once_within_50ms() {
         for instrument in [1, 2] {
             for phase in [0.0, 0.9] {
                 for layout in 0..8 {
-                    let result = stream(rate, 0.21, 137, DetectorSettings::default(), |time| {
+                    let result = stream(rate, 0.21, 137, fixed_floor_settings(), |time| {
                         let age = time - 0.1;
                         let left = attack(age, instrument, 0, phase);
                         let right = attack(age, instrument, 1, phase + 0.7);
@@ -145,7 +156,7 @@ fn equal_power_static_pan_and_polarity_do_not_add_energy_or_sharpness() {
             1.2,
             std::f64::consts::FRAC_PI_2,
         ] {
-            let result = stream(48_000, 0.21, 137, DetectorSettings::default(), |time| {
+            let result = stream(48_000, 0.21, 137, fixed_floor_settings(), |time| {
                 let value = attack(time - 0.1, instrument, 0, 0.7);
                 [
                     (std::f64::consts::SQRT_2 * angle.cos() * value) as f32,
@@ -182,7 +193,7 @@ fn equal_power_static_pan_and_polarity_do_not_add_energy_or_sharpness() {
 fn slow_constant_power_panning_does_not_promote_a_sustained_tone() {
     for instrument in [1, 2] {
         for duration in [0.120, 0.600] {
-            let result = stream(48_000, 1.0, 137, DetectorSettings::default(), |time| {
+            let result = stream(48_000, 1.0, 137, fixed_floor_settings(), |time| {
                 let movement = ((time - 0.1) / duration).clamp(0.0, 1.0);
                 let angle = movement * std::f64::consts::FRAC_PI_2;
                 // The same held carrier moves slowly between the channels;
@@ -214,6 +225,7 @@ fn wide_stereo_event_features_and_emission_times_ignore_callback_partitioning() 
         .collect();
     let run = |partition| {
         let mut visualizer = Visualizer::new();
+        visualizer.set_detector_settings(fixed_floor_settings());
         for callback in samples.chunks(partition) {
             visualizer.consume_buf(callback, 1.0);
         }
@@ -233,7 +245,7 @@ fn wide_stereo_event_features_and_emission_times_ignore_callback_partitioning() 
 fn independent_left_right_stationary_noise_does_not_become_percussion() {
     for gain in [0.003, 0.5, 1.0] {
         let mut states = [0x7392_c85a_u32, 0x19ab_45e7_u32];
-        let result = stream(48_000, 3.0, 137, DetectorSettings::default(), |_| {
+        let result = stream(48_000, 3.0, 137, fixed_floor_settings(), |_| {
             std::array::from_fn(|side| {
                 let state = &mut states[side];
                 *state ^= *state << 13;

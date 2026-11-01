@@ -174,7 +174,7 @@ pub struct NearOpacity(f32);
 impl NearOpacity {
     const MIN: f32 = 0.01;
     const MAX: f32 = 1.0;
-    const DEFAULT: f32 = 0.49999988;
+    const DEFAULT: f32 = 0.5;
     const STEP: f32 = 0.05;
     const LOW_MAX: f32 = 0.1;
     const LOW_STEP: f32 = 0.01;
@@ -259,7 +259,7 @@ impl CreaseThreshold {
 
 impl Default for CreaseThreshold {
     fn default() -> Self {
-        Self(5.0)
+        Self(0.0)
     }
 }
 
@@ -313,7 +313,7 @@ impl LineWidth {
 
 impl Default for LineWidth {
     fn default() -> Self {
-        Self(0.6)
+        Self(0.70000005)
     }
 }
 
@@ -448,7 +448,7 @@ pub struct MotionFadePower(f32);
 impl MotionFadePower {
     pub const MIN: f32 = 0.1;
     pub const MAX: f32 = 4.0;
-    pub const DEFAULT: f32 = 0.5;
+    pub const DEFAULT: f32 = 0.4999999;
     const STEP: f32 = 0.1;
 
     pub fn power(self) -> f32 {
@@ -706,10 +706,10 @@ impl Default for VisualizerTuning {
         Self {
             inputs: InputTunings::default(),
             kick_decay: 0.0,
-            spectral_relaxation: 0.75,
+            spectral_relaxation: 1.0,
             aggression_falloff: AGGRESSION_RELEASE_SECONDS,
-            spectrum_amount: 1.0,
-            lf_boost_gain: 1.0,
+            spectrum_amount: 0.65999997,
+            lf_boost_gain: 4.0,
             aggression_bands: AggressionBands::default(),
             gains: Gains::default(),
             routing: BandRouting::default(),
@@ -5251,6 +5251,31 @@ impl Rng {
 mod tests {
     use super::*;
 
+    // Give signal-response tests an explicit recipe independent of factory tuning.
+    fn aggression_test_visualizer() -> Visualizer {
+        let mut visualizer = Visualizer::new();
+        visualizer.aggression_bands = AggressionBands {
+            lf_start: 0,
+            lf_end: 4,
+            mf_start: 7,
+            mf_end: 11,
+        };
+        visualizer.spectral_relaxation = 0.75;
+        visualizer.aggression_falloff = 3.0;
+        visualizer.spectrum_amount = 1.0;
+        visualizer.lf_boost_gain = 1.0;
+        visualizer.detectors.arrangement.bass_fast_time = 0.020;
+        visualizer.detectors.arrangement.bass_slow_time = 0.250;
+        visualizer
+    }
+
+    fn loaded_aggression_test_visualizer() -> Visualizer {
+        let mut visualizer = aggression_test_visualizer();
+        visualizer.load_models();
+        assert!(visualizer.scene.current.is_some());
+        visualizer
+    }
+
     fn loaded_visualizer() -> Visualizer {
         let mut visualizer = Visualizer::new();
         visualizer.load_models();
@@ -5263,8 +5288,8 @@ mod tests {
 
     #[test]
     fn aggression_uses_displayed_shape_and_is_independent_of_playback_gain() {
-        let mut quiet = Visualizer::new();
-        let mut loud = Visualizer::new();
+        let mut quiet = aggression_test_visualizer();
+        let mut loud = aggression_test_visualizer();
         let magnitudes = std::array::from_fn(|band| match band {
             0..=3 => 0.01,
             7..=10 => 0.3,
@@ -5296,7 +5321,7 @@ mod tests {
 
     #[test]
     fn aggression_release_bridges_bass_gaps_on_the_audio_clock() {
-        let mut visualizer = Visualizer::new();
+        let mut visualizer = aggression_test_visualizer();
         let tuning = visualizer.tuning();
         let spectrum = |low, mid| Spectrum {
             linear_bands: std::array::from_fn(|band| match band {
@@ -5347,7 +5372,7 @@ mod tests {
     fn lf_envelope_crossing_boosts_aggression_without_the_bass_attack_offset() {
         let mut results = Vec::new();
         for threshold in [0.02, 0.6] {
-            let mut visualizer = Visualizer::new();
+            let mut visualizer = aggression_test_visualizer();
             visualizer.set_parameter(
                 Parameter::Arrangement(ArrangementSetting::BassHitThreshold),
                 threshold,
@@ -5386,7 +5411,7 @@ mod tests {
 
     #[test]
     fn aggression_peaks_above_one_survive_until_the_spring_control_boundary() {
-        let mut visualizer = Visualizer::new();
+        let mut visualizer = aggression_test_visualizer();
         visualizer.set_parameter(Parameter::LfBoostGain, 4.0);
         let spectrum = |level| Spectrum {
             linear_bands: [level; BAND_COUNT],
@@ -5415,7 +5440,7 @@ mod tests {
 
     #[test]
     fn aggression_overdrive_doubles_flip_stiffness_with_damping_compensation() {
-        let mut visualizer = loaded_visualizer();
+        let mut visualizer = loaded_aggression_test_visualizer();
         visualizer.set_detector_settings(DetectorSettings {
             snare_flip_every: 1,
             ..DetectorSettings::default()
@@ -5451,7 +5476,7 @@ mod tests {
     fn aggression_falloff_controls_audio_clock_decay_without_resetting_the_peak() {
         let mut held = Vec::new();
         for falloff in [0.0, 0.5, 8.0] {
-            let mut visualizer = Visualizer::new();
+            let mut visualizer = aggression_test_visualizer();
             visualizer.set_parameter(Parameter::AggressionFalloff, falloff);
             visualizer.set_parameter(Parameter::LfBoostGain, 0.0);
             let spectrum = |low, mid| Spectrum {
@@ -5485,7 +5510,7 @@ mod tests {
     #[test]
     fn spectrum_amount_balances_aggression_before_adding_the_lf_envelope() {
         for amount in [0.0, 0.5, 1.0] {
-            let mut visualizer = Visualizer::new();
+            let mut visualizer = aggression_test_visualizer();
             visualizer.set_parameter(Parameter::SpectrumAmount, amount);
             visualizer.set_parameter(Parameter::LfBoostGain, 2.0);
             let spectrum = |level| Spectrum {
@@ -5510,7 +5535,7 @@ mod tests {
     #[test]
     fn lf_boost_gain_amplifies_only_the_envelope_addition() {
         for gain in [0.0, 1.0, 4.0] {
-            let mut visualizer = Visualizer::new();
+            let mut visualizer = aggression_test_visualizer();
             visualizer.set_parameter(Parameter::LfBoostGain, gain);
             let spectrum = |level| Spectrum {
                 linear_bands: [level; BAND_COUNT],
@@ -5532,7 +5557,7 @@ mod tests {
 
     #[test]
     fn warm_spectral_balance_eliminates_the_lf_envelope_boost() {
-        let mut visualizer = Visualizer::new();
+        let mut visualizer = aggression_test_visualizer();
         let spectrum = |low| Spectrum {
             linear_bands: std::array::from_fn(|band| match band {
                 0..=6 => low,
@@ -5555,8 +5580,8 @@ mod tests {
 
     #[test]
     fn warm_spectral_shape_slows_the_model_flip_without_changing_tuning() {
-        let mut warm = loaded_visualizer();
-        let mut aggressive = loaded_visualizer();
+        let mut warm = loaded_aggression_test_visualizer();
+        let mut aggressive = loaded_aggression_test_visualizer();
         for (visualizer, low, mid) in [(&mut warm, 0.01, 1.0), (&mut aggressive, 1.0, 0.01)] {
             visualizer.set_parameter(Parameter::SpectralRelaxation, 0.75);
             visualizer.set_detector_settings(DetectorSettings {
@@ -5603,7 +5628,7 @@ mod tests {
 
     #[test]
     fn aggression_range_controls_keep_nonempty_bands_and_restore_tuning() {
-        let mut visualizer = Visualizer::new();
+        let mut visualizer = aggression_test_visualizer();
         visualizer.set_parameter(Parameter::AggressionLfStart, 16.0);
         assert_eq!(visualizer.aggression_bands().lf_start, 3);
         visualizer.set_parameter(Parameter::AggressionLfEnd, 0.0);
@@ -5639,7 +5664,7 @@ mod tests {
         assert_eq!(visualizer.aggression_falloff, 10.0);
         visualizer.set_parameter(Parameter::AggressionFalloff, 6.5);
         let tuning = visualizer.tuning();
-        let mut restored = Visualizer::new();
+        let mut restored = aggression_test_visualizer();
         restored.set_tuning(tuning.clone());
         assert_eq!(restored.tuning(), tuning);
         assert!(restored.aggression_bands().validate().is_ok());
@@ -5703,6 +5728,12 @@ mod tests {
     /// Detector settings under which only the kick reacts to a burst.
     fn kick_only_settings() -> DetectorSettings {
         DetectorSettings {
+            percussion: percussion::fixed_floor_test_settings(),
+            bin_gains: PercussionBinGains {
+                kick: FrequencyGainProfile::default(),
+                snare: FrequencyGainProfile::default(),
+                hat: FrequencyGainProfile::default(),
+            },
             // Keep the snare template on the top band so a low burst cannot
             // choke the kick through the snare detector.
             snare_pattern: TemporalPattern {
@@ -5735,7 +5766,7 @@ mod tests {
         assert_eq!(detectors.excess.background_release, 0.200);
         assert_eq!(detectors.excess.floor, 0.010);
         assert_eq!(detectors.excess.cap, 1.0);
-        assert!(!detectors.kick_contains(0));
+        assert!(detectors.kick_contains(0));
         assert!(detectors.kick_contains(4));
         assert!(!detectors.kick_contains(15));
         assert!(detectors.snare_contains(8));
@@ -5751,10 +5782,10 @@ mod tests {
         assert_eq!(detectors.hat_onset_min_interval, 0.03);
         assert_eq!(detectors.hat_onset_pre_gain, 4.0);
         assert_eq!(detectors.snare_poi_switches, 16);
-        assert_eq!(detectors.drop_gap_threshold, -21.0);
+        assert_eq!(detectors.drop_gap_threshold, -26.0);
         assert_eq!(detectors.drop_onset_pre_gain, 1.0054638);
         assert_eq!(detectors.drop_onset_attack, 0.024582442);
-        assert_eq!(detectors.drop_onset_min_threshold, 0.125);
+        assert_eq!(detectors.drop_onset_min_threshold, 0.05);
         assert_eq!(detectors.drop_onset_suppression, 0.5);
         assert_eq!(detectors.drop_kernels.onset[0], 0.44955054);
         assert!(detectors.clone().validate().is_ok());
@@ -5811,7 +5842,7 @@ mod tests {
     #[test]
     fn detector_regions_select_their_frequency_bands() {
         let detectors = DetectorSettings::default();
-        assert!(!detectors.kick_contains(0));
+        assert!(detectors.kick_contains(0));
         assert!(detectors.kick_contains(4));
         assert!(!detectors.kick_contains(15));
         assert!(detectors.snare_contains(8));
@@ -7998,8 +8029,9 @@ mod tests {
     #[test]
     fn crease_threshold_steps_and_clamps() {
         let mut threshold = CreaseThreshold::default();
-        assert_eq!(threshold.whole_degrees(), 5);
-        assert_eq!(threshold.adjusted(Adjustment::Decrease).whole_degrees(), 3);
+        assert_eq!(threshold.whole_degrees(), 0);
+        assert_eq!(threshold.adjusted(Adjustment::Decrease).whole_degrees(), 0);
+        assert_eq!(threshold.adjusted(Adjustment::Increase).whole_degrees(), 3);
         for _ in 0..40 {
             threshold = threshold.adjusted(Adjustment::Increase);
         }
@@ -8011,7 +8043,7 @@ mod tests {
         assert!(CreaseThreshold::try_from(-1.0).is_err());
         assert!(CreaseThreshold::try_from(81.0).is_err());
         assert!(CreaseThreshold::try_from(f32::NAN).is_err());
-        assert_eq!(f32::from(CreaseThreshold::default()), 5.0);
+        assert_eq!(f32::from(CreaseThreshold::default()), 0.0);
     }
 
     #[test]
@@ -8076,8 +8108,8 @@ mod tests {
     #[test]
     fn line_width_steps_and_clamps() {
         let mut width = LineWidth::default();
-        assert_eq!(width.percent(), 60);
-        assert_eq!(width.adjusted(Adjustment::Decrease).percent(), 50);
+        assert_eq!(width.percent(), 70);
+        assert_eq!(width.adjusted(Adjustment::Decrease).percent(), 60);
         for _ in 0..40 {
             width = width.adjusted(Adjustment::Increase);
         }

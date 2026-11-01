@@ -334,6 +334,29 @@ impl ArrangementTracker {
 mod tests {
     use super::*;
 
+    // Pin the acoustic regression recipe independently of factory tuning.
+    fn arrangement_test_settings() -> DetectorSettings {
+        DetectorSettings {
+            arrangement: super::super::ArrangementSettings {
+                mix_loss_db: 2.0,
+                mix_loss_hold: 1.2,
+                shape_distance: 0.12,
+                trend_change: 0.055,
+                changed_fraction: 0.25,
+                gap_hold: 1.2,
+                gap_rms_db: -40.0,
+                gap_rms_hold: 0.5,
+                reference_time: 5.0,
+                bass_fast_time: 0.020,
+                bass_slow_time: 0.250,
+                bass_hit_threshold: 0.12,
+                drop_min_rms_db: -26.0,
+                drop_refractory: 8.0,
+            },
+            ..DetectorSettings::default()
+        }
+    }
+
     fn section(rms: f32, bass: f32, mid: f32, high: f32) -> Spectrum {
         Spectrum {
             rms,
@@ -361,7 +384,7 @@ mod tests {
             spectrum,
             seconds,
             now,
-            &DetectorSettings::default(),
+            &arrangement_test_settings(),
         )
     }
 
@@ -381,7 +404,7 @@ mod tests {
     }
 
     fn loss_only_settings() -> DetectorSettings {
-        let mut settings = DetectorSettings::default();
+        let mut settings = arrangement_test_settings();
         settings.arrangement.gap_rms_db = -80.0;
         settings.arrangement.gap_hold = 4.0;
         settings.arrangement.shape_distance = 0.6;
@@ -654,7 +677,7 @@ mod tests {
 
     #[test]
     fn rms_gap_can_arm_at_startup_without_relative_evidence_or_history() {
-        let mut settings = DetectorSettings::default();
+        let mut settings = arrangement_test_settings();
         settings.arrangement.gap_rms_db = -30.0;
         settings.arrangement.gap_rms_hold = 0.1;
         settings.arrangement.gap_hold = 4.0;
@@ -679,7 +702,7 @@ mod tests {
 
     #[test]
     fn rms_gap_uses_raw_window_rms_and_accepts_uniform_attenuation() {
-        let mut settings = DetectorSettings::default();
+        let mut settings = arrangement_test_settings();
         settings.arrangement.gap_rms_db = -30.0;
         settings.arrangement.gap_rms_hold = 0.05;
         settings.arrangement.shape_distance = 0.6;
@@ -708,7 +731,7 @@ mod tests {
 
     #[test]
     fn rms_gap_requires_one_continuous_hold_and_equality_resets_it() {
-        let mut settings = DetectorSettings::default();
+        let mut settings = arrangement_test_settings();
         settings.arrangement.gap_rms_db = -40.0;
         settings.arrangement.gap_rms_hold = 0.1;
         let mut tracker = ArrangementTracker::new();
@@ -739,7 +762,7 @@ mod tests {
             linear_bands: bell.map(|v| v * 0.08),
             ..Spectrum::default()
         };
-        let mut settings = DetectorSettings::default();
+        let mut settings = arrangement_test_settings();
         settings.arrangement.gap_rms_db = -30.0;
         settings.arrangement.gap_rms_hold = 0.1;
         settings.arrangement.gap_hold = 0.1;
@@ -777,7 +800,7 @@ mod tests {
 
     #[test]
     fn rms_gap_live_controls_keep_the_latch_and_a_drop_resets_both_timers() {
-        let mut settings = DetectorSettings::default();
+        let mut settings = arrangement_test_settings();
         settings.arrangement.gap_rms_db = -30.0;
         settings.arrangement.gap_rms_hold = 0.5;
         let mut tracker = ArrangementTracker::new();
@@ -815,7 +838,7 @@ mod tests {
 
     #[test]
     fn rms_gap_can_arm_during_drop_refractory_but_cannot_bypass_drop_interval() {
-        let mut settings = DetectorSettings::default();
+        let mut settings = arrangement_test_settings();
         settings.arrangement.gap_rms_db = -30.0;
         settings.arrangement.gap_rms_hold = 0.05;
         settings.arrangement.drop_refractory = 8.0;
@@ -846,7 +869,7 @@ mod tests {
     fn envelope_time_controls_change_lf_attack_latency_without_clearing_the_gap() {
         let mut first_crossings = Vec::new();
         for fast in [0.005, 0.100] {
-            let mut settings = DetectorSettings::default();
+            let mut settings = arrangement_test_settings();
             settings.arrangement.gap_rms_db = -80.0;
             settings.arrangement.bass_hit_threshold = 0.5;
             let mut tracker = ArrangementTracker::new();
@@ -891,7 +914,7 @@ mod tests {
     fn envelope_time_controls_change_lf_evidence_duration_without_clearing_the_gap() {
         let mut scores = Vec::new();
         for slow in [0.05, 0.5] {
-            let mut settings = DetectorSettings::default();
+            let mut settings = arrangement_test_settings();
             settings.arrangement.gap_rms_db = -80.0;
             let mut tracker = ArrangementTracker::new();
             let mut now = 0.0;
@@ -946,7 +969,7 @@ mod tests {
                             &spectrum,
                             time,
                             analyzer.hop_seconds(),
-                            &DetectorSettings::default(),
+                            &arrangement_test_settings(),
                         )
                         .is_some(),
                 );
@@ -987,7 +1010,7 @@ mod tests {
 
     #[test]
     fn lf_envelopes_require_a_fresh_rise_after_the_gap_confirms() {
-        let mut settings = DetectorSettings::default();
+        let mut settings = arrangement_test_settings();
         settings.arrangement.shape_distance = 0.01;
         settings.arrangement.trend_change = 0.005;
         settings.arrangement.changed_fraction = 0.05;
@@ -1086,7 +1109,7 @@ mod tests {
 
     #[test]
     fn lf_envelopes_apply_the_configured_rms_floor_to_the_current_attack() {
-        let mut settings = DetectorSettings::default();
+        let mut settings = arrangement_test_settings();
         let mut tracker = ArrangementTracker::new();
         let mut now = 0.0;
         let active = section(0.25, 0.15, 0.05, 0.025);
@@ -1118,7 +1141,7 @@ mod tests {
     fn lf_envelopes_initialize_and_reset_without_inventing_an_attack() {
         let mut tracker = ArrangementTracker::new();
         let active = section(0.25, 0.15, 0.05, 0.025);
-        let settings = DetectorSettings::default();
+        let settings = arrangement_test_settings();
         tracker.observe(&active, 0.005, 0.005, &settings);
         assert_eq!(tracker.status.bass_hit, 0.0);
         let mut now = 0.005;
@@ -1131,7 +1154,7 @@ mod tests {
 
     #[test]
     fn energy_diagnostics_keep_the_threshold_and_reference_used_at_each_hop() {
-        let mut settings = DetectorSettings::default();
+        let mut settings = arrangement_test_settings();
         let mut tracker = ArrangementTracker::new();
         let mut now = 0.0;
         let active = section(0.25, 0.15, 0.05, 0.025);
@@ -1189,7 +1212,7 @@ mod tests {
             linear_bands: dip.map(|v| v * 0.05),
             ..active
         };
-        let mut settings = DetectorSettings::default();
+        let mut settings = arrangement_test_settings();
         settings.arrangement.reference_time = 0.5;
         settings.arrangement.gap_hold = 0.2;
         let mut tracker = ArrangementTracker::new();
@@ -1278,7 +1301,7 @@ mod tests {
 
     #[test]
     fn drop_floor_diagnostic_reports_the_configured_gate_after_confirmation() {
-        let settings = DetectorSettings::default();
+        let settings = arrangement_test_settings();
         let mut tracker = ArrangementTracker::new();
         let mut now = 0.0;
         let active = section(0.25, 0.15, 0.05, 0.025);
@@ -1310,7 +1333,7 @@ mod tests {
 
     #[test]
     fn lowering_gap_hold_updates_an_in_progress_candidate_without_resetting_it() {
-        let mut settings = DetectorSettings::default();
+        let mut settings = arrangement_test_settings();
         settings.arrangement.gap_hold = 4.0;
         // Exercise the shape hold without the independent loss hold arming first.
         settings.arrangement.mix_loss_hold = 10.0;
@@ -1351,7 +1374,7 @@ mod tests {
             ..Spectrum::default()
         };
         for (loss, expected) in [(2.0, true), (6.0, false)] {
-            let mut settings = DetectorSettings::default();
+            let mut settings = arrangement_test_settings();
             settings.arrangement.mix_loss_db = loss;
             let mut tracker = ArrangementTracker::new();
             let mut now = 0.0;
@@ -1364,7 +1387,7 @@ mod tests {
     #[test]
     fn live_drop_controls_validate_energy_and_bass_attack_without_clearing_the_gap() {
         for tune_bass in [false, true] {
-            let mut settings = DetectorSettings::default();
+            let mut settings = arrangement_test_settings();
             let active = section(0.25, 0.15, 0.05, 0.025);
             let mut tracker = ArrangementTracker::new();
             let mut now = 0.0;
@@ -1416,7 +1439,7 @@ mod tests {
         };
         let mut deficits = Vec::new();
         for memory in [0.5, 20.0] {
-            let mut settings = DetectorSettings::default();
+            let mut settings = arrangement_test_settings();
             settings.arrangement.reference_time = memory;
             // Isolate adaptation; the new loss-only route intentionally arms
             // on a sustained uniform level decrease once its hold completes.
@@ -1593,7 +1616,7 @@ mod tests {
             linear_bands: bell.map(|v| v * 0.08),
             ..Spectrum::default()
         };
-        let mut settings = DetectorSettings::default();
+        let mut settings = arrangement_test_settings();
         settings.arrangement.mix_loss_hold = 10.0;
         for changed in [
             Spectrum {
@@ -1619,7 +1642,7 @@ mod tests {
 
     #[test]
     fn sustained_bass_cannot_validate_tiny_new_rumble_during_a_bright_return() {
-        let mut settings = DetectorSettings::default();
+        let mut settings = arrangement_test_settings();
         let mut tracker = ArrangementTracker::new();
         let mut now = 0.0;
         let active = section(0.3, 0.15, 0.12, 0.06);
@@ -1713,7 +1736,7 @@ mod tests {
 
     #[test]
     fn confirmed_gap_survives_recovery_and_live_gate_changes_until_a_drop() {
-        let mut settings = DetectorSettings::default();
+        let mut settings = arrangement_test_settings();
         let mut tracker = ArrangementTracker::new();
         let mut now = 0.0;
         let active = section(0.25, 0.15, 0.05, 0.025);
@@ -1781,7 +1804,7 @@ mod tests {
 
     #[test]
     fn relative_gap_ignores_startup_beat_valleys_and_uniform_gain_dips() {
-        let mut settings = DetectorSettings::default();
+        let mut settings = arrangement_test_settings();
         // Isolate the shape-supported path from both level-only alternatives.
         settings.arrangement.gap_rms_db = -80.0;
         settings.arrangement.mix_loss_hold = 10.0;
@@ -1849,7 +1872,7 @@ mod tests {
                             &spectrum,
                             f64::from(time),
                             analyzer.hop_seconds(),
-                            &DetectorSettings::default(),
+                            &arrangement_test_settings(),
                         )
                         .is_some()
                     {

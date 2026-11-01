@@ -50,13 +50,38 @@ pub struct ThemePreferences {
 impl Default for ThemePreferences {
     fn default() -> Self {
         Self {
-            auto_colors: false,
-            contrast: ThemeContrast::default(),
-            last_dark: ThemeId::default(),
-            last_light: ThemeId::all()
-                .find(|theme| theme.tone() == Tone::Light)
-                .expect("the bundled themes include a light theme"),
-            disliked: BTreeSet::new(),
+            auto_colors: true,
+            contrast: ThemeContrast::Always,
+            last_dark: ThemeId::bundled("Gruvbox Dark"),
+            last_light: ThemeId::bundled("Nord Light"),
+            disliked: [
+                "Alien Blood",
+                "Breath",
+                "Clone Of Ubuntu",
+                "Cobalt Neon",
+                "Elio",
+                "Flat",
+                "Grass",
+                "Ollie",
+                "Oxocarbon Dark",
+                "Shel",
+                "Slate",
+                "Tempus Future",
+                "Tempus Night",
+                "Tempus Rift",
+                "Tempus Spring",
+                "Tempus Summer",
+                "Tempus Winter",
+                "Warm Neon",
+                "Website",
+                "Jup",
+                "Nep",
+                "Sat",
+                "Terminal Basic",
+            ]
+            .into_iter()
+            .map(ThemeId::bundled)
+            .collect(),
         }
     }
 }
@@ -179,16 +204,20 @@ fn deserialize_disliked<'de, D: Deserializer<'de>>(
 
 impl Default for ThemeId {
     fn default() -> Self {
-        Self(
-            registry()
-                .iter()
-                .position(|entry| entry.name == "Twilight")
-                .expect("Twilight is bundled"),
-        )
+        Self::bundled("Aura")
     }
 }
 
 impl ThemeId {
+    fn bundled(name: &str) -> Self {
+        Self(
+            registry()
+                .iter()
+                .position(|entry| entry.name == name)
+                .expect("the factory theme is bundled"),
+        )
+    }
+
     pub fn all() -> impl ExactSizeIterator<Item = Self> + DoubleEndedIterator {
         (0..registry().len()).map(Self)
     }
@@ -470,6 +499,18 @@ impl Theme {
 mod tests {
     use super::*;
 
+    fn unrestricted_preferences() -> ThemePreferences {
+        ThemePreferences {
+            auto_colors: false,
+            contrast: ThemeContrast::Off,
+            last_dark: ThemeId::default(),
+            last_light: ThemeId::all()
+                .find(|theme| theme.tone() == Tone::Light)
+                .unwrap(),
+            disliked: BTreeSet::new(),
+        }
+    }
+
     #[test]
     fn every_shipped_theme_classifies_as_light_or_dark() {
         let light = (0..registry().len())
@@ -531,7 +572,7 @@ mod tests {
 
     #[test]
     fn theme_navigation_skips_dislikes_and_preserves_manual_choices() {
-        let mut preferences = ThemePreferences::default();
+        let mut preferences = unrestricted_preferences();
         let dark = ThemeId::all()
             .find(|theme| theme.tone() == Tone::Dark && *theme != ThemeId::default())
             .unwrap();
@@ -564,7 +605,7 @@ mod tests {
         let light = ThemeId::all()
             .find(|theme| theme.tone() == Tone::Light)
             .unwrap();
-        let mut preferences = ThemePreferences::default();
+        let mut preferences = unrestricted_preferences();
         for theme in ThemeId::all().filter(|theme| ![current, dark, light].contains(theme)) {
             assert!(preferences.dislike(theme));
         }

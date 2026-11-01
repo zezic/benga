@@ -5285,6 +5285,13 @@ mod tests {
         let mut overlay = AnalysisOverlay::default();
         let mut fonts = Fonts::new().unwrap();
         let mut visualizer = Visualizer::new();
+        // Keep a broad snare mask and fine FFT grid for pagination through 10 kHz.
+        let mut settings = visualizer.detector_settings();
+        settings.percussion.fft_size = 512;
+        settings.percussion.channels[1].low_hz = 2_000.0;
+        settings.percussion.channels[1].high_hz = 5_000.0;
+        settings.percussion.channels[1].taper_hz = 10_000.0;
+        visualizer.set_detector_settings(settings);
         let stage = Stage::new(Size::new(1920.0, 1080.0));
         overlay.update(
             0.0,

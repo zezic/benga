@@ -47,19 +47,19 @@ The spectral shape graph also shows **Aggression**: LF is the maximum of the
 selected low bands, MF is the median of the selected mid bands, and
 `aggression = (LF - MF + 1) / 2` on the graph's −1 to +1 scale.
 **Spectrum amount** scales this contribution from 0–100% before LF boost is
-added; it defaults to 100%. At 0%, only the LF envelope boost contributes.
+added; it defaults to 66%. At 0%, only the LF envelope boost contributes.
 Whenever the fast LF envelope exceeds the slow one, their positive separation
 provides a boost: `max((fast - slow) / fast, 0)`, using the LF measurement floor.
 Its strength is multiplied by `clamp(LF - MF + 1, 0, 1)`: no boost when LF is
 1.0 or more below MF, half strength at −0.5, and full strength when LF equals
 or exceeds MF. This compares the actual envelopes, independently of the
 **Bass attack** offset or gap/drop gates. **LF boost** shows the weighted
-addition. **LF boost gain** scales that addition from 0× (off) through 1×
-(the default) to 4×. Spectral attenuation still uses the measured LF/MF levels,
+addition. **LF boost gain** scales that addition from 0× (off) to 4×
+(the default). Spectral attenuation still uses the measured LF/MF levels,
 independently of Spectrum amount. Both controls save automatically. The
 displayed value and spring stiffness follow an envelope with immediate rise
 and an adjustable exponential fall. **Aggression falloff** sets its time
-constant from 0–10 seconds, defaulting to 3 seconds. Larger values bridge
+constant from 0–10 seconds, defaulting to 0.5 seconds. Larger values bridge
 longer bass gaps; zero makes falling aggression immediate. Live adjustments
 preserve the current envelope value. It advances with the audio and resets
 when capture restarts. Shape aggression, amplified
@@ -69,10 +69,10 @@ LF boost and the envelope stay unclamped; the percentage readouts can exceed
 The meter spans 0–200%, marking the 100% baseline and the 2× ceiling.
 Larger raw peaks hold this ceiling for longer as the envelope falls.
 Drag the colored LF/MF boundary handles to select whole bands. LF defaults to
-the lowest four (32–151 Hz), and MF to four bands centered near 590, 870,
-1,280 and 1,890 Hz (485 Hz–2.3 kHz). **Relaxation** controls how much warm sound
-softens the model flip and POI entry, look-at point, orbit and FOV springs.
-At the default 75%, fully warm sound uses 25% of the configured stiffness;
+the lowest two (32–70 Hz), and MF to six bands spanning 151 Hz–1.56 kHz.
+**Relaxation** controls how much warm sound softens the model flip and POI entry,
+look-at point, orbit and FOV springs.
+At the default 100%, fully warm sound uses the 5% minimum stiffness;
 100% aggression uses the configured stiffness. Zero disables the warm-sound
 reduction; overdrive above 100% remains active. The strongest relaxation keeps
 at least 5% stiffness so springs continue moving. Damping stays at its configured
@@ -83,13 +83,13 @@ The energy-loss graph compares the smoothed mix with its learned reference:
 positive dB means quieter, and the solid loss trace must rise above the dashed
 requirement. **Mix loss hold** can arm the gap from this loss alone, without a
 shape change, when the requirement stays met continuously for its own duration
-(default 1.2 seconds). Falling back to or below the required loss resets that
-timer. The loss hold is independent of the shape-path and RMS holds, and its
+(default about 0.91 seconds). Falling back to or below the required loss resets
+that timer. The loss hold is independent of the shape-path and RMS holds, and its
 readout sits below the graph. Each historical threshold stays as measured when
 the Mix loss slider changes.
 The independent **RMS gap** path arms the same flag whenever the analysis-window
 RMS stays below **RMS gap below** continuously for **RMS gap hold**. Its defaults
-are −40 dBFS and 500 ms. It needs no spectral change, relative energy loss,
+are −24 dBFS and 500 ms. It needs no spectral change, relative energy loss,
 reference warmup, or relative hold; reaching or exceeding the limit resets its
 own timer. The level graph shows RMS solid, the captured gap limit dashed, and
 the learned reference dotted, with the RMS hold shown underneath. Any of the
@@ -106,7 +106,7 @@ This makes shape changes that precede energy loss visible. Gap controls are
 grouped beside their reference, shape, energy,
 timing, and bass-return graphs.
 Drop confirmation uses adjustable **Fast envelope** and **Slow envelope** times
-for the weighted low-frequency spectrum, defaulting to 20 ms and 250 ms.
+for the weighted low-frequency spectrum, defaulting to about 50 ms and 501 ms.
 **Bass attack** sets how much of the fast envelope must
 rise above the slow envelope: `(fast - slow) / fast`. The LF graph shows the fast
 envelope as a solid line, the slow envelope dotted, and the required fast level
@@ -128,14 +128,15 @@ ignoring sparse tails. Each cloud percentage has its own checkbox: enable
 **Cloud energy top area**, **Cloud sharpness top area**, or both. Energy top X%
 selects the upper part of the cloud's height
 on the dB map; **Cloud sharpness top area** selects its sharpest Y% by width.
-Both default to 25%. An attack passes the cloud filter when **energy OR sharpness**
-clears its floor, including values above the cloud. The shade shows this union;
+The default energy/sharpness areas are 20.6%/13.1% for kick, 13%/9.8% for
+snare, and 25%/25% for hat. An attack passes the cloud filter when
+**energy OR sharpness** clears its floor, including values above the cloud. The shade shows this union;
 energy and sharpness use matching dashed threshold guides across the full plot
 width and height, with a numeric sharpness label on the map.
 **Cloud bucket support** sets the minimum count per bucket (default 3), pooling
 the other axis. Bounds grow and shrink as observations enter or leave the
-reference. Dynamic mode starts off. Each axis uses its saved fixed floor until
-supported bounds exist; those fallbacks also combine with OR in cloud mode.
+reference. Both cloud branches start enabled. Each axis uses its saved fixed
+floor until supported bounds exist; those fallbacks also combine with OR in cloud mode.
 The cloud checkboxes work directly, independently of the fixed **Trigger energy
 floor** and **Sharpness floor** switches. With both cloud checkboxes off, those
 fixed filters apply as before. Other enabled filters, including the independent
@@ -153,7 +154,9 @@ controls sit to the left. All controls are visible in pipeline order: choose
 frequencies, find and measure attacks, filter inputs, compare recent history,
 and filter triggers. Hover any
 control for a plain-language explanation. Each input/trigger filter has an on/off
-checkbox; switching it off preserves its chosen value. Controls save automatically.
+checkbox; switching it off preserves its chosen value. Factory defaults enable
+input energy, attack level, and output spacing on all channels, plus mix RMS on
+kick and snare. The other optional filters start off. Controls save automatically.
 Revision 3 resets old percussion masks
 and input curves while retaining gap/drop, motion, and theme preferences.
 
@@ -176,8 +179,13 @@ the analyzer to inspect and tune it.
 
 ## Settings
 
-Settings save automatically. Browsing themes does not change the saved startup
-theme. Config locations:
+Settings save automatically. Factory settings start with Aura, automatic colors,
+and alternating dark/light contrast, with Gruvbox Dark and Nord Light remembered
+as the manual choices. The bundled theme exclusions and audio/visual tuning come
+from the [seed configuration](tests/fixtures/factory-defaults.ron); first-run
+onboarding remains enabled. Existing saved
+settings keep priority. Browsing themes does not change the saved startup theme.
+Config locations:
 
 - macOS: `~/Library/Application Support/com.zezic.benga/benga-config.ron`
 - Linux: `$XDG_CONFIG_HOME/benga/benga-config.ron`, normally

@@ -405,6 +405,17 @@ fn stereo_positive_rise(current: [f32; 2], previous: [f32; 2]) -> f32 {
 mod tests {
     use super::*;
 
+    fn fixed_floor_analyzer(sample_rate: usize) -> PercussionAnalyzer {
+        let mut analyzer = PercussionAnalyzer::new(sample_rate);
+        analyzer.set_settings(&super::super::percussion::fixed_floor_test_settings());
+        let mut gains = PercussionBinGains::default();
+        for channel in 0..3 {
+            gains.reset(channel);
+        }
+        analyzer.set_bin_gains(&gains);
+        analyzer
+    }
+
     fn tone(
         sample_rate: usize,
         frequency: f32,
@@ -413,10 +424,10 @@ mod tests {
         anti: bool,
         fast_size: usize,
     ) -> Vec<PercussionFrame> {
-        let mut analyzer = PercussionAnalyzer::new(sample_rate);
+        let mut analyzer = fixed_floor_analyzer(sample_rate);
         let settings = PercussionSettings {
             fft_size: fast_size,
-            ..PercussionSettings::default()
+            ..super::super::percussion::fixed_floor_test_settings()
         };
         analyzer.set_settings(&settings);
         (0..sample_rate / 5)
@@ -742,7 +753,9 @@ mod tests {
             }
         }
         assert!(first_available[0].unwrap() >= 2048.0 / 48000.0);
-        assert!(first_available[1].unwrap() >= 512.0 / 48000.0);
+        assert!(
+            first_available[1].unwrap() >= PercussionSettings::default().fft_size as f64 / 48000.0
+        );
         analyzer.push_stereo([f32::NAN, 0.0]);
         let next = (0..48)
             .find_map(|_| analyzer.push_stereo([0.1; 2]))
@@ -841,7 +854,7 @@ mod tests {
             for sample_rate in [44100, 48000, 96000] {
                 for frequency in [60.0, 80.0, 120.0, 180.0] {
                     for phase in [0.0, 0.7, 1.7, 2.8] {
-                        let mut analyzer = PercussionAnalyzer::new(sample_rate);
+                        let mut analyzer = fixed_floor_analyzer(sample_rate);
                         analyzer.kick = Transform::new(scaled_size(size, sample_rate));
                         analyzer.rebuild(0);
                         let mut previous = 0.0_f32;
@@ -933,7 +946,7 @@ mod tests {
     #[test]
     fn kick_sweep_tracks_physical_region_without_high_frequency_leakage() {
         let sample_rate = 48000;
-        let mut analyzer = PercussionAnalyzer::new(sample_rate);
+        let mut analyzer = fixed_floor_analyzer(sample_rate);
         let mut phase = 0.0_f64;
         let mut inside = Vec::new();
         let mut outside = Vec::new();
@@ -988,11 +1001,12 @@ mod tests {
                 for sample_rate in [44100, 48000, 96000] {
                     for frequency in [60.0, 80.0, 120.0, 180.0] {
                         for phase in [0.0, 0.7, 1.7, 2.8] {
-                            let mut analyzer = PercussionAnalyzer::new(sample_rate);
+                            let mut analyzer = fixed_floor_analyzer(sample_rate);
                             analyzer.kick = Transform::new(scaled_size(size, sample_rate));
                             analyzer.rebuild(0);
                             let mut detector = SharpOnsets::default();
-                            let mut settings = PercussionSettings::default();
+                            let mut settings =
+                                super::super::percussion::fixed_floor_test_settings();
                             settings.channels[0].feature_ms = 24.0;
                             settings.channels[0].min_sharpness = 0.4;
                             for n in 0..sample_rate / 3 {
@@ -1035,11 +1049,11 @@ mod tests {
     #[test]
     fn selected_kick_front_end_separates_canonical_fast_and_smooth_attacks() {
         use super::super::transients::SharpOnsets;
-        let settings = PercussionSettings::default();
+        let settings = super::super::percussion::fixed_floor_test_settings();
         for sample_rate in [44100, 48000, 96000] {
             for frequency in [60.0, 120.0, 180.0] {
                 for rise_ms in [1.0, 30.0, 120.0] {
-                    let mut analyzer = PercussionAnalyzer::new(sample_rate);
+                    let mut analyzer = fixed_floor_analyzer(sample_rate);
                     let mut detector = SharpOnsets::default();
                     for n in 0..sample_rate / 6 {
                         let t = n as f64 / sample_rate as f64 - 0.06;
@@ -1099,9 +1113,10 @@ mod tests {
                     for amplitude in [0.2, 0.4, 0.8] {
                         for frequency in [60.0, 80.0, 120.0, 180.0] {
                             for phase in [0.0, 0.7, 1.7, 2.8] {
-                                let mut analyzer = PercussionAnalyzer::new(sample_rate);
+                                let mut analyzer = fixed_floor_analyzer(sample_rate);
                                 let mut detector = SharpOnsets::default();
-                                let settings = PercussionSettings::default();
+                                let settings =
+                                    super::super::percussion::fixed_floor_test_settings();
                                 for n in 0..sample_rate / 4 {
                                     let t = n as f64 / sample_rate as f64 - 0.1;
                                     let value = if t >= 0.0 {

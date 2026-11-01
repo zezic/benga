@@ -4,6 +4,17 @@
 
 use super::*;
 
+fn fixed_floor_settings() -> DetectorSettings {
+    let mut settings = DetectorSettings {
+        percussion: percussion::fixed_floor_test_settings(),
+        ..DetectorSettings::default()
+    };
+    for channel in 0..3 {
+        settings.bin_gains.reset(channel);
+    }
+    settings
+}
+
 fn stream(
     rate: usize,
     fft: usize,
@@ -12,7 +23,7 @@ fn stream(
 ) -> Visualizer {
     let mut visualizer = Visualizer::new();
     visualizer.set_samplerate(rate);
-    let mut settings = visualizer.detector_settings();
+    let mut settings = fixed_floor_settings();
     settings.percussion.fft_size = fft;
     visualizer.set_detector_settings(settings);
     let mut callback = Vec::with_capacity(137);
@@ -113,7 +124,7 @@ fn coincident_kick_snare_and_hat_publish_independent_events() {
 fn repeated_identical_hits_survive_warmup_and_100th_percentile_ties() {
     let rate = 48000;
     let mut visualizer = Visualizer::new();
-    let mut settings = visualizer.detector_settings();
+    let mut settings = fixed_floor_settings();
     for channel in &mut settings.percussion.channels {
         channel.sharpness_percentile = 100.0;
         channel.energy_percentile = 100.0;

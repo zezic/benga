@@ -9,9 +9,8 @@ pub const ENVELOPE_POINTS: usize = 64;
 pub const REFERENCE_CAPACITY: usize = 8192;
 pub const DECISION_CAPACITY: usize = 256;
 
-/// Optional learning/trigger criteria. Defaults preserve the established
-/// detector behavior; numerical validity and bounded event bookkeeping remain
-/// unconditional when a user disables any of these criteria.
+/// Optional learning/trigger criteria. Numerical validity and bounded event
+/// bookkeeping remain unconditional when a user disables any of these criteria.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PercussionFilters {
@@ -32,16 +31,16 @@ impl Default for PercussionFilters {
     fn default() -> Self {
         Self {
             input_energy: true,
-            input_growth: true,
-            input_prominence: true,
-            min_sharpness: true,
-            output_prominence: true,
+            input_growth: false,
+            input_prominence: false,
+            min_sharpness: false,
+            output_prominence: false,
             attack_level: true,
             mix_rms: true,
-            sharpness_percentile: true,
-            energy_percentile: true,
+            sharpness_percentile: false,
+            energy_percentile: false,
             output_interval: true,
-            reject_overlap: true,
+            reject_overlap: false,
         }
     }
 }
@@ -88,32 +87,32 @@ impl Default for PercussionChannelSettings {
     fn default() -> Self {
         Self {
             filters: PercussionFilters::default(),
-            low_hz: 60.0,
+            low_hz: 20.0,
             high_hz: 200.0,
             taper_hz: 200.0,
-            feature_ms: 24.0,
+            feature_ms: 48.0,
             concentration_ms: 5.0,
-            envelope_ms: 1.0,
+            envelope_ms: 5.0,
             background_ms: 80.0,
-            merge_ms: 6.0,
-            rearm_ms: 12.0,
-            admission_energy: 0.000_000_1,
-            admission_growth: 0.001,
-            admission_prominence: 0.08,
-            min_sharpness: 0.40,
-            min_output_prominence: 0.16,
-            min_attack_db: -38.0,
-            cloud_enabled: false,
-            cloud_sharpness_enabled: false,
-            cloud_top_percent: 25.0,
-            cloud_sharpness_top_percent: 25.0,
+            merge_ms: 2.0,
+            rearm_ms: 2.0,
+            admission_energy: 0.000_000_043_178_69,
+            admission_growth: 0.0001,
+            admission_prominence: 0.01,
+            min_sharpness: 0.158,
+            min_output_prominence: 0.0,
+            min_attack_db: -24.0,
+            cloud_enabled: true,
+            cloud_sharpness_enabled: true,
+            cloud_top_percent: 20.6,
+            cloud_sharpness_top_percent: 13.1,
             cloud_min_count: 3,
-            output_rms_db: -27.0,
-            sharpness_percentile: 60.0,
-            energy_percentile: 40.0,
-            memory_seconds: 15.0,
+            output_rms_db: -32.1,
+            sharpness_percentile: 0.0,
+            energy_percentile: 42.600002,
+            memory_seconds: 30.300001,
             min_reference: 8,
-            output_interval_ms: 65.0,
+            output_interval_ms: 100.4,
         }
     }
 }
@@ -131,19 +130,54 @@ pub struct PercussionSettings {
 }
 
 // A channel's omitted fields inherit that instrument's defaults. Deserializing
-// each channel directly would apply the generic channel default to snare/hat
-// and would also lose kick's longer observation horizon.
+// each channel directly would apply the generic channel default to snare/hat.
+macro_rules! filter_overrides {
+    ($($field:ident),* $(,)?) => {
+        #[derive(Default, Deserialize)]
+        #[serde(default, deny_unknown_fields, rename = "PercussionFilters")]
+        struct FilterOverrides {
+            $(#[serde(deserialize_with = "deserialize_present")]
+            $field: Option<bool>,)*
+        }
+
+        impl FilterOverrides {
+            fn apply(self, filters: &mut PercussionFilters) {
+                $(if let Some(value) = self.$field { filters.$field = value; })*
+            }
+        }
+    };
+}
+
+filter_overrides! {
+    input_energy,
+    input_growth,
+    input_prominence,
+    min_sharpness,
+    output_prominence,
+    attack_level,
+    mix_rms,
+    sharpness_percentile,
+    energy_percentile,
+    output_interval,
+    reject_overlap,
+}
+
 macro_rules! channel_overrides {
     ($($field:ident: $ty:ty),* $(,)?) => {
         #[derive(Default, Deserialize)]
         #[serde(default, deny_unknown_fields, rename = "PercussionChannelSettings")]
         struct ChannelOverrides {
+            #[serde(deserialize_with = "deserialize_present")]
+            filters: Option<FilterOverrides>,
             $(#[serde(deserialize_with = "deserialize_present")]
             $field: Option<$ty>,)*
         }
 
         impl ChannelOverrides {
             fn apply(self, settings: &mut PercussionChannelSettings) {
+                if let Some(filters) = self.filters {
+                    filters.apply(&mut settings.filters);
+                }
                 $(if let Some(value) = self.$field { settings.$field = value; })*
             }
         }
@@ -151,7 +185,6 @@ macro_rules! channel_overrides {
 }
 
 channel_overrides! {
-    filters: PercussionFilters,
     low_hz: f32,
     high_hz: f32,
     taper_hz: f32,
@@ -201,40 +234,113 @@ where
 }
 impl Default for PercussionSettings {
     fn default() -> Self {
-        let kick = PercussionChannelSettings {
-            feature_ms: 44.0,
-            min_sharpness: 0.225,
-            min_output_prominence: 0.55,
-            ..PercussionChannelSettings::default()
-        };
+        let kick = PercussionChannelSettings::default();
         let snare = PercussionChannelSettings {
-            low_hz: 2_000.0,
-            high_hz: 5_000.0,
-            taper_hz: 10_000.0,
+            low_hz: 615.05963,
+            high_hz: 3386.009,
+            taper_hz: 5953.678,
+            admission_growth: 0.001,
+            admission_prominence: 0.08,
             min_sharpness: 0.46,
             min_output_prominence: 0.16,
-            feature_ms: 24.0,
+            min_attack_db: -26.599998,
+            cloud_top_percent: 13.0,
+            cloud_sharpness_top_percent: 9.8,
+            output_rms_db: -27.0,
+            sharpness_percentile: 60.0,
+            energy_percentile: 40.0,
+            memory_seconds: 15.5,
             output_interval_ms: 65.0,
             ..kick
         };
         let hat = PercussionChannelSettings {
+            filters: PercussionFilters {
+                mix_rms: false,
+                ..PercussionFilters::default()
+            },
             low_hz: 5_000.0,
             high_hz: 16_000.0,
             taper_hz: 16_000.0,
-            min_sharpness: 0.46,
-            min_output_prominence: 0.16,
-            feature_ms: 24.0,
-            output_interval_ms: 25.0,
-            ..kick
+            min_attack_db: -34.1,
+            cloud_top_percent: 25.0,
+            cloud_sharpness_top_percent: 25.0,
+            memory_seconds: 14.900001,
+            output_interval_ms: 50.0,
+            ..snare
         };
         Self {
             channels: [kick, snare, hat],
-            fft_size: 512,
+            fft_size: 256,
             hop_ms: 1.0,
             recent_markers: 32,
         }
     }
 }
+
+/// Fixed-floor recipe used by acoustic regressions that exercise individual
+/// admission and percentile criteria independently of the factory tuning.
+#[cfg(test)]
+pub(super) fn fixed_floor_test_settings() -> PercussionSettings {
+    let filters = PercussionFilters {
+        input_energy: true,
+        input_growth: true,
+        input_prominence: true,
+        min_sharpness: true,
+        output_prominence: true,
+        attack_level: true,
+        mix_rms: true,
+        sharpness_percentile: true,
+        energy_percentile: true,
+        output_interval: true,
+        reject_overlap: true,
+    };
+    let kick = PercussionChannelSettings {
+        filters,
+        low_hz: 60.0,
+        feature_ms: 44.0,
+        envelope_ms: 1.0,
+        merge_ms: 6.0,
+        rearm_ms: 12.0,
+        admission_energy: 0.000_000_1,
+        admission_growth: 0.001,
+        admission_prominence: 0.08,
+        min_sharpness: 0.225,
+        min_output_prominence: 0.55,
+        min_attack_db: -38.0,
+        cloud_enabled: false,
+        cloud_sharpness_enabled: false,
+        cloud_top_percent: 25.0,
+        cloud_sharpness_top_percent: 25.0,
+        output_rms_db: -27.0,
+        sharpness_percentile: 60.0,
+        energy_percentile: 40.0,
+        memory_seconds: 15.0,
+        output_interval_ms: 65.0,
+        ..PercussionChannelSettings::default()
+    };
+    let snare = PercussionChannelSettings {
+        low_hz: 2_000.0,
+        high_hz: 5_000.0,
+        taper_hz: 10_000.0,
+        min_sharpness: 0.46,
+        min_output_prominence: 0.16,
+        feature_ms: 24.0,
+        ..kick
+    };
+    let hat = PercussionChannelSettings {
+        low_hz: 5_000.0,
+        high_hz: 16_000.0,
+        taper_hz: 16_000.0,
+        output_interval_ms: 25.0,
+        ..snare
+    };
+    PercussionSettings {
+        channels: [kick, snare, hat],
+        fft_size: 512,
+        ..PercussionSettings::default()
+    }
+}
+
 impl PercussionSettings {
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
@@ -966,16 +1072,13 @@ mod tests {
     }
 
     #[test]
-    fn filter_switches_default_on_and_round_trip_partial_channel_configs() {
+    fn filter_switches_round_trip_partial_channel_configs() {
         let defaults = PercussionSettings::default();
-        assert!(PercussionSetting::CHANNEL
-            .into_iter()
-            .filter(|setting| setting.is_filter_toggle()
-                && !matches!(
-                    setting,
-                    PercussionSetting::CloudEnabled | PercussionSetting::CloudSharpnessEnabled
-                ))
-            .all(|setting| setting.get(&defaults, 0) == 1.0));
+        assert!(defaults.channels[0].filters.input_energy);
+        assert!(!defaults.channels[0].filters.input_growth);
+        assert!(defaults.channels[0].filters.attack_level);
+        assert!(defaults.channels[0].filters.mix_rms);
+        assert!(!defaults.channels[2].filters.mix_rms);
         let mut disabled = defaults;
         for setting in PercussionSetting::CHANNEL {
             if setting.is_filter_toggle() {
@@ -993,13 +1096,19 @@ mod tests {
         let partial: PercussionSettings =
             ron::from_str("(channels:((filters:(input_energy:false)),(),()))").unwrap();
         assert!(!partial.channels[0].filters.input_energy);
-        assert!(partial.channels[0].filters.input_growth);
+        assert!(!partial.channels[0].filters.input_growth);
         assert_eq!(partial.channels[1].filters, PercussionFilters::default());
-        assert_eq!(partial.channels[0].feature_ms, 44.0);
+        assert_eq!(partial.channels[0].feature_ms, 48.0);
         assert!(ron::from_str::<PercussionSettings>(
             "(channels:((filters:(unknown:false)),(),()))"
         )
         .is_err());
+        let partial: PercussionSettings =
+            ron::from_str("(channels:((),(),(filters:(input_energy:false))))").unwrap();
+        let mut expected = defaults;
+        expected.channels[2].filters.input_energy = false;
+        assert_eq!(partial, expected);
+        assert!(!partial.channels[2].filters.mix_rms);
     }
 
     #[test]
@@ -1050,14 +1159,14 @@ mod tests {
     }
 
     #[test]
-    fn cloud_settings_preserve_existing_behavior_and_round_trip_per_channel() {
+    fn cloud_settings_round_trip_per_channel() {
         let mut settings: PercussionSettings = ron::from_str("()").unwrap();
         assert!(settings
             .channels
             .iter()
-            .all(|channel| !channel.cloud_enabled && !channel.cloud_sharpness_enabled));
-        assert_eq!(settings.channels[0].cloud_top_percent, 25.0);
-        assert_eq!(settings.channels[0].cloud_sharpness_top_percent, 25.0);
+            .all(|channel| channel.cloud_enabled && channel.cloud_sharpness_enabled));
+        assert_eq!(settings.channels[0].cloud_top_percent, 20.6);
+        assert_eq!(settings.channels[0].cloud_sharpness_top_percent, 13.1);
         assert_eq!(settings.channels[0].cloud_min_count, 3);
         let fixed_floor = settings.channels[1].min_attack_db;
         PercussionSetting::CloudEnabled.set(&mut settings, 1, 1.0);
@@ -1067,11 +1176,11 @@ mod tests {
         PercussionSetting::CloudMinCount.set(&mut settings, 1, 4.6);
         assert!(settings.channels[1].cloud_enabled);
         assert!(settings.channels[1].cloud_sharpness_enabled);
-        assert!(!settings.channels[0].cloud_enabled);
-        assert!(!settings.channels[0].cloud_sharpness_enabled);
+        assert!(settings.channels[0].cloud_enabled);
+        assert!(settings.channels[0].cloud_sharpness_enabled);
         assert_eq!(settings.channels[1].cloud_top_percent, 40.0);
         assert_eq!(settings.channels[1].cloud_sharpness_top_percent, 60.0);
-        assert_eq!(settings.channels[0].cloud_sharpness_top_percent, 25.0);
+        assert_eq!(settings.channels[0].cloud_sharpness_top_percent, 13.1);
         assert_eq!(settings.channels[1].cloud_min_count, 5);
         assert_eq!(settings.channels[1].min_attack_db, fixed_floor);
         settings.validate().unwrap();
@@ -1121,6 +1230,8 @@ mod tests {
     #[test]
     fn cloud_axis_switches_are_independent_of_each_other_and_fixed_floor_switches() {
         let mut settings = PercussionSettings::default();
+        settings.channels[0].cloud_enabled = false;
+        settings.channels[0].cloud_sharpness_enabled = false;
         settings.channels[0].filters.min_sharpness = false;
         settings.channels[0].filters.attack_level = false;
         PercussionSetting::CloudSharpnessEnabled.set(&mut settings, 0, 1.0);
@@ -1139,7 +1250,10 @@ mod tests {
 
     #[test]
     fn snapshot_floor_switches_follow_cloud_axes_or_legacy_fixed_mode() {
-        let mut thresholds = PercussionThresholdSnapshot::default();
+        let mut thresholds = PercussionThresholdSnapshot {
+            filters: fixed_floor_test_settings().channels[0].filters,
+            ..PercussionThresholdSnapshot::default()
+        };
         assert!(thresholds.energy_floor_enabled() && thresholds.sharpness_floor_enabled());
         thresholds.cloud_enabled = true;
         thresholds.cloud_sharpness_enabled = true;
@@ -1163,11 +1277,11 @@ mod tests {
         )
         .unwrap();
         assert!(settings.channels[0].cloud_enabled);
-        assert!(!settings.channels[0].cloud_sharpness_enabled);
+        assert!(settings.channels[0].cloud_sharpness_enabled);
         assert_eq!(settings.channels[0].cloud_top_percent, 15.0);
-        assert_eq!(settings.channels[0].cloud_sharpness_top_percent, 25.0);
+        assert_eq!(settings.channels[0].cloud_sharpness_top_percent, 13.1);
         assert_eq!(settings.channels[0].cloud_min_count, 7);
-        assert!(!settings.channels[1].cloud_enabled);
+        assert!(settings.channels[1].cloud_enabled);
         assert_eq!(
             PercussionSetting::CloudSharpnessTopPercent.filter_toggle(),
             Some(PercussionSetting::CloudSharpnessEnabled)
@@ -1196,16 +1310,16 @@ mod tests {
             let restored: PercussionSettings = ron::from_str(source).unwrap();
             assert_eq!(restored, expected);
             restored.validate().unwrap();
-            assert_eq!(restored.channels[0].feature_ms, 44.0);
-            assert_eq!(restored.channels[0].min_sharpness, 0.225);
-            assert_eq!(restored.channels[0].min_output_prominence, 0.55);
-            assert_eq!(restored.channels[1].low_hz, 2_000.0);
-            assert_eq!(restored.channels[1].high_hz, 5_000.0);
-            assert_eq!(restored.channels[1].taper_hz, 10_000.0);
+            assert_eq!(restored.channels[0].feature_ms, 48.0);
+            assert_eq!(restored.channels[0].min_sharpness, 0.158);
+            assert_eq!(restored.channels[0].min_output_prominence, 0.0);
+            assert_eq!(restored.channels[1].low_hz, 615.05963);
+            assert_eq!(restored.channels[1].high_hz, 3386.009);
+            assert_eq!(restored.channels[1].taper_hz, 5953.678);
             assert_eq!(restored.channels[2].low_hz, 5_000.0);
             assert_eq!(restored.channels[2].high_hz, 16_000.0);
             for channel in &restored.channels[1..] {
-                assert_eq!(channel.feature_ms, 24.0);
+                assert_eq!(channel.feature_ms, 48.0);
                 assert_eq!(channel.min_output_prominence, 0.16);
             }
         }

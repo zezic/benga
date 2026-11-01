@@ -5866,10 +5866,7 @@ mod tests {
                 assert!(!graph_usage(selection, source).is_empty());
             }
         }
-        assert_eq!(
-            GraphSource::DropLevel.range(None),
-            (-48.0, 0.0)
-        );
+        assert_eq!(GraphSource::DropLevel.range(None), (-48.0, 0.0));
         assert_eq!(GraphSource::DropEligible.range(None), (0.0, 1.0));
         assert_eq!(
             GraphSource::DetectorOnsetFlux(Detector::Drop).range(None),
@@ -6105,7 +6102,13 @@ mod tests {
 
     #[test]
     fn onset_switches_get_processor_graphs() {
-        let visualizer = Visualizer::new();
+        let mut visualizer = Visualizer::new();
+        // Pin the kick region so the graph fixture includes bands 3–4 only.
+        visualizer.set_detector_settings(crate::visualizer::DetectorSettings {
+            kick_low_hz: 102.614056,
+            kick_high_hz: 223.14035,
+            ..visualizer.detector_settings()
+        });
         let crossfade = graph_sources(DebugSelection::Property(Property::Crossfade), &visualizer);
         assert!(crossfade.contains(&GraphSource::Onset(Detector::Drop)));
         assert!(!crossfade.contains(&GraphSource::Onset(Detector::Kick)));
@@ -6191,7 +6194,13 @@ mod tests {
 
     #[test]
     fn band_routes_name_value_and_onset_dependencies() {
-        let visualizer = Visualizer::new();
+        let mut visualizer = Visualizer::new();
+        // Pin the kick region so the graph fixture includes bands 3–4 only.
+        visualizer.set_detector_settings(crate::visualizer::DetectorSettings {
+            kick_low_hz: 102.614056,
+            kick_high_hz: 223.14035,
+            ..visualizer.detector_settings()
+        });
         let routing = visualizer.routing();
         let detectors = visualizer.detector_settings();
         assert_eq!(band_route(Property::Pulse, 0, &visualizer), "V");

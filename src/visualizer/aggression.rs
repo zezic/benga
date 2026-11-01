@@ -4,12 +4,12 @@ use super::BAND_COUNT;
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
 
-/// The default four lowest frequency regions of the spectral shape graph.
-pub const AGGRESSION_LF_BANDS: [usize; 4] = [0, 1, 2, 3];
-/// Four mid-frequency regions with centers at approximately 600 Hz–2 kHz.
-pub const AGGRESSION_MF_BANDS: [usize; 4] = [7, 8, 9, 10];
+/// The default two lowest frequency regions of the spectral shape graph.
+pub const AGGRESSION_LF_BANDS: [usize; 2] = [0, 1];
+/// Six mid-frequency regions of the spectral shape graph.
+pub const AGGRESSION_MF_BANDS: [usize; 6] = [4, 5, 6, 7, 8, 9];
 /// Default falloff time constant, bridging brief LF gaps with instant attack.
-pub(crate) const AGGRESSION_RELEASE_SECONDS: f32 = 3.0;
+pub(crate) const AGGRESSION_RELEASE_SECONDS: f32 = 0.5;
 pub(crate) const LF_BOOST_GAIN_MAX: f32 = 4.0;
 pub(crate) const AGGRESSION_STIFFNESS_MAX: f32 = 2.0;
 
@@ -27,9 +27,9 @@ impl Default for AggressionBands {
     fn default() -> Self {
         Self {
             lf_start: AGGRESSION_LF_BANDS[0],
-            lf_end: AGGRESSION_LF_BANDS[3] + 1,
+            lf_end: AGGRESSION_LF_BANDS[AGGRESSION_LF_BANDS.len() - 1] + 1,
             mf_start: AGGRESSION_MF_BANDS[0],
-            mf_end: AGGRESSION_MF_BANDS[3] + 1,
+            mf_end: AGGRESSION_MF_BANDS[AGGRESSION_MF_BANDS.len() - 1] + 1,
         }
     }
 }
@@ -208,10 +208,13 @@ mod tests {
     #[test]
     fn uses_the_low_maximum_and_average_of_the_middle_two_mid_bands() {
         let mut shape = [0.0; BAND_COUNT];
-        for (band, value) in AGGRESSION_LF_BANDS.into_iter().zip([-0.7, -0.3, 0.5, 0.1]) {
+        for (band, value) in AGGRESSION_LF_BANDS.into_iter().zip([-0.7, 0.5]) {
             shape[band] = value;
         }
-        for (band, value) in AGGRESSION_MF_BANDS.into_iter().zip([1.0, -0.5, -1.0, 0.0]) {
+        for (band, value) in AGGRESSION_MF_BANDS
+            .into_iter()
+            .zip([1.0, -0.5, -1.0, 0.0, 0.5, -0.75])
+        {
             shape[band] = value;
         }
         let result = SpectralAggression::from_shape(&shape, AggressionBands::default());
@@ -463,7 +466,7 @@ mod tests {
         envelope.observe(shape.value, 0.0);
         let boosted = shape.with_lf_boost(0.5);
         assert_eq!(envelope.observe(boosted.value, 0.005), 0.5);
-        let released = envelope.observe(shape.with_lf_boost(0.0).value, 0.25);
+        let released = envelope.observe_with_release(shape.with_lf_boost(0.0).value, 0.25, 3.0);
         assert!(released > 0.475);
         assert!((released - (0.25 + 0.25 * (-0.25_f32 / 3.0).exp())).abs() < 1e-6);
     }
@@ -472,10 +475,10 @@ mod tests {
     fn envelope_bridges_short_bass_gaps_but_releases_during_sustained_warm_sound() {
         let mut envelope = AggressionEnvelope::default();
         envelope.observe(1.0, 0.0);
-        assert!(envelope.observe(0.0, 0.25) > 0.9);
-        let after_three_seconds = envelope.observe(0.0, 2.75);
+        assert!(envelope.observe_with_release(0.0, 0.25, 3.0) > 0.9);
+        let after_three_seconds = envelope.observe_with_release(0.0, 2.75, 3.0);
         assert!((after_three_seconds - (-1.0_f32).exp()).abs() < 1e-6);
-        assert!(envelope.observe(0.0, 6.0) < 0.05);
+        assert!(envelope.observe_with_release(0.0, 6.0, 3.0) < 0.05);
     }
 
     #[test]
@@ -543,7 +546,9 @@ mod tests {
         assert_eq!(envelope.observe(2.0, 0.0), 2.0);
         assert_eq!(envelope.observe(-1.0, 0.0), 2.0);
         assert_eq!(envelope.observe(-1.0, -1.0), 2.0);
-        assert!((envelope.observe(1.0, 3.0) - (1.0 + (-1.0_f32).exp())).abs() < 1e-6);
+        assert!(
+            (envelope.observe_with_release(1.0, 3.0, 3.0) - (1.0 + (-1.0_f32).exp())).abs() < 1e-6
+        );
         for _ in 0..100 {
             let value = envelope.observe(-1.0, 0.1);
             assert!((-1.0..=2.0).contains(&value));
@@ -562,7 +567,7 @@ mod tests {
         assert_eq!(envelope.observe(peak.value, 0.005), 2.0);
         assert_eq!(peak.stiffness_scale(0.75), 2.0);
         let after_one_second = SpectralAggression {
-            value: envelope.observe(0.0, 1.0),
+            value: envelope.observe_with_release(0.0, 1.0, 3.0),
             ..peak
         };
         assert!((after_one_second.value - 2.0 * (-1.0_f32 / 3.0).exp()).abs() < 1e-6);
@@ -572,7 +577,7 @@ mod tests {
             after_one_second.value
         );
         let after_three_seconds = SpectralAggression {
-            value: envelope.observe(0.0, 2.0),
+            value: envelope.observe_with_release(0.0, 2.0, 3.0),
             ..peak
         };
         assert!(after_three_seconds.value < 1.0);

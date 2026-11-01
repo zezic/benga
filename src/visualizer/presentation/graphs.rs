@@ -1,8 +1,8 @@
 //! Live analyzer plots composed into the presentation itself.
 //!
-//! Detector events admit and retire whole compositions. Their contents keep
-//! updating between those events; layout and animation seeds stay fixed until
-//! the next composition (or a window resize).
+//! Normal/POI mode entries choose initial compositions; detector events may
+//! add more and retire them. Their contents keep updating between events;
+//! layout and animation seeds stay fixed until the next composition or resize.
 
 use vello::{
     kurbo::{Affine, Line, Point, Rect, Stroke},
@@ -11,7 +11,7 @@ use vello::{
 
 use crate::text::Fonts;
 
-use super::super::{Rng, TriggerCounts, Visualizer};
+use super::super::{showcase::ShowcaseMode, Rng, TriggerCounts, Visualizer};
 use super::{
     color::ScenePalette,
     plots::{
@@ -26,6 +26,7 @@ const FORMATION_AIR: f64 = 36.0;
 const GROUP_STAGGER: f32 = 0.085;
 const MIN_CHART_WIDTH: f64 = 180.0;
 const INITIAL_COOLDOWN: f32 = 0.35;
+const MODE_ENTRY_SPAWN_CHANCE: f32 = 0.75;
 const MAX_GROUPS: usize = 2;
 const MAX_PLOTS: usize = 8;
 const MIN_HOLD_SECONDS: f32 = 18.0;
@@ -40,6 +41,8 @@ pub(super) struct GraphCompositions {
     cooldown: f32,
     last_triggers: Option<TriggerCounts>,
     last_audio_time: Option<f64>,
+    last_mode: Option<ShowcaseMode>,
+    mode_entry_pending: bool,
     context: Option<Context>,
     viewport: Option<(f64, f64)>,
     previous_family: Option<Family>,
@@ -52,6 +55,8 @@ impl Default for GraphCompositions {
             cooldown: INITIAL_COOLDOWN,
             last_triggers: None,
             last_audio_time: None,
+            last_mode: None,
+            mode_entry_pending: false,
             context: None,
             viewport: None,
             previous_family: None,
@@ -233,6 +238,41 @@ impl Lifetime {
         // a POI or model change interrupts a composition's first moments.
         (entered * (1.0 - leaving), 1.0 - leaving)
     }
+}
+
+fn graph_animation(kind: PlotKind, life: &Lifetime, index: usize, seed: u64) -> (f32, f32) {
+    if matches!(kind, PlotKind::Heatmap(_)) {
+        return life.animation(index);
+    }
+
+    // Treat each plot as one lamp: full geometry flickers into steady light,
+    // rather than assembling or dissolving individual trace segments.
+    let entrance_age = life.exiting_at.unwrap_or(life.age) - index as f32 * GROUP_STAGGER;
+    let entered = neon_level(
+        entrance_age / life.entrance,
+        seed,
+        &[0.0, 0.68, 0.07, 1.0, 0.14, 0.72, 0.32, 0.92, 0.86, 1.0],
+    );
+    let shutdown = life.exiting_at.map_or(1.0, |start| {
+        let delay = (life.count - index - 1) as f32 * GROUP_STAGGER;
+        neon_level(
+            (life.age - start - delay) / life.exit,
+            seed.rotate_left(17),
+            &[1.0, 0.65, 0.12, 0.9, 0.18, 0.55, 0.06, 0.2, 0.0, 0.0],
+        )
+    });
+    // Retirement freezes ignition, so a plot interrupted before lighting
+    // cannot strike for the first time during its shutdown.
+    let alpha = entered * shutdown;
+    (if alpha > 0.0 { 1.0 } else { 0.0 }, alpha)
+}
+
+fn neon_level(progress: f32, seed: u64, levels: &[f32; 10]) -> f32 {
+    let progress = progress.clamp(0.0, 1.0);
+    // Vary the strike timing per plot without consuming randomness per frame.
+    let skew = (((seed ^ (seed >> 32)) & 255) as f32 / 255.0 - 0.5) * 0.32;
+    let phase = progress + skew * progress * (1.0 - progress);
+    levels[((phase * levels.len() as f32) as usize).min(levels.len() - 1)]
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -470,6 +510,7 @@ impl GraphCompositions {
         self.groups.clear();
         self.last_triggers = None;
         self.last_audio_time = None;
+        self.mode_entry_pending = false;
         self.context = None;
         self.viewport = None;
         self.cooldown = INITIAL_COOLDOWN;
@@ -486,6 +527,12 @@ impl GraphCompositions {
     ) {
         let dt = dt.max(0.0);
         self.cooldown = (self.cooldown - dt).max(0.0);
+        let mode = visualizer.showcase_mode();
+        let mode_changed = self.last_mode != Some(mode);
+        if mode_changed {
+            self.last_mode = Some(mode);
+            self.mode_entry_pending = rng.unit() < MODE_ENTRY_SPAWN_CHANCE;
+        }
         let counts = visualizer.trigger_counts();
         let audio_time = visualizer.percussion_audio_time();
         let timeline_reset = self.last_audio_time.is_some_and(|last| audio_time < last)
@@ -506,6 +553,9 @@ impl GraphCompositions {
                 .context
                 .as_ref()
                 .is_some_and(|context| !context.matches(visualizer));
+        if context_changed && !mode_changed {
+            self.mode_entry_pending = false;
+        }
         if self.context.is_none() || context_changed {
             self.context = Some(Context::capture(visualizer));
         }
@@ -580,12 +630,17 @@ impl GraphCompositions {
             self.groups.retain(|group| !group.life.finished());
         }
 
+        // A mode entry may wait for the brief placement cooldown, but consumes
+        // its one attempt even when capacity or occupied space prevents a spawn.
+        let mode_entry = self.mode_entry_pending && self.cooldown == 0.0 && !context_changed;
+        if mode_entry {
+            self.mode_entry_pending = false;
+        }
         if context_changed
             || self.groups.len() >= MAX_GROUPS
             || self.plot_count() >= MAX_PLOTS
             || self.cooldown > 0.0
-            || !events.any()
-            || rng.unit() >= events.spawn_chance()
+            || (!mode_entry && (!events.any() || rng.unit() >= events.spawn_chance()))
         {
             return;
         }
@@ -671,7 +726,8 @@ impl GraphCompositions {
     pub(super) fn draw(&self, scene: &mut Scene, stage: &Stage, palette: ScenePalette) {
         for group in &self.groups {
             for (index, card) in group.cards.iter().enumerate() {
-                let (reveal, alpha) = group.life.animation(index);
+                let (reveal, alpha) =
+                    graph_animation(card.spec.kind, &group.life, index, card.seed);
                 card.plot
                     .draw(scene, card.rect, stage, palette, reveal, alpha, card.seed);
                 draw_beat_accent(scene, card, stage, palette, reveal * alpha);
@@ -1320,6 +1376,237 @@ mod tests {
     use super::*;
     use vello::kurbo::Size;
 
+    fn poi_visualizer() -> Visualizer {
+        let mut visualizer = Visualizer::new();
+        visualizer.load_models();
+        for _ in 0..64 {
+            if visualizer.model_id() == Some("rif_ak47") {
+                break;
+            }
+            visualizer.next_model();
+        }
+        assert_eq!(visualizer.model_id(), Some("rif_ak47"));
+        visualizer
+    }
+
+    #[test]
+    fn mode_entries_can_spawn_without_detector_hits_after_the_brief_cooldown() -> anyhow::Result<()>
+    {
+        let mut visualizer = poi_visualizer();
+        let mut fonts = Fonts::new()?;
+        let stage = Stage::new(Size::new(1920.0, 1080.0));
+        let mut mode_rng = Rng::new(7);
+        let mut graphs = GraphCompositions::default();
+        let mut rng = Rng::new(1);
+        graphs.update(0.0, &visualizer, &mut fonts, &stage, &mut rng, &[]);
+        assert!(graphs.groups.is_empty());
+        graphs.update(0.2, &visualizer, &mut fonts, &stage, &mut rng, &[]);
+        assert!(graphs.groups.is_empty());
+        graphs.update(0.2, &visualizer, &mut fonts, &stage, &mut rng, &[]);
+        assert_eq!(
+            graphs.groups.len(),
+            1,
+            "normal entry can introduce graphs without a hit"
+        );
+
+        // Let the original group retire normally before testing each next entry.
+        for mode in [ShowcaseMode::Poi, ShowcaseMode::Normal] {
+            graphs.update(106.0, &visualizer, &mut fonts, &stage, &mut rng, &[]);
+            graphs.update(1.0, &visualizer, &mut fonts, &stage, &mut rng, &[]);
+            assert!(graphs.groups.is_empty());
+            match mode {
+                ShowcaseMode::Poi => assert!(visualizer.showcase.enter_focus(&mut mode_rng, 1.1)),
+                ShowcaseMode::Normal => visualizer.showcase.exit_focus(),
+            }
+            rng = Rng::new(1);
+            graphs.update(0.0, &visualizer, &mut fonts, &stage, &mut rng, &[]);
+            assert_eq!(
+                graphs.groups.len(),
+                1,
+                "each normal/POI entry gets its own opportunity"
+            );
+        }
+        assert_eq!(visualizer.trigger_counts(), TriggerCounts::default());
+        Ok(())
+    }
+
+    #[test]
+    fn a_mode_can_start_empty_and_add_graphs_on_a_later_hit() -> anyhow::Result<()> {
+        let mut visualizer = Visualizer::new();
+        let mut fonts = Fonts::new()?;
+        let stage = Stage::new(Size::new(1920.0, 1080.0));
+        let mut graphs = GraphCompositions::default();
+        let mut rng = Rng::new(0);
+        graphs.update(
+            INITIAL_COOLDOWN,
+            &visualizer,
+            &mut fonts,
+            &stage,
+            &mut rng,
+            &[],
+        );
+        assert!(
+            graphs.groups.is_empty(),
+            "zero graphs is a valid entry decision"
+        );
+        for _ in 0..8 {
+            graphs.update(0.5, &visualizer, &mut fonts, &stage, &mut rng, &[]);
+            assert!(
+                graphs.groups.is_empty(),
+                "an empty decision is not retried every frame"
+            );
+        }
+        visualizer.kick_hits += 1;
+        rng = Rng::new(1);
+        graphs.update(0.0, &visualizer, &mut fonts, &stage, &mut rng, &[]);
+        assert_eq!(graphs.groups.len(), 1, "later triggers may add graphs");
+        Ok(())
+    }
+
+    #[test]
+    fn scene_selector_and_poi_target_changes_do_not_create_entry_opportunities(
+    ) -> anyhow::Result<()> {
+        let mut visualizer = poi_visualizer();
+        let mut fonts = Fonts::new()?;
+        let stage = Stage::new(Size::new(1920.0, 1080.0));
+        let mut graphs = GraphCompositions::default();
+        let mut rng = Rng::new(0);
+        let mut mode_rng = Rng::new(7);
+        graphs.update(
+            INITIAL_COOLDOWN,
+            &visualizer,
+            &mut fonts,
+            &stage,
+            &mut rng,
+            &[],
+        );
+        assert!(graphs.groups.is_empty());
+
+        for _ in 0..visualizer.showcase.settings().selector_entry_kicks {
+            visualizer.showcase.kick(&mut mode_rng, true);
+        }
+        assert!(visualizer.showcase.selector_active());
+        rng = Rng::new(1);
+        graphs.update(1.0, &visualizer, &mut fonts, &stage, &mut rng, &[]);
+        assert!(
+            graphs.groups.is_empty(),
+            "selector entry is still normal mode"
+        );
+        visualizer.showcase.drop();
+        assert!(!visualizer.showcase.selector_active());
+        graphs.update(1.0, &visualizer, &mut fonts, &stage, &mut rng, &[]);
+        assert!(graphs.groups.is_empty());
+
+        assert!(visualizer.showcase.enter_focus(&mut mode_rng, 1.1));
+        rng = Rng::new(0);
+        graphs.update(1.0, &visualizer, &mut fonts, &stage, &mut rng, &[]);
+        assert!(graphs.groups.is_empty());
+        let target = visualizer.showcase_target_id().unwrap().to_owned();
+        visualizer.showcase.advance(2.0);
+        visualizer.showcase.snare(&mut mode_rng, 32, 32, 1.1);
+        assert_ne!(visualizer.showcase_target_id(), Some(target.as_str()));
+        rng = Rng::new(1);
+        graphs.update(1.0, &visualizer, &mut fonts, &stage, &mut rng, &[]);
+        assert!(graphs.groups.is_empty(), "another POI stays in POI mode");
+
+        visualizer.showcase.exit_focus();
+        rng = Rng::new(0);
+        graphs.update(1.0, &visualizer, &mut fonts, &stage, &mut rng, &[]);
+        visualizer.next_model();
+        rng = Rng::new(1);
+        graphs.update(1.0, &visualizer, &mut fonts, &stage, &mut rng, &[]);
+        graphs.update(1.0, &visualizer, &mut fonts, &stage, &mut rng, &[]);
+        assert!(
+            graphs.groups.is_empty(),
+            "model navigation does not enter a mode again"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn blocked_mode_entry_is_consumed_without_a_deferred_spawn() -> anyhow::Result<()> {
+        let visualizer = Visualizer::new();
+        let mut fonts = Fonts::new()?;
+        let stage = Stage::new(Size::new(1920.0, 1080.0));
+        let mut graphs = GraphCompositions::default();
+        let mut rng = Rng::new(1);
+        graphs.update(
+            INITIAL_COOLDOWN,
+            &visualizer,
+            &mut fonts,
+            &stage,
+            &mut rng,
+            &[Rect::new(0.0, 0.0, stage.width, stage.height)],
+        );
+        assert!(graphs.groups.is_empty());
+        graphs.update(2.0, &visualizer, &mut fonts, &stage, &mut rng, &[]);
+        assert!(
+            graphs.groups.is_empty(),
+            "clearing space is not another entry opportunity"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_scene_change_cancels_a_pending_entry_in_the_same_mode() -> anyhow::Result<()> {
+        let mut visualizer = poi_visualizer();
+        let mut fonts = Fonts::new()?;
+        let stage = Stage::new(Size::new(1920.0, 1080.0));
+        let mut graphs = GraphCompositions::default();
+        let mut rng = Rng::new(1);
+        graphs.update(0.0, &visualizer, &mut fonts, &stage, &mut rng, &[]);
+        assert!(graphs.groups.is_empty());
+
+        visualizer.next_model();
+        assert_eq!(visualizer.showcase_mode(), ShowcaseMode::Normal);
+        graphs.update(0.1, &visualizer, &mut fonts, &stage, &mut rng, &[]);
+        graphs.update(0.5, &visualizer, &mut fonts, &stage, &mut rng, &[]);
+        assert!(
+            graphs.groups.is_empty(),
+            "an entry queued for the previous model must not appear on a new scene"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_real_mode_change_keeps_its_entry_when_the_model_also_changes() -> anyhow::Result<()> {
+        let mut visualizer = poi_visualizer();
+        let mut fonts = Fonts::new()?;
+        let stage = Stage::new(Size::new(1920.0, 1080.0));
+        let mut graphs = GraphCompositions::default();
+        let mut rng = Rng::new(0);
+        graphs.update(
+            INITIAL_COOLDOWN,
+            &visualizer,
+            &mut fonts,
+            &stage,
+            &mut rng,
+            &[],
+        );
+        assert!(graphs.groups.is_empty());
+
+        let old_model = visualizer.model_id().unwrap().to_owned();
+        visualizer.next_model();
+        for _ in 0..64 {
+            if visualizer.showcase.poi_count() > 0 {
+                break;
+            }
+            visualizer.next_model();
+        }
+        assert_ne!(visualizer.model_id(), Some(old_model.as_str()));
+        assert!(visualizer.showcase.enter_focus(&mut Rng::new(7), 1.1));
+        rng = Rng::new(1);
+        graphs.update(0.0, &visualizer, &mut fonts, &stage, &mut rng, &[]);
+        graphs.update(0.5, &visualizer, &mut fonts, &stage, &mut rng, &[]);
+        assert_eq!(
+            graphs.groups.len(),
+            1,
+            "normal-to-POI entry survives simultaneous model replacement"
+        );
+        assert_eq!(visualizer.trigger_counts(), TriggerCounts::default());
+        Ok(())
+    }
+
     fn measured_attacks() -> Visualizer {
         let mut visualizer = Visualizer::new();
         let mut settings = visualizer.detector_settings();
@@ -1355,7 +1642,10 @@ mod tests {
         stage: &Stage,
         rng: &mut Rng,
     ) -> GraphCompositions {
-        let mut graphs = GraphCompositions::default();
+        let mut graphs = GraphCompositions {
+            last_mode: Some(visualizer.showcase_mode()),
+            ..GraphCompositions::default()
+        };
         graphs.update(0.0, visualizer, fonts, stage, rng, &[]);
         assert!(graphs.spawn(
             vec![
@@ -1413,7 +1703,15 @@ mod tests {
         visualizer.showcase.exit_focus();
         graphs.update(0.05, &visualizer, &mut fonts, &stage, &mut rng, &[]);
         assert!(!graphs.groups[0].life.exiting());
-        assert_eq!(graphs.occluders(), bounds);
+        assert_eq!(
+            graphs.groups[0]
+                .cards
+                .iter()
+                .map(|card| card.rect)
+                .collect::<Vec<_>>(),
+            bounds,
+            "existing formations keep their bounds while mode entries may add another group"
+        );
 
         visualizer.next_model();
         graphs.update(0.05, &visualizer, &mut fonts, &stage, &mut rng, &[]);
@@ -1676,7 +1974,10 @@ mod tests {
         let mut fonts = Fonts::new()?;
         let stage = Stage::new(Size::new(1920.0, 1080.0));
         let mut rng = Rng::new(55);
-        let mut graphs = GraphCompositions::default();
+        let mut graphs = GraphCompositions {
+            last_mode: Some(visualizer.showcase_mode()),
+            ..GraphCompositions::default()
+        };
         graphs.update(0.0, &visualizer, &mut fonts, &stage, &mut rng, &[]);
         assert!(graphs.spawn(
             vec![
@@ -1755,6 +2056,104 @@ mod tests {
             assert_eq!(life.animation(index), (0.0, 0.0));
         }
         assert!(life.finished());
+    }
+
+    #[test]
+    fn static_plots_flicker_as_complete_neon_lamps_and_hold_steady() {
+        let mut life = Lifetime::new(1, &mut Rng::new(22));
+        for kind in [
+            PlotKind::Attack(0),
+            PlotKind::SpectralShape,
+            PlotKind::Aggression,
+            PlotKind::Energy,
+            PlotKind::Bass,
+            PlotKind::Onsets,
+        ] {
+            life.exiting_at = None;
+            let mut levels = Vec::new();
+            for step in 0..=100 {
+                life.age = life.entrance * step as f32 / 100.0;
+                let animation = graph_animation(kind, &life, 0, 71);
+                assert_eq!(animation, graph_animation(kind, &life, 0, 71));
+                assert!(
+                    [0.0, 1.0].contains(&animation.0),
+                    "geometry never dissolves"
+                );
+                assert!((0.0..=1.0).contains(&animation.1));
+                levels.push(animation.1);
+            }
+            assert_eq!(levels[0], 0.0);
+            assert_eq!(*levels.last().unwrap(), 1.0);
+            assert!(levels.windows(2).any(|pair| pair[1] < pair[0]));
+            assert!(levels.windows(2).any(|pair| pair[1] > pair[0]));
+            for age in [life.entrance, life.dwell_until * 0.5, life.dwell_until] {
+                life.age = age;
+                assert_eq!(graph_animation(kind, &life, 0, 71), (1.0, 1.0));
+            }
+
+            life.retire();
+            let start = life.age;
+            let mut shutdown = Vec::new();
+            for step in 0..=100 {
+                life.age = start + life.exit * step as f32 / 100.0;
+                shutdown.push(graph_animation(kind, &life, 0, 71).1);
+            }
+            assert_eq!(shutdown[0], 1.0);
+            assert_eq!(*shutdown.last().unwrap(), 0.0);
+            assert!(
+                shutdown.windows(2).any(|pair| pair[1] > pair[0]),
+                "shutdown sputters before going dark"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_formation_heatmaps_keep_their_existing_animation() {
+        let mut life = Lifetime::new(3, &mut Rng::new(22));
+        for exiting_at in [None, Some(0.23), Some(life.dwell_until)] {
+            life.exiting_at = exiting_at;
+            for step in 0..=200 {
+                life.age = step as f32 * 0.2;
+                for index in 0..3 {
+                    for seed in [0, 71, u64::MAX] {
+                        assert_eq!(
+                            graph_animation(PlotKind::Heatmap(index), &life, index, seed),
+                            life.animation(index)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn interrupted_neon_ignition_cannot_light_during_shutdown() {
+        let mut life = Lifetime::new(3, &mut Rng::new(22));
+        life.age = GROUP_STAGGER * 1.5;
+        let brightness: Vec<_> = (0..3)
+            .map(|index| graph_animation(PlotKind::Energy, &life, index, 71).1)
+            .collect();
+        assert!(brightness[0] > 0.0);
+        assert_eq!(brightness[1..], [0.0, 0.0]);
+        life.retire();
+        let start = life.age;
+        for step in 0..=100 {
+            life.age = start + (life.exit + GROUP_STAGGER * 2.0) * step as f32 / 100.0;
+            for (index, before) in brightness.iter().enumerate() {
+                let (_, alpha) = graph_animation(PlotKind::Energy, &life, index, 71);
+                assert!(
+                    alpha <= *before,
+                    "an interrupted lamp cannot ignite further"
+                );
+            }
+        }
+        life.age += 1.0;
+        for index in 0..3 {
+            assert_eq!(
+                graph_animation(PlotKind::Energy, &life, index, 71),
+                (0.0, 0.0)
+            );
+        }
     }
 
     #[test]
@@ -2322,7 +2721,10 @@ mod tests {
         let mut fonts = Fonts::new()?;
         let stage = Stage::new(Size::new(1920.0, 1080.0));
         let mut rng = Rng::new(68);
-        let mut graphs = GraphCompositions::default();
+        let mut graphs = GraphCompositions {
+            last_mode: Some(visualizer.showcase_mode()),
+            ..GraphCompositions::default()
+        };
         graphs.update(0.0, &visualizer, &mut fonts, &stage, &mut rng, &[]);
         assert!(graphs.spawn(
             cluster_specs(Cluster::Column),

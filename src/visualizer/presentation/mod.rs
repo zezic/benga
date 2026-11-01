@@ -44,9 +44,6 @@ pub struct Presentation {
     selector: SelectorOverlay,
     poi: PoiScene,
     colors: ScenePalette,
-    colors_ready: bool,
-    model_id: Option<String>,
-    poi_key: Option<String>,
     last_triggers: Option<TriggerCounts>,
     poi_mode: bool,
     focus_blend: f32,
@@ -85,9 +82,6 @@ impl Presentation {
             selector: SelectorOverlay::default(),
             poi: PoiScene::default(),
             colors,
-            colors_ready: false,
-            model_id: None,
-            poi_key: None,
             last_triggers: None,
             poi_mode: false,
             focus_blend: 0.0,
@@ -98,6 +92,10 @@ impl Presentation {
             poi_graphs: poi_graphs::PoiGraphs::default(),
             exclusion: None,
         }
+    }
+
+    pub fn choose_colors(&mut self, palette: &Palette, colors: ThemeColors) {
+        self.colors = ScenePalette::choose(palette, colors, &mut self.rng);
     }
 
     pub fn analyzers_visible(&self) -> bool {
@@ -181,15 +179,6 @@ impl Presentation {
         } else {
             None
         };
-        if !self.colors_ready
-            || self.model_id.as_deref() != model_id
-            || self.poi_key.as_deref() != target
-        {
-            self.model_id = model_id.map(str::to_owned);
-            self.poi_key = target.map(str::to_owned);
-            self.colors = ScenePalette::choose(palette, colors, &mut self.rng);
-            self.colors_ready = true;
-        }
         self.colors.refresh(palette, colors);
         let counts = visualizer.trigger_counts();
         let previous = self.last_triggers;

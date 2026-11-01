@@ -45,10 +45,15 @@ attack for their instrument. Heatmap groups choose one to three distinct
 instruments (kick, snare, hat), with independently varied square, wide, or tall
 maps and sizes.
 Graph headings use thin text with space above each plot, retaining the original
-axis legends. Compositions assemble and dissolve on musical events. Up to two
-compositions can coexist; each has an 18–28-second protected hold, then waits
-for another 48–96 onset
+axis legends. Switching between normal view and POI close-ups can add an initial
+composition, or no new graphs. Later musical triggers may add
+more graphs. Selector changes, POI target switches, and model changes alone do not
+choose a new initial composition. Compositions retain their musical retirement
+rules. Up to two compositions can coexist; each has an 18–28-second protected hold,
+then waits for another 48–96 onset
 events before leaving. Quiet passages have a 75–105-second lifetime limit.
+Static plots flicker on and off like neon lamps, staying steady between their
+entrance and exit. Heatmaps keep their cell-based assembly and dissolve.
 Static formations survive POI switches when their space stays clear. In POI
 close-ups, additional graphs follow model vertices alongside the floating
 cards, using the same spring motion, anchor markers, and leader lines. On

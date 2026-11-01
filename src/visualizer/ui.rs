@@ -274,7 +274,11 @@ impl Ui {
     }
 
     pub fn set_theme(&mut self, selected: ThemeId) {
-        self.theme.select(selected);
+        if self.theme.selected() != selected {
+            self.presentation
+                .choose_colors(&Palette::from_theme(selected), Theme::new(selected).colors);
+            self.theme.select(selected);
+        }
     }
 
     pub fn set_shutter(&mut self, shutter: ShutterFrames) {
@@ -643,6 +647,93 @@ mod tests {
             FrameRateLimit::Fps120,
             FrameTime::new(now, now + Duration::from_millis(16)),
         );
+    }
+
+    #[test]
+    fn presentation_accent_stays_fixed_across_scene_modes() -> anyhow::Result<()> {
+        use crate::visualizer::{showcase::ShowcaseMode, Rng};
+
+        let mut config = Config::default();
+        config.theme_preferences.auto_colors = false;
+        let mut ui = Ui::new(&config)?;
+        ui.visualizer.load_models();
+        for _ in 0..64 {
+            if ui.visualizer.model_id() == Some("rif_ak47") {
+                break;
+            }
+            ui.visualizer.next_model();
+        }
+        assert_eq!(ui.visualizer.model_id(), Some("rif_ak47"));
+        let view = View::fit(Size::new(1920.0, 1080.0));
+        let accent = ui.presentation.colors().accent;
+        draw_presentation_frame(&mut ui, &view);
+        assert_eq!(ui.presentation.colors().accent, accent);
+        let mut rng = Rng::new(7);
+        for _ in 0..8 {
+            assert!(ui.visualizer.showcase.enter_focus(&mut rng, 1.1));
+            draw_presentation_frame(&mut ui, &view);
+            assert_eq!(ui.visualizer.showcase_mode(), ShowcaseMode::Poi);
+            assert_eq!(
+                ui.presentation.colors().accent,
+                accent,
+                "POI entry changed the accent"
+            );
+            ui.visualizer.showcase.exit_focus();
+            draw_presentation_frame(&mut ui, &view);
+            assert_eq!(ui.visualizer.showcase_mode(), ShowcaseMode::Normal);
+            assert_eq!(
+                ui.presentation.colors().accent,
+                accent,
+                "POI exit changed the accent"
+            );
+        }
+        ui.navigate_model(Adjustment::Increase);
+        draw_presentation_frame(&mut ui, &view);
+        assert_eq!(
+            ui.presentation.colors().accent,
+            accent,
+            "changing models with automatic colors disabled keeps the accent"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn presentation_chooses_one_accent_for_each_theme() -> anyhow::Result<()> {
+        let mut config = Config::default();
+        config.theme_preferences.auto_colors = false;
+        let mut ui = Ui::new(&config)?;
+        let view = View::fit(Size::new(1920.0, 1080.0));
+        draw_presentation_frame(&mut ui, &view);
+        for name in ["Nord Light", "Gruvbox Dark", "Nord Light"] {
+            let theme = ThemeId::all().find(|theme| theme.name() == name).unwrap();
+            let palette = Palette::from_theme(theme);
+            ui.set_theme(theme);
+            let chosen = ui.presentation.colors();
+            assert_eq!(
+                chosen.accent,
+                palette.vivid(chosen.accent_index),
+                "choose from the incoming theme"
+            );
+            for _ in 0..120 {
+                draw_presentation_frame(&mut ui, &view);
+                assert_eq!(
+                    ui.presentation.colors().accent_index,
+                    chosen.accent_index,
+                    "crossfading must keep the chosen accent slot"
+                );
+            }
+            let settled = ui.presentation.colors().accent;
+            for (actual, expected) in settled.components.into_iter().zip(chosen.accent.components) {
+                assert!((actual - expected).abs() < 1e-6);
+            }
+            ui.set_theme(theme);
+            assert_eq!(
+                ui.presentation.colors().accent,
+                settled,
+                "selecting the current theme keeps its accent"
+            );
+        }
+        Ok(())
     }
 
     #[test]

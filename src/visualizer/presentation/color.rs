@@ -31,8 +31,8 @@ impl ScenePalette {
         let ink = palette.neutral[0];
         let background = colors.background;
         let (mut accent_index, mut accent) = best_accent(palette, background);
-        // Perturb the best-contrast choice with the scene seed so consecutive
-        // scenes differ, but never accept a washed-out accent.
+        // Vary the best-contrast choice when selecting a theme, but never
+        // accept a washed-out accent.
         if rng.unit() >= 0.5 {
             let index = (rng.range(Palette::VIVID_COUNT) + 3) % Palette::VIVID_COUNT;
             let candidate = palette.vivid(index);
@@ -50,18 +50,11 @@ impl ScenePalette {
     }
 
     /// Re-samples the same three slots from the live palette so a theme
-    /// crossfade reaches the presentation. If the theme changes to a light or
-    /// dark background that washes out the chosen accent, the best-contrast
-    /// vivid slot replaces it.
+    /// crossfade reaches the presentation without replacing the chosen accent.
     pub fn refresh(&mut self, palette: &Palette, colors: ThemeColors) {
         self.ink = palette.neutral[0];
         let background = colors.background;
-        let current = palette.vivid(self.accent_index);
-        if contrast_ratio(current, background) < 2.5 {
-            (self.accent_index, self.accent) = best_accent(palette, background);
-        } else {
-            self.accent = current;
-        }
+        self.accent = palette.vivid(self.accent_index);
         self.muted = mix(self.ink, background, 0.45);
     }
 }

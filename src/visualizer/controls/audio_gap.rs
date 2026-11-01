@@ -9,7 +9,7 @@ use crate::visualizer::{DebugHistory, ModelRotation, DEBUG_HISTORY_SECONDS};
 
 use super::{Canvas, ControlState, Controls, LabelStyle};
 
-const FLOOR_DB: f32 = -80.0;
+const FLOOR_DB: f32 = -48.0;
 
 struct Plot {
     rect: Rect,
@@ -238,7 +238,7 @@ pub(super) fn draw(
         peak,
     );
     armed_intervals(canvas, &plot, history, opacity);
-    for db in [FLOOR_DB, -40.0, plot.ceiling] {
+    for db in [FLOOR_DB, -24.0, plot.ceiling] {
         let y = plot.y(db);
         line(
             canvas,
@@ -375,9 +375,9 @@ mod tests {
         assert_eq!(plot.x(10.0), bounds.center().x);
         assert_eq!(plot.x(12.0), bounds.x1);
         assert_eq!(plot.x(11.0), 320.0, "a short history does not stretch");
-        assert_eq!(plot.y(-80.0), bounds.y1);
+        assert_eq!(plot.y(-48.0), bounds.y1);
         assert_eq!(plot.y(0.0), bounds.y0);
-        assert_eq!(plot.y(-20.0), 50.0);
+        assert_eq!(plot.y(-24.0), bounds.center().y);
         let boosted = Plot::new(bounds, 12.0, 7.0);
         assert_eq!(boosted.ceiling, 12.0);
         assert_eq!(boosted.y(12.0), bounds.y0);

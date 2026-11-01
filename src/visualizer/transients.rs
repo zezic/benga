@@ -419,6 +419,218 @@ mod tests {
         assert_eq!(saved.sharpness_cutoff, Some(0.8));
     }
 
+    fn cloud_observation(
+        bin: usize,
+        time: f64,
+        settings: &PercussionChannelSettings,
+    ) -> Observation {
+        Observation {
+            time,
+            sharpness: (time as f32 * 0.1).fract(),
+            energy: energy_bin_edge(bin, settings.feature_ms * 0.001) * 1.1,
+            ..Observation::default()
+        }
+    }
+
+    #[test]
+    fn cloud_ignores_sparse_tails_and_uses_top_percent_of_log_height() {
+        let mut settings = PercussionChannelSettings {
+            cloud_enabled: true,
+            cloud_min_count: 3,
+            cloud_top_percent: 25.0,
+            ..PercussionChannelSettings::default()
+        };
+        let mut population = Population::default();
+        assert!(population.snapshot(0.0, &settings).cloud_boundary.is_none());
+        let fallback = population.snapshot(0.0, &settings).thresholds;
+        assert!(!fallback.cloud_active);
+        assert_eq!(
+            fallback.trigger_energy_floor,
+            settings.feature_ms * 0.001 * 10.0_f32.powf(settings.min_attack_db / 10.0)
+        );
+        for (index, bin) in [2, 9, 9, 9, 17, 17, 17, 22, 22].into_iter().enumerate() {
+            population.insert(cloud_observation(bin, index as f64, &settings), &settings);
+        }
+        let saved = population.snapshot(9.0, &settings);
+        let cloud = saved.cloud_boundary.unwrap();
+        assert_eq!(
+            cloud.energy_min,
+            energy_bin_edge(9, settings.feature_ms * 0.001)
+        );
+        assert_eq!(
+            cloud.energy_max,
+            energy_bin_edge(18, settings.feature_ms * 0.001)
+        );
+        let floor_db =
+            10.0 * (saved.thresholds.trigger_energy_floor / (settings.feature_ms * 0.001)).log10();
+        assert!((floor_db - -27.5).abs() < 1e-5);
+        assert!(saved.thresholds.cloud_active);
+        let mut last_floor = f32::INFINITY;
+        for percent in 0..=100 {
+            settings.cloud_top_percent = percent as f32;
+            let floor = population
+                .snapshot(9.0, &settings)
+                .thresholds
+                .trigger_energy_floor;
+            if percent == 0 {
+                assert_eq!(floor, cloud.energy_max);
+            } else if percent == 100 {
+                assert_eq!(floor, cloud.energy_min);
+            }
+            assert!(
+                floor <= last_floor,
+                "larger top areas must be more permissive"
+            );
+            last_floor = floor;
+        }
+        assert!((last_floor - cloud.energy_min).abs() < 1e-12);
+        population.insert(cloud_observation(22, 9.0, &settings), &settings);
+        let expanded = population.snapshot(9.0, &settings).cloud_boundary.unwrap();
+        assert_eq!(
+            expanded.energy_max,
+            energy_bin_edge(23, settings.feature_ms * 0.001)
+        );
+        assert_eq!(
+            saved.cloud_boundary,
+            Some(cloud),
+            "historical bounds stay frozen"
+        );
+        settings.cloud_enabled = false;
+        let disabled = population.snapshot(9.0, &settings);
+        assert_eq!(
+            disabled.cloud_boundary,
+            Some(expanded),
+            "tracking continues with fixed floor"
+        );
+        assert!(!disabled.thresholds.cloud_active);
+        assert_eq!(
+            disabled.thresholds.trigger_energy_floor,
+            fallback.trigger_energy_floor
+        );
+    }
+
+    #[test]
+    fn cloud_contracts_on_time_and_capacity_eviction_and_handles_one_bucket() {
+        let settings = PercussionChannelSettings {
+            cloud_enabled: true,
+            cloud_min_count: 3,
+            memory_seconds: 1.0,
+            ..PercussionChannelSettings::default()
+        };
+        let mut population = Population::default();
+        for (index, bin) in [17, 17, 17, 9, 9, 9].into_iter().enumerate() {
+            population.insert(
+                cloud_observation(bin, index as f64 * 0.1, &settings),
+                &settings,
+            );
+        }
+        let full = population.snapshot(0.5, &settings).cloud_boundary.unwrap();
+        population.expire(1.15, &settings);
+        let shrunk = population.snapshot(1.15, &settings).cloud_boundary.unwrap();
+        assert_eq!(shrunk.energy_min, full.energy_min);
+        assert_eq!(
+            shrunk.energy_max,
+            energy_bin_edge(10, settings.feature_ms * 0.001)
+        );
+        assert!(shrunk.energy_max < full.energy_max);
+        assert!(
+            shrunk.energy_max > shrunk.energy_min,
+            "one bucket retains its full height"
+        );
+        population.expire(2.0, &settings);
+        assert!(population.snapshot(2.0, &settings).cloud_boundary.is_none());
+        for index in 0..REFERENCE_CAPACITY {
+            let bin = if index < 3 { 17 } else { 9 };
+            population.insert(
+                cloud_observation(bin, index as f64 * 0.001, &settings),
+                &settings,
+            );
+        }
+        assert_eq!(
+            population.snapshot(9.0, &settings).cloud_boundary,
+            Some(full)
+        );
+        population.insert(cloud_observation(9, 9.0, &settings), &settings);
+        assert_eq!(
+            population.snapshot(9.0, &settings).cloud_boundary,
+            Some(shrunk)
+        );
+    }
+
+    #[test]
+    fn cloud_floor_uses_preinsertion_reference_and_has_no_upper_energy_limit() {
+        let mut settings = permissive_filter_settings().channels[0];
+        settings.cloud_enabled = true;
+        settings.cloud_min_count = 3;
+        settings.cloud_top_percent = 25.0;
+        // The fixed floor rejects the test candidate before a cloud exists.
+        settings.min_attack_db = -10.0;
+        let candidate = feature(0.002, 0.1, 0.001);
+        let mut channel = Channel::default();
+        for _ in 0..2 {
+            let rejected = channel.finish(candidate, 0, 1.0, &settings);
+            assert!(rejected.admitted && !rejected.eligible);
+            assert!(!rejected.reference.thresholds.cloud_active);
+        }
+        let third = channel.finish(candidate, 0, 1.1, &settings);
+        assert_eq!(third.reason, DecisionReason::AttackLevel);
+        assert!(
+            third.reference.cloud_boundary.is_none(),
+            "candidate cannot supply its own Nth support"
+        );
+        assert!(
+            channel
+                .population
+                .snapshot(1.1, &settings)
+                .thresholds
+                .cloud_active
+        );
+        let loud = channel.finish(feature(0.002, 0.2, 0.001), 0, 1.2, &settings);
+        assert!(loud.energy > loud.reference.cloud_boundary.unwrap().energy_max);
+        assert!(
+            loud.eligible,
+            "above-cloud energy has no upper rejection boundary"
+        );
+        let quiet = channel.finish(feature(0.002, 0.02, 0.001), 0, 1.3, &settings);
+        assert!(quiet.admitted && !quiet.eligible);
+        assert_eq!(quiet.reason, DecisionReason::AttackLevel);
+        settings.filters.attack_level = false;
+        assert!(
+            channel
+                .finish(feature(0.002, 0.02, 0.001), 0, 1.4, &settings)
+                .eligible
+        );
+    }
+
+    #[test]
+    fn changing_cloud_controls_preserves_observations_epoch_and_saved_decisions() {
+        let mut detector = SharpOnsets::default();
+        let mut settings = permissive_filter_settings();
+        feed_envelope(&mut detector, &settings, 0.0, 0.2, |at| {
+            if (0.05..0.07).contains(&at) {
+                0.2
+            } else {
+                0.0
+            }
+        });
+        let saved = detector.decisions().clone();
+        let epoch = detector.channels[0].epoch;
+        settings.channels[0].cloud_enabled = true;
+        settings.channels[0].cloud_min_count = 1;
+        settings.channels[0].cloud_top_percent = 75.0;
+        feed_envelope(&mut detector, &settings, 0.2, 0.05, |_| 0.0);
+        let live = detector.reference(0);
+        assert_eq!(live.count, 1);
+        assert!(live.thresholds.cloud_active);
+        assert_eq!(detector.channels[0].epoch, epoch);
+        assert_eq!(detector.decisions(), &saved);
+        settings.channels[0].cloud_min_count = 2;
+        feed_envelope(&mut detector, &settings, 0.25, 0.05, |_| 0.0);
+        assert_eq!(detector.reference(0).count, 1);
+        assert!(!detector.reference(0).thresholds.cloud_active);
+        assert_eq!(detector.channels[0].epoch, epoch);
+    }
+
     #[test]
     fn output_rejected_candidates_appear_as_recent_learned_pairs_after_decision() {
         let settings = PercussionChannelSettings {
@@ -1113,6 +1325,10 @@ fn energy_bin(value: f32, horizon: f32) -> usize {
     let db = 10.0 * (value / horizon).max(1e-12).log10();
     (((db + 80.0) / 80.0 * HISTOGRAM_BINS as f32).clamp(0.0, (HISTOGRAM_BINS - 1) as f32)) as usize
 }
+fn energy_bin_edge(index: usize, horizon: f32) -> f32 {
+    let db = -80.0 + 80.0 * index as f32 / HISTOGRAM_BINS as f32;
+    horizon * 10.0_f32.powf(db / 10.0)
+}
 fn remove_value(values: &mut Vec<f32>, value: f32) {
     let index = values
         .binary_search_by(|v| v.total_cmp(&value))
@@ -1135,6 +1351,18 @@ fn rank(values: &[f32], value: f32) -> RankInterval {
     }
 }
 impl Population {
+    fn cloud_boundary(&self, settings: &PercussionChannelSettings) -> Option<CloudBoundary> {
+        // Marginal energy counts pool all sharpness columns. Sparse tails stay
+        // visible and learn normally, but cannot stretch either cloud edge.
+        let supported = |count: &u32| *count as usize >= settings.cloud_min_count;
+        let first = self.energy_histogram.iter().position(supported)?;
+        let last = self.energy_histogram.iter().rposition(supported)?;
+        let horizon = settings.feature_ms * 0.001;
+        Some(CloudBoundary {
+            energy_min: energy_bin_edge(first, horizon),
+            energy_max: energy_bin_edge(last + 1, horizon),
+        })
+    }
     fn remove_oldest(&mut self, horizon: f32) {
         if let Some(old) = self.paired.pop_front() {
             remove_value(&mut self.sharpness, old.sharpness);
@@ -1189,6 +1417,22 @@ impl Population {
             .flatten();
         let feature_seconds = settings.feature_ms * 0.001;
         let min_attack_energy = feature_seconds * 10.0_f32.powf(settings.min_attack_db / 10.0);
+        let cloud_boundary = self.cloud_boundary(settings);
+        let cloud_active = settings.cloud_enabled && cloud_boundary.is_some();
+        let trigger_energy_floor = if let Some(cloud) = cloud_boundary.filter(|_| cloud_active) {
+            // Interpolate in the map's logarithmic energy coordinate: top 25%
+            // accepts the upper quarter of its height, plus everything louder.
+            if settings.cloud_top_percent == 0.0 {
+                cloud.energy_max
+            } else if settings.cloud_top_percent == 100.0 {
+                cloud.energy_min
+            } else {
+                let fraction = 1.0 - settings.cloud_top_percent / 100.0;
+                cloud.energy_min * (cloud.energy_max / cloud.energy_min).powf(fraction)
+            }
+        } else {
+            min_attack_energy
+        };
         let sharpness_effective_bound = [
             settings
                 .filters
@@ -1200,7 +1444,10 @@ impl Population {
         .flatten()
         .reduce(f32::max);
         let energy_effective_bound = [
-            settings.filters.attack_level.then_some(min_attack_energy),
+            settings
+                .filters
+                .attack_level
+                .then_some(trigger_energy_floor),
             settings
                 .filters
                 .input_energy
@@ -1214,6 +1461,10 @@ impl Population {
             filters: settings.filters,
             min_sharpness: settings.min_sharpness,
             min_attack_db: settings.min_attack_db,
+            trigger_energy_floor,
+            cloud_active,
+            cloud_top_percent: settings.cloud_top_percent,
+            cloud_min_count: settings.cloud_min_count,
             admission_energy: settings.admission_energy,
             admission_growth: settings.admission_growth,
             admission_prominence: settings.admission_prominence,
@@ -1259,6 +1510,7 @@ impl Population {
             sharpness_histogram: self.sharpness_histogram,
             energy_histogram: self.energy_histogram,
             joint_histogram: self.joint_histogram,
+            cloud_boundary,
             recent_points,
             recent_count,
             thresholds,
@@ -1648,7 +1900,13 @@ impl Channel {
         {
             reason = DecisionReason::OutputProminence;
             false
-        } else if settings.filters.attack_level && attack_db < settings.min_attack_db {
+        } else if settings.filters.attack_level
+            && if reference.thresholds.cloud_active {
+                candidate.energy < reference.thresholds.trigger_energy_floor
+            } else {
+                attack_db < settings.min_attack_db
+            }
+        {
             reason = DecisionReason::AttackLevel;
             false
         } else if settings.filters.mix_rms && mix_rms_db < settings.output_rms_db {

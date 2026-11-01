@@ -17,7 +17,7 @@ use crate::{
         DebugSelection, DebugSnapshot, Dependency, Detector, DropKernel, EnvelopeTarget, ExtraRef,
         Input, InputShape, Mix, MixPoint, Mixer, OnsetFluxStatus, Palette, Parameter,
         PatternKernel, PatternLayer, Property, StyleInput, TemporalPattern, TreeTarget,
-        TriggerStatus, Visualizer, BAND_COUNT, DROP_GAP_THRESHOLD_MAX, DROP_GAP_THRESHOLD_MIN,
+        TriggerStatus, Visualizer, BAND_COUNT,
     },
 };
 
@@ -3891,7 +3891,7 @@ impl GraphSource {
             Self::Band(_) | Self::BandRole(_) | Self::Power | Self::Bass => (0.0, 1.0),
             Self::BandOnset(_) => (0.0, 1.0),
             Self::Onset(_) | Self::DropEligible => (0.0, 1.0),
-            Self::DropLevel => (DROP_GAP_THRESHOLD_MIN, DROP_GAP_THRESHOLD_MAX),
+            Self::DropLevel => (-48.0, 0.0),
             Self::DropEnergyLoss => (-1.0, 12.0),
             Self::DetectorOnsetFlux(Detector::Drop) => (-80.0, 0.0),
             Self::DetectorOnsetFlux(_) | Self::DetectorAttackProperties(_) => (0.0, 1.5),
@@ -5868,7 +5868,7 @@ mod tests {
         }
         assert_eq!(
             GraphSource::DropLevel.range(None),
-            (DROP_GAP_THRESHOLD_MIN, DROP_GAP_THRESHOLD_MAX)
+            (-48.0, 0.0)
         );
         assert_eq!(GraphSource::DropEligible.range(None), (0.0, 1.0));
         assert_eq!(

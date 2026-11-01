@@ -87,6 +87,16 @@ without triggering; older additions outside the reference are dimmed. The marker
 count defaults to 32 and can be changed with the heatmap’s −/+ buttons. Cutoff
 lines and the shaded feature-pass region explain the sharpness/energy checks;
 output prominence, mix RMS and spacing still apply separately.
+The dashed **cloud** bracket tracks the lowest and highest energy buckets with
+enough learned attacks, ignoring sparse tails. Enable the checkbox beside
+**Cloud top area** to let that range set the trigger energy floor. The percentage
+selects the top part of its height on the dB map (25% means the upper quarter);
+attacks above the cloud also pass that floor. **Cloud bucket support** sets the
+minimum count per energy bucket (default 3), pooled across sharpness. Bounds
+grow and shrink as observations enter or leave the reference. Dynamic mode is
+off initially, preserving existing settings, and uses the fixed **Trigger energy
+floor** until a supported bucket exists. Other enabled filters, including the
+energy percentile, can still impose a stricter requirement.
 Click its timeline to switch kick, snare, and hat. Previous/next event buttons
 inspect saved decisions with their original reference; **Live** shows the newer
 population. Ranks describe recent regional onsets, not confidence in instrument

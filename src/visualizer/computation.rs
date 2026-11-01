@@ -1028,6 +1028,7 @@ impl Parameter {
             Self::Percussion(_, setting) => match setting {
                 PercussionSetting::FftSize => 256.0,
                 PercussionSetting::MinReference
+                | PercussionSetting::CloudMinCount
                 | PercussionSetting::RecentMarkers
                 | PercussionSetting::LowHz
                 | PercussionSetting::HighHz
@@ -1108,6 +1109,7 @@ impl Parameter {
                     format!("{value:.2}")
                 }
                 PercussionSetting::MinReference
+                | PercussionSetting::CloudMinCount
                 | PercussionSetting::RecentMarkers
                 | PercussionSetting::FftSize
                 | PercussionSetting::LowHz
@@ -1179,6 +1181,7 @@ impl Parameter {
                 _,
                 PercussionSetting::AdmissionEnergy
                 | PercussionSetting::AdmissionGrowth
+                | PercussionSetting::CloudMinCount
                 | PercussionSetting::LowHz
                 | PercussionSetting::HighHz
                 | PercussionSetting::TaperHz,
@@ -1206,6 +1209,9 @@ impl Parameter {
         let (minimum, maximum) = self.range();
         let fraction = fraction.clamp(0.0, 1.0);
         match self {
+            Self::Percussion(_, PercussionSetting::CloudMinCount) => {
+                (minimum * (maximum / minimum).powf(fraction)).round()
+            }
             Self::Percussion(
                 _,
                 PercussionSetting::AdmissionEnergy
@@ -2561,6 +2567,17 @@ static ENTRANCE: ComputeNode = branch(
 mod tests {
     use super::*;
     use strum::{EnumCount, VariantArray};
+
+    #[test]
+    fn cloud_support_control_gives_small_counts_useful_slider_travel() {
+        let parameter = Parameter::Percussion(Detector::Kick, PercussionSetting::CloudMinCount);
+        assert_eq!(parameter.step(), 1.0);
+        assert_eq!(parameter.format(3.0), "3 events");
+        assert!(parameter.fraction(3.0) > 0.1);
+        for count in [1.0, 2.0, 3.0, 10.0, 64.0, 1024.0, 8192.0] {
+            assert_eq!(parameter.from_fraction(parameter.fraction(count)), count);
+        }
+    }
 
     #[test]
     fn live_onset_controls_expose_only_effective_ranges() {

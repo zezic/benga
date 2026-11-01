@@ -139,8 +139,8 @@ it is exposed for tuning rather than hidden as classifier confidence. A loud
 ## Paired references and decisions
 
 Each instrument has one deque of paired `(sharpness, attack_energy)` records,
-two sorted feature arrays, and two display histograms. The exact arrays make
-decisions; 24 plotting bins cannot create decision ties. All three collections
+two sorted feature arrays, and two histograms. The exact arrays make percentile
+decisions; the optional cloud floor uses supported energy bins. All collections
 are allocated once. At each feature completion, records first expire using the
 actual completion audio time. The candidate is checked for admission, queried
 against the preceding reference, decided, then inserted exactly once if
@@ -191,6 +191,30 @@ is sharpness (0–1), vertical position is early attack level
 admitted observations still retained by the reference. Its row/column sums match
 the two marginal histograms. Exact sorted feature values continue to decide the
 percentile cutoffs; the heatmap introduces no joint-density or confidence gate.
+
+The cloud tracker pools each energy row across all sharpness columns. A row can
+extend the cloud only while it holds at least **Cloud bucket support** retained
+observations (default 3). The lowest supported row's lower edge and highest
+supported row's upper edge define its energy span. Both edges are recomputed
+from current counts, including time and capacity evictions. Sparse observations
+still learn and remain visible. A single supported row has its full bin height;
+no supported rows means the cloud is unavailable.
+
+The optional **Cloud top area** mode replaces the fixed trigger energy floor
+with `max_db - (max_db - min_db) * percent / 100`, converted back to attack energy
+using the feature horizon. This is a percentage of the displayed logarithmic
+height, not a percentile of observations. Zero requires the top edge and 100%
+admits the full cloud height. Equality and energies above the top edge pass this
+floor; there is no upper energy gate. Other enabled criteria, including the
+independent energy percentile, continue to apply. Mode defaults to off; until
+any row meets its support count, it falls back to the saved fixed trigger floor.
+Support is independent of percentile warmup. The existing trigger energy filter
+switch disables either floor. Changes to mode, percentage or support preserve
+learned history and pending attacks.
+
+The map brackets the supported cloud and draws the resolved floor. Each saved
+decision captures its own pre-insertion bounds and resolved floor, so inspecting
+history preserves the original reference even as live data changes.
 
 Learning and output use different thresholds:
 

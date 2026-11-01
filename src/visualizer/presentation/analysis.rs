@@ -328,7 +328,7 @@ impl AnalysisOverlay {
                 UiFace::Light,
             ),
             ("loss_zero", "0", 9.0, UiFace::Light),
-            ("level_bottom", "-80", 9.0, UiFace::Light),
+            ("level_bottom", "-48", 9.0, UiFace::Light),
             (
                 "gap_controls",
                 "GAP / DROP CONTROLS",
@@ -870,6 +870,13 @@ impl AnalysisOverlay {
             8.3,
             UiFace::Light,
         );
+        self.cache(
+            fonts,
+            "heatmap_cloud",
+            heatmap_cloud_caption(&reference),
+            8.8,
+            UiFace::SemiBold,
+        );
         let resolution = self
             .bins
             .windows(2)
@@ -972,6 +979,7 @@ impl AnalysisOverlay {
         if let Some(panel) = self.onset_controls {
             let detector = self.selected_detector();
             let mut top = 28.0;
+            let row_height = percussion_row_height();
             for (key, title, settings) in percussion_control_groups() {
                 self.cache(fonts, key, title.to_owned(), 10.0, UiFace::SemiBold);
                 top += 18.0;
@@ -979,7 +987,7 @@ impl AnalysisOverlay {
                     self.update_slider(
                         index,
                         top,
-                        24.0,
+                        row_height,
                         panel,
                         Parameter::Percussion(detector, setting),
                         fonts,
@@ -987,7 +995,7 @@ impl AnalysisOverlay {
                         stage,
                     );
                     index += 1;
-                    top += 24.0;
+                    top += row_height;
                 }
             }
         }
@@ -1618,7 +1626,7 @@ impl AnalysisOverlay {
                     &compact,
                     palette.ink.with_alpha(0.85),
                 );
-                top += 18.0 + settings.len() as f64 * 24.0;
+                top += 18.0 + settings.len() as f64 * percussion_row_height();
             }
         }
         for slider in &self.sliders {
@@ -1856,7 +1864,7 @@ impl AnalysisOverlay {
             .heatmap_bounds()
             .is_some_and(|rect| rect.contains(point))
         {
-            return Some("Density counts current learned pairs. Filled markers are original triggers; hollow markers were learned only. Faint expired markers no longer affect thresholds. The shaded area passes only sharpness and energy filters. Other enabled input and trigger filters can still reject an attack.");
+            return Some("Density counts current learned pairs. The cloud bracket spans energy buckets with enough observations; sparse outliers cannot stretch it. Dynamic cloud floor keeps the chosen top percentage of its height, including louder attacks above the bracket. Filled markers are original triggers; hollow markers were learned only. Faint expired markers no longer affect thresholds. Other enabled filters still apply.");
         }
         None
     }
@@ -2479,7 +2487,7 @@ impl AnalysisOverlay {
         let levels = subrect(panel, stage, 60.0, 465.0, 0.0, 32.0);
         grid(scene, levels, stage, palette);
         let ceiling = self.level_ceiling();
-        let level_fraction = |db: f32| (db + 80.0) / (ceiling + 80.0);
+        let level_fraction = |db: f32| (db + 48.0) / (ceiling + 48.0);
         self.trace(
             scene,
             levels,
@@ -3040,6 +3048,41 @@ impl AnalysisOverlay {
                 stage.px(0.5),
             );
         }
+        if let Some(cloud) = heatmap_cloud_bounds(plot, &reference) {
+            let color = palette.ink.with_alpha(0.6);
+            for y in [cloud.y0, cloud.y1] {
+                segmented_rule(
+                    scene,
+                    (cloud.x0, y).into(),
+                    (cloud.x1, y).into(),
+                    color,
+                    stage.px(1.0),
+                    stage.px(8.0),
+                    stage.px(4.0),
+                );
+                for x in [cloud.x0, cloud.x1] {
+                    rule(
+                        scene,
+                        (x, (y - stage.px(4.0)).max(plot.y0)).into(),
+                        (x, (y + stage.px(4.0)).min(plot.y1)).into(),
+                        color,
+                        stage.px(1.2),
+                    );
+                }
+            }
+            if let Some(label) = self.labels.get("heatmap_cloud") {
+                let y = (cloud.y0 - stage.px(4.0)).max(plot.y0 + stage.px(11.0));
+                let scale = ((plot.width() - stage.px(8.0))
+                    / (label.text.width() * stage.unit).max(1.0))
+                .min(1.0);
+                label.text.draw_left(
+                    scene,
+                    Affine::translate((plot.x0 + stage.px(4.0), y))
+                        * Affine::scale(stage.unit * scale),
+                    palette.ink.with_alpha(0.9),
+                );
+            }
+        }
         // Admission has an energy floor but no sharpness-percentile condition.
         if thresholds.filters.input_energy {
             let admission = heatmap_position(plot, &reference, 0.0, thresholds.admission_energy);
@@ -3057,7 +3100,7 @@ impl AnalysisOverlay {
             plot,
             &reference,
             thresholds.min_sharpness,
-            thresholds.feature_seconds * 10.0_f32.powf(thresholds.min_attack_db / 10.0),
+            thresholds.trigger_energy_floor,
         );
         if thresholds.filters.min_sharpness {
             segmented_rule(
@@ -3511,6 +3554,8 @@ fn percussion_control_groups() -> [(&'static str, &'static str, &'static [Percus
                 P::MinSharpness,
                 P::MinOutputProminence,
                 P::MinAttackDb,
+                P::CloudTopPercent,
+                P::CloudMinCount,
                 P::OutputRmsDb,
                 P::SharpnessPercentile,
                 P::EnergyPercentile,
@@ -3518,6 +3563,49 @@ fn percussion_control_groups() -> [(&'static str, &'static str, &'static [Percus
             ],
         ),
     ]
+}
+
+fn percussion_row_height() -> f64 {
+    let groups = percussion_control_groups();
+    let rows = groups
+        .iter()
+        .map(|(_, _, settings)| settings.len())
+        .sum::<usize>();
+    ((CONTROL_PANEL_HEIGHT - 28.0 - groups.len() as f64 * 18.0 - 10.0) / rows as f64).min(24.0)
+}
+
+fn heatmap_cloud_bounds(plot: Rect, reference: &PercussionReferenceSnapshot) -> Option<Rect> {
+    let cloud = reference.cloud_boundary?;
+    let top = heatmap_position(plot, reference, 0.0, cloud.energy_max).y;
+    let bottom = heatmap_position(plot, reference, 0.0, cloud.energy_min).y;
+    Some(Rect::new(plot.x0, top, plot.x1, bottom))
+}
+
+fn heatmap_cloud_caption(reference: &PercussionReferenceSnapshot) -> String {
+    reference
+        .cloud_boundary
+        .map_or_else(String::new, |boundary| {
+            let thresholds = reference.thresholds;
+            let duration = thresholds.feature_seconds;
+            let floor = if !thresholds.filters.attack_level {
+                "FLOOR OFF".to_owned()
+            } else {
+                format!(
+                    "{} FLOOR {:.1} dBFS",
+                    if thresholds.cloud_active {
+                        "DYNAMIC"
+                    } else {
+                        "FIXED"
+                    },
+                    attack_db(thresholds.trigger_energy_floor, duration),
+                )
+            };
+            format!(
+                "CLOUD {:.0}..{:.0} dBFS · {floor}",
+                attack_db(boundary.energy_min, duration),
+                attack_db(boundary.energy_max, duration),
+            )
+        })
 }
 
 fn heatmap_position(
@@ -3942,7 +4030,7 @@ mod tests {
                 .iter()
                 .filter(|slider| matches!(slider.parameter, Parameter::Percussion(..)))
                 .count(),
-            24
+            26
         );
         let panel = overlay.onset_controls.unwrap().rect;
         assert!(overlay
@@ -3983,16 +4071,17 @@ mod tests {
                     .map(|(toggle, _, rect)| (slider.parameter, toggle, rect.center()))
             })
             .collect::<Vec<_>>();
-        assert_eq!(switches.len(), 11);
+        assert_eq!(switches.len(), 12);
         for (scalar, toggle, center) in switches {
             let value = visualizer.parameter_value(scalar);
+            let original_enabled = visualizer.parameter_value(toggle);
             let Some(AnalysisInteraction::Parameter(parameter, enabled)) =
                 overlay.pointer_down(center)
             else {
                 panic!("checkbox must be interactive");
             };
             assert_eq!(parameter, toggle);
-            assert_eq!(enabled, 0.0);
+            assert_eq!(enabled, 1.0 - original_enabled);
             visualizer.set_parameter(parameter, enabled);
             overlay.update(
                 0.0,
@@ -4020,7 +4109,7 @@ mod tests {
             else {
                 panic!("disabled checkbox must still work");
             };
-            assert_eq!(enabled, 1.0);
+            assert_eq!(enabled, original_enabled);
             visualizer.set_parameter(parameter, enabled);
             overlay.update(
                 0.0,
@@ -4089,6 +4178,38 @@ mod tests {
             halfway
         );
         assert_eq!(heatmap_position(plot, &saved, 0.5, 0.044 * 1e-4), halfway);
+    }
+
+    #[test]
+    fn heatmap_cloud_bracket_and_floor_keep_the_saved_energy_extent() {
+        let plot = Rect::new(10.0, 20.0, 410.0, 220.0);
+        let mut reference = PercussionReferenceSnapshot::default();
+        reference.thresholds.feature_seconds = 0.044;
+        assert!(heatmap_cloud_bounds(plot, &reference).is_none());
+        reference.cloud_boundary = Some(crate::visualizer::CloudBoundary {
+            energy_min: 0.044 * 1e-6,
+            energy_max: 0.044 * 1e-2,
+        });
+        reference.thresholds.trigger_energy_floor = 0.044 * 1e-3;
+        reference.thresholds.cloud_active = true;
+        let saved = reference;
+        let cloud = heatmap_cloud_bounds(plot, &saved).unwrap();
+        assert!((cloud.y0 - 70.0).abs() < 1e-5);
+        assert!((cloud.y1 - 170.0).abs() < 1e-5);
+        let floor = heatmap_position(plot, &saved, 0.0, saved.thresholds.trigger_energy_floor);
+        assert!((floor.y - (cloud.y0 + cloud.height() * 0.25)).abs() < 1e-5);
+        assert!(heatmap_cloud_caption(&saved).contains("DYNAMIC FLOOR -30.0 dBFS"));
+        reference.thresholds.filters.attack_level = false;
+        let disabled = heatmap_cloud_caption(&reference);
+        assert!(disabled.contains("FLOOR OFF"));
+        assert!(!disabled.contains("DYNAMIC"));
+        reference.thresholds.filters.attack_level = true;
+        reference.thresholds.cloud_active = false;
+        assert!(heatmap_cloud_caption(&reference).contains("FIXED FLOOR -30.0 dBFS"));
+        reference.cloud_boundary = None;
+        reference.thresholds.feature_seconds = 0.024;
+        assert!(heatmap_cloud_bounds(plot, &reference).is_none());
+        assert_eq!(heatmap_cloud_bounds(plot, &saved), Some(cloud));
     }
 
     #[test]

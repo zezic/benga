@@ -753,8 +753,12 @@ pub enum Parameter {
     Arrangement(ArrangementSetting),
     /// Maximum spring relaxation as spectral aggression falls.
     SpectralRelaxation,
+    /// Attenuation of the spectral contribution before LF envelope boost.
+    SpectrumAmount,
     /// Amplification of the spectrally weighted LF envelope addition.
     LfBoostGain,
+    /// Release time constant of the combined aggression envelope, in seconds.
+    AggressionFalloff,
     AggressionLfStart,
     AggressionLfEnd,
     AggressionMfStart,
@@ -836,7 +840,9 @@ impl Parameter {
             Self::KickHighHz => "KICK HIGH Hz",
             Self::Arrangement(setting) => setting.label(),
             Self::SpectralRelaxation => "RELAXATION",
+            Self::SpectrumAmount => "SPECTRUM AMOUNT",
             Self::LfBoostGain => "LF BOOST GAIN",
+            Self::AggressionFalloff => "AGGRESSION FALLOFF",
             Self::AggressionLfStart => "LF START",
             Self::AggressionLfEnd => "LF END",
             Self::AggressionMfStart => "MF START",
@@ -944,8 +950,9 @@ impl Parameter {
                 super::detection::KICK_FREQUENCY_MAX_HZ,
             ),
             Self::Arrangement(setting) => setting.range(),
-            Self::SpectralRelaxation => (0.0, 1.0),
+            Self::SpectralRelaxation | Self::SpectrumAmount => (0.0, 1.0),
             Self::LfBoostGain => (0.0, 4.0),
+            Self::AggressionFalloff => (0.0, 10.0),
             Self::AggressionLfStart
             | Self::AggressionLfEnd
             | Self::AggressionMfStart
@@ -1070,8 +1077,9 @@ impl Parameter {
             Self::OnsetBinGain(_, _) => 0.01,
             Self::KickLowHz | Self::KickHighHz => 1.0,
             Self::Arrangement(setting) => setting.step(),
-            Self::SpectralRelaxation => 0.01,
+            Self::SpectralRelaxation | Self::SpectrumAmount => 0.01,
             Self::LfBoostGain => 0.05,
+            Self::AggressionFalloff => 0.1,
             Self::AggressionLfStart
             | Self::AggressionLfEnd
             | Self::AggressionMfStart
@@ -1157,8 +1165,9 @@ impl Parameter {
             Self::OnsetBinGain(_, _) => format!("{:.0}%", value * 100.0),
             Self::KickLowHz | Self::KickHighHz => format!("{value:.0} Hz"),
             Self::Arrangement(setting) => setting.format(value),
-            Self::SpectralRelaxation => format!("{:.0}%", value * 100.0),
+            Self::SpectralRelaxation | Self::SpectrumAmount => format!("{:.0}%", value * 100.0),
             Self::LfBoostGain => format!("{value:.2}x"),
+            Self::AggressionFalloff => format!("{value:.1}s"),
             Self::AggressionLfStart
             | Self::AggressionLfEnd
             | Self::AggressionMfStart

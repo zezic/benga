@@ -8,7 +8,7 @@ use std::ops::Range;
 pub const AGGRESSION_LF_BANDS: [usize; 4] = [0, 1, 2, 3];
 /// Four mid-frequency regions with centers at approximately 600 Hz–2 kHz.
 pub const AGGRESSION_MF_BANDS: [usize; 4] = [7, 8, 9, 10];
-/// Slow release bridges brief LF gaps while attack remains instantaneous.
+/// Default falloff time constant, bridging brief LF gaps with instant attack.
 pub(crate) const AGGRESSION_RELEASE_SECONDS: f32 = 3.0;
 pub(crate) const LF_BOOST_GAIN_MAX: f32 = 4.0;
 pub(crate) const AGGRESSION_STIFFNESS_MAX: f32 = 2.0;
@@ -99,6 +99,13 @@ impl SpectralAggression {
         }
     }
 
+    /// Attenuate base aggression before adding LF evidence. Measured band levels
+    /// stay unchanged so they continue to determine the LF boost's weighting.
+    pub fn with_spectrum_amount(mut self, amount: f32) -> Self {
+        self.value *= amount.clamp(0.0, 1.0);
+        self
+    }
+
     /// Add unthresholded LF evidence, attenuated by the spectral LF/MF balance.
     /// A difference of -1 or below mutes the boost; 0 or above applies it fully.
     pub fn with_lf_boost(self, lf_boost: f32) -> Self {
@@ -137,13 +144,23 @@ impl AggressionEnvelope {
             .unwrap_or_else(|| SpectralAggression::default().value)
     }
 
-    /// The first measurement initializes directly; later rises snap to target.
-    /// Falling measurements approach their target with an exponential release,
-    /// preserving values above one and below zero throughout processing.
+    #[cfg(test)]
     pub(crate) fn observe(&mut self, target: f32, dt: f32) -> f32 {
+        self.observe_with_release(target, dt, AGGRESSION_RELEASE_SECONDS)
+    }
+
+    /// The first measurement initializes directly; later rises snap to target.
+    /// Falling measurements use the chosen exponential time constant, with zero
+    /// selecting immediate release. Values remain unclamped throughout.
+    pub(crate) fn observe_with_release(
+        &mut self,
+        target: f32,
+        dt: f32,
+        release_seconds: f32,
+    ) -> f32 {
         let value = match self.value {
-            Some(current) if target < current => {
-                target + (current - target) * (-dt.max(0.0) / AGGRESSION_RELEASE_SECONDS).exp()
+            Some(current) if target < current && release_seconds > 0.0 => {
+                target + (current - target) * (-dt.max(0.0) / release_seconds).exp()
             }
             _ => target,
         };
@@ -329,6 +346,45 @@ mod tests {
     }
 
     #[test]
+    fn spectrum_amount_scales_only_the_base_before_the_lf_addition() {
+        let shape = SpectralAggression::from_shape(
+            &shape_with_levels(-0.25, 0.25),
+            AggressionBands::default(),
+        );
+        for amount in [0.0, 0.5, 1.0] {
+            let mixed = shape
+                .with_spectrum_amount(amount)
+                .with_lf_boost_gain(0.5, 2.0);
+            assert_eq!(mixed.lf_boost, 0.5);
+            assert_eq!(mixed.value, shape.value * amount + 0.5);
+            assert_eq!(mixed.lf_level, shape.lf_level);
+            assert_eq!(mixed.mf_level, shape.mf_level);
+        }
+    }
+
+    #[test]
+    fn spectrum_amount_preserves_the_lf_gate_and_signed_base_values() {
+        let warm = SpectralAggression::from_shape(
+            &shape_with_levels(-1.0, 1.0),
+            AggressionBands::default(),
+        );
+        assert_eq!(warm.with_spectrum_amount(0.5).value, -0.25);
+        let envelope_only = warm
+            .with_spectrum_amount(0.0)
+            .with_lf_boost_gain(1.0, LF_BOOST_GAIN_MAX);
+        assert_eq!(envelope_only.value, 0.0);
+        assert_eq!(envelope_only.lf_boost, 0.0);
+        assert_eq!(envelope_only.lf_level, warm.lf_level);
+        assert_eq!(envelope_only.mf_level, warm.mf_level);
+        let aggressive = SpectralAggression::from_shape(
+            &shape_with_levels(1.0, -1.0),
+            AggressionBands::default(),
+        );
+        assert_eq!(aggressive.with_spectrum_amount(1.0).value, 1.5);
+        assert_eq!(aggressive.with_spectrum_amount(0.75).value, 1.125);
+    }
+
+    #[test]
     fn lf_boost_adds_to_shape_aggression_without_changing_band_levels() {
         let shape = SpectralAggression::from_shape(
             &shape_with_levels(-0.25, 0.25),
@@ -431,6 +487,52 @@ mod tests {
         single_hop.observe(0.15, 3.0);
         for _ in 0..576 {
             many_hops.observe(0.15, 3.0 / 576.0);
+        }
+        assert!((single_hop.value() - many_hops.value()).abs() < 1e-5);
+    }
+
+    #[test]
+    fn adjustable_falloff_changes_decay_speed_while_rise_stays_immediate() {
+        let mut fast = AggressionEnvelope::default();
+        let mut slow = AggressionEnvelope::default();
+        fast.observe_with_release(2.0, 0.0, 0.25);
+        slow.observe_with_release(2.0, 0.0, 5.0);
+        let fast_value = fast.observe_with_release(-0.5, 0.5, 0.25);
+        let slow_value = slow.observe_with_release(-0.5, 0.5, 5.0);
+        assert!(fast_value < 0.0 && slow_value > 1.0);
+        assert!((fast_value - (-0.5 + 2.5 * (-2.0_f32).exp())).abs() < 1e-6);
+        assert!((slow_value - (-0.5 + 2.5 * (-0.1_f32).exp())).abs() < 1e-6);
+        assert_eq!(fast.observe_with_release(3.0, 0.005, 0.25), 3.0);
+        assert_eq!(slow.observe_with_release(3.0, 0.005, 5.0), 3.0);
+    }
+
+    #[test]
+    fn zero_falloff_releases_immediately_even_without_elapsed_time() {
+        let mut envelope = AggressionEnvelope::default();
+        envelope.observe_with_release(3.0, 0.0, 10.0);
+        assert_eq!(envelope.observe_with_release(-0.5, 0.0, 0.0), -0.5);
+        assert_eq!(envelope.observe_with_release(2.0, 0.005, 0.0), 2.0);
+    }
+
+    #[test]
+    fn changing_falloff_preserves_the_held_value_and_uses_the_new_time_constant() {
+        let mut envelope = AggressionEnvelope::default();
+        envelope.observe_with_release(2.0, 0.0, 10.0);
+        let held = envelope.observe_with_release(-1.0, 0.1, 10.0);
+        assert_eq!(envelope.observe_with_release(-1.0, 0.0, 0.5), held);
+        let released = envelope.observe_with_release(-1.0, 0.5, 0.5);
+        assert!((released - (-1.0 + (held + 1.0) * (-1.0_f32).exp())).abs() < 1e-6);
+    }
+
+    #[test]
+    fn nondefault_falloff_is_independent_of_audio_hop_partitioning() {
+        let mut single_hop = AggressionEnvelope::default();
+        let mut many_hops = AggressionEnvelope::default();
+        single_hop.observe_with_release(2.0, 0.0, 1.75);
+        many_hops.observe_with_release(2.0, 0.0, 1.75);
+        single_hop.observe_with_release(-0.5, 1.5, 1.75);
+        for _ in 0..300 {
+            many_hops.observe_with_release(-0.5, 0.005, 1.75);
         }
         assert!((single_hop.value() - many_hops.value()).abs() < 1e-5);
     }

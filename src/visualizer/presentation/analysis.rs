@@ -267,12 +267,6 @@ impl AnalysisOverlay {
             ("aggression_mf_handle", "MF", 8.0, UiFace::SemiBold),
             ("aggression_warm", "0% WARM", 9.0, UiFace::Light),
             ("aggression_baseline", "100% / 1x", 9.0, UiFace::Light),
-            (
-                "relaxation_hint",
-                "MORE RELAXATION = SOFTER SPRINGS ON WARM SOUND",
-                9.0,
-                UiFace::Light,
-            ),
             ("raw_axis_low", "20 Hz", 10.5, UiFace::Light),
             (
                 "movement",
@@ -1083,7 +1077,7 @@ impl AnalysisOverlay {
             let middle = panel.rect.center().x;
             for (parameter, rect) in [
                 (
-                    Parameter::SpectralRelaxation,
+                    Parameter::SpectrumAmount,
                     Rect::new(panel.rect.x0, panel.rect.y0, middle, panel.rect.y1),
                 ),
                 (
@@ -1095,6 +1089,28 @@ impl AnalysisOverlay {
                     index,
                     228.0,
                     30.0,
+                    Panel { rect, ..panel },
+                    parameter,
+                    fonts,
+                    visualizer,
+                    stage,
+                );
+                index += 1;
+            }
+            for (parameter, rect) in [
+                (
+                    Parameter::SpectralRelaxation,
+                    Rect::new(panel.rect.x0, panel.rect.y0, middle, panel.rect.y1),
+                ),
+                (
+                    Parameter::AggressionFalloff,
+                    Rect::new(middle, panel.rect.y0, panel.rect.x1, panel.rect.y1),
+                ),
+            ] {
+                self.update_slider(
+                    index,
+                    258.0,
+                    24.0,
                     Panel { rect, ..panel },
                     parameter,
                     fonts,
@@ -3042,15 +3058,6 @@ impl AnalysisOverlay {
             stage,
             palette.muted,
         );
-        self.label(
-            scene,
-            "relaxation_hint",
-            panel,
-            0.0,
-            272.0,
-            stage,
-            palette.muted,
-        );
     }
 
     fn bass_bounds(&self) -> (f32, f32) {
@@ -3977,7 +3984,9 @@ fn grid(scene: &mut Scene, plot: Rect, stage: &Stage, palette: ScenePalette) {
 fn slider_caption(parameter: Parameter) -> &'static str {
     match parameter {
         Parameter::SpectralRelaxation => "Warm sound relaxation",
+        Parameter::SpectrumAmount => "Spectrum amount",
         Parameter::LfBoostGain => "LF boost gain",
+        Parameter::AggressionFalloff => "Aggression falloff",
         Parameter::Arrangement(setting) => setting.label(),
         Parameter::Percussion(_, setting) => match setting {
             PercussionSetting::TaperHz => "Fade out by",
@@ -4705,7 +4714,9 @@ mod tests {
             }
             for (parameter, maximum) in [
                 (Parameter::SpectralRelaxation, 1.0),
+                (Parameter::SpectrumAmount, 1.0),
                 (Parameter::LfBoostGain, 4.0),
+                (Parameter::AggressionFalloff, 10.0),
             ] {
                 let slider = overlay
                     .sliders
@@ -4729,6 +4740,29 @@ mod tests {
                 visualizer.set_parameter(parameter, maximum);
                 assert_eq!(visualizer.parameter_value(parameter), maximum);
                 overlay.pointer_up();
+            }
+            let controls: Vec<_> = overlay
+                .sliders
+                .iter()
+                .filter(|slider| {
+                    matches!(
+                        slider.parameter,
+                        Parameter::SpectralRelaxation
+                            | Parameter::SpectrumAmount
+                            | Parameter::LfBoostGain
+                            | Parameter::AggressionFalloff
+                    )
+                })
+                .collect();
+            assert_eq!(controls.len(), 4);
+            for (index, control) in controls.iter().enumerate() {
+                for other in &controls[index + 1..] {
+                    assert_eq!(
+                        control.rect.intersect(other.rect).area(),
+                        0.0,
+                        "aggression controls must not overlap at {size:?}"
+                    );
+                }
             }
         }
     }

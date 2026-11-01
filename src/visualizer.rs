@@ -28,8 +28,8 @@ mod transients;
 mod transition;
 mod ui;
 
-use aggression::AggressionEnvelope;
 pub use aggression::{AggressionBands, SpectralAggression};
+use aggression::{AggressionEnvelope, AGGRESSION_RELEASE_SECONDS};
 use computation::{validate_value, MixContext};
 pub use computation::{
     BandComponent, BandRouting, ComputeNode, Contribution, ContributionSpec, Curve, Detector,
@@ -686,6 +686,10 @@ pub struct VisualizerTuning {
     pub kick_decay: f32,
     /// Maximum stiffness reduction as the spectral balance becomes warm.
     pub spectral_relaxation: f32,
+    /// Exponential aggression release time constant in seconds; zero is instant.
+    pub aggression_falloff: f32,
+    /// Attenuation of spectral aggression before adding LF envelope evidence.
+    pub spectrum_amount: f32,
     /// Amplification of the spectrum-weighted fast-over-slow LF contribution.
     pub lf_boost_gain: f32,
     pub aggression_bands: AggressionBands,
@@ -703,6 +707,8 @@ impl Default for VisualizerTuning {
             inputs: InputTunings::default(),
             kick_decay: 0.0,
             spectral_relaxation: 0.75,
+            aggression_falloff: AGGRESSION_RELEASE_SECONDS,
+            spectrum_amount: 1.0,
             lf_boost_gain: 1.0,
             aggression_bands: AggressionBands::default(),
             gains: Gains::default(),
@@ -721,6 +727,8 @@ struct VisualizerTuningRaw {
     inputs: InputTunings,
     kick_decay: f32,
     spectral_relaxation: f32,
+    aggression_falloff: f32,
+    spectrum_amount: f32,
     lf_boost_gain: f32,
     aggression_bands: AggressionBands,
     gains: Gains,
@@ -738,6 +746,8 @@ impl Default for VisualizerTuningRaw {
             inputs: tuning.inputs,
             kick_decay: tuning.kick_decay,
             spectral_relaxation: tuning.spectral_relaxation,
+            aggression_falloff: tuning.aggression_falloff,
+            spectrum_amount: tuning.spectrum_amount,
             lf_boost_gain: tuning.lf_boost_gain,
             aggression_bands: tuning.aggression_bands,
             gains: tuning.gains,
@@ -758,6 +768,8 @@ impl TryFrom<VisualizerTuningRaw> for VisualizerTuning {
             inputs: raw.inputs,
             kick_decay: raw.kick_decay,
             spectral_relaxation: raw.spectral_relaxation,
+            aggression_falloff: raw.aggression_falloff,
+            spectrum_amount: raw.spectrum_amount,
             lf_boost_gain: raw.lf_boost_gain,
             aggression_bands: raw.aggression_bands,
             gains: raw.gains,
@@ -782,6 +794,16 @@ impl VisualizerTuning {
             "spectral relaxation",
         )?;
         self.aggression_bands.validate()?;
+        validate_value(
+            self.aggression_falloff,
+            Parameter::AggressionFalloff.range(),
+            "aggression falloff",
+        )?;
+        validate_value(
+            self.spectrum_amount,
+            Parameter::SpectrumAmount.range(),
+            "spectrum amount",
+        )?;
         validate_value(
             self.lf_boost_gain,
             Parameter::LfBoostGain.range(),
@@ -1549,6 +1571,8 @@ pub struct Visualizer {
     kick: f32,
     kick_decay: f32,
     spectral_relaxation: f32,
+    aggression_falloff: f32,
+    spectrum_amount: f32,
     lf_boost_gain: f32,
     aggression_bands: AggressionBands,
     aggression_envelope: AggressionEnvelope,
@@ -1623,6 +1647,8 @@ impl Visualizer {
             kick: 0.0,
             kick_decay: tuning.kick_decay,
             spectral_relaxation: tuning.spectral_relaxation,
+            aggression_falloff: tuning.aggression_falloff,
+            spectrum_amount: tuning.spectrum_amount,
             lf_boost_gain: tuning.lf_boost_gain,
             aggression_bands: tuning.aggression_bands,
             aggression_envelope: AggressionEnvelope::default(),
@@ -1819,6 +1845,8 @@ impl Visualizer {
         self.treble_shape = inputs.treble.shape;
         self.kick_decay = tuning.kick_decay;
         self.spectral_relaxation = tuning.spectral_relaxation;
+        self.aggression_falloff = tuning.aggression_falloff;
+        self.spectrum_amount = tuning.spectrum_amount;
         self.lf_boost_gain = tuning.lf_boost_gain;
         self.aggression_bands = tuning.aggression_bands;
         self.gains = tuning.gains;
@@ -1860,6 +1888,8 @@ impl Visualizer {
             },
             kick_decay: self.kick_decay,
             spectral_relaxation: self.spectral_relaxation,
+            aggression_falloff: self.aggression_falloff,
+            spectrum_amount: self.spectrum_amount,
             lf_boost_gain: self.lf_boost_gain,
             aggression_bands: self.aggression_bands,
             gains: self.gains,
@@ -1985,7 +2015,11 @@ impl Visualizer {
             .onsets
             .observe(&spectrum, &band_abdr, &band_abl, &self.detectors, hop);
         let aggression = self.instantaneous_aggression();
-        self.aggression_envelope.observe(aggression.value, hop);
+        self.aggression_envelope.observe_with_release(
+            aggression.value,
+            hop,
+            self.aggression_falloff,
+        );
         self.emit_detector_events(events);
     }
 
@@ -2723,6 +2757,8 @@ impl Visualizer {
             Parameter::KickHighHz => self.detectors.kick_high_hz,
             Parameter::Arrangement(setting) => self.detectors.arrangement.value(setting),
             Parameter::SpectralRelaxation => self.spectral_relaxation,
+            Parameter::AggressionFalloff => self.aggression_falloff,
+            Parameter::SpectrumAmount => self.spectrum_amount,
             Parameter::LfBoostGain => self.lf_boost_gain,
             Parameter::AggressionLfStart => self.aggression_bands.lf_start as f32,
             Parameter::AggressionLfEnd => self.aggression_bands.lf_end as f32,
@@ -2847,6 +2883,8 @@ impl Visualizer {
             }
             Parameter::Arrangement(setting) => self.detectors.arrangement.set(setting, value),
             Parameter::SpectralRelaxation => self.spectral_relaxation = value,
+            Parameter::AggressionFalloff => self.aggression_falloff = value,
+            Parameter::SpectrumAmount => self.spectrum_amount = value,
             Parameter::LfBoostGain => self.lf_boost_gain = value,
             Parameter::AggressionLfStart => {
                 self.aggression_bands.lf_start =
@@ -3346,6 +3384,7 @@ impl Visualizer {
     fn instantaneous_aggression(&self) -> SpectralAggression {
         let status = self.onsets.status().drop_status;
         SpectralAggression::from_shape(&status.shape, self.aggression_bands)
+            .with_spectrum_amount(self.spectrum_amount)
             .with_lf_boost_gain(status.bass_hit, self.lf_boost_gain)
     }
 
@@ -5409,6 +5448,66 @@ mod tests {
     }
 
     #[test]
+    fn aggression_falloff_controls_audio_clock_decay_without_resetting_the_peak() {
+        let mut held = Vec::new();
+        for falloff in [0.0, 0.5, 8.0] {
+            let mut visualizer = Visualizer::new();
+            visualizer.set_parameter(Parameter::AggressionFalloff, falloff);
+            visualizer.set_parameter(Parameter::LfBoostGain, 0.0);
+            let spectrum = |low, mid| Spectrum {
+                linear_bands: std::array::from_fn(|band| match band {
+                    0..=3 => low,
+                    7..=10 => mid,
+                    _ => 0.1,
+                }),
+                rms: 0.2,
+                ..Spectrum::default()
+            };
+            visualizer.observe(spectrum(1.0, 0.01), 0.01);
+            let peak = visualizer.spectral_aggression().value;
+            visualizer.observe(spectrum(0.01, 1.0), 0.25);
+            let target = visualizer.instantaneous_aggression().value;
+            let expected = if falloff == 0.0 {
+                target
+            } else {
+                target + (peak - target) * (-0.25 / falloff).exp()
+            };
+            let actual = visualizer.spectral_aggression().value;
+            assert!((actual - expected).abs() < 1e-6);
+            assert_eq!(visualizer.tuning().aggression_falloff, falloff);
+            visualizer.set_parameter(Parameter::AggressionFalloff, 3.0);
+            assert_eq!(visualizer.spectral_aggression().value, actual);
+            held.push(actual);
+        }
+        assert!(held[0] < held[1] && held[1] < held[2]);
+    }
+
+    #[test]
+    fn spectrum_amount_balances_aggression_before_adding_the_lf_envelope() {
+        for amount in [0.0, 0.5, 1.0] {
+            let mut visualizer = Visualizer::new();
+            visualizer.set_parameter(Parameter::SpectrumAmount, amount);
+            visualizer.set_parameter(Parameter::LfBoostGain, 2.0);
+            let spectrum = |level| Spectrum {
+                linear_bands: [level; BAND_COUNT],
+                rms: 0.2,
+                ..Spectrum::default()
+            };
+            visualizer.observe(spectrum(0.1), 0.01);
+            assert_eq!(visualizer.spectral_aggression().value, 0.5 * amount);
+            visualizer.observe(spectrum(0.13), 0.01);
+            let aggression = visualizer.spectral_aggression();
+            let boost = visualizer.onsets.status().drop_status.bass_hit * 2.0;
+            assert!(boost > 0.0);
+            assert_eq!(aggression.lf_boost, boost);
+            assert_eq!(aggression.value, 0.5 * amount + boost);
+            assert_eq!(aggression.lf_level, 0.0);
+            assert_eq!(aggression.mf_level, 0.0);
+            assert_eq!(visualizer.tuning().spectrum_amount, amount);
+        }
+    }
+
+    #[test]
     fn lf_boost_gain_amplifies_only_the_envelope_addition() {
         for gain in [0.0, 1.0, 4.0] {
             let mut visualizer = Visualizer::new();
@@ -5525,6 +5624,20 @@ mod tests {
         visualizer.set_parameter(Parameter::LfBoostGain, -1.0);
         assert_eq!(visualizer.lf_boost_gain, 0.0);
         visualizer.set_parameter(Parameter::LfBoostGain, 2.5);
+        visualizer.set_parameter(Parameter::SpectrumAmount, -1.0);
+        assert_eq!(visualizer.spectrum_amount, 0.0);
+        visualizer.set_parameter(Parameter::SpectrumAmount, 2.0);
+        assert_eq!(visualizer.spectrum_amount, 1.0);
+        visualizer.set_parameter(Parameter::SpectrumAmount, f32::NAN);
+        assert_eq!(visualizer.spectrum_amount, 1.0);
+        visualizer.set_parameter(Parameter::SpectrumAmount, 0.4);
+        visualizer.set_parameter(Parameter::AggressionFalloff, -1.0);
+        assert_eq!(visualizer.aggression_falloff, 0.0);
+        visualizer.set_parameter(Parameter::AggressionFalloff, 20.0);
+        assert_eq!(visualizer.aggression_falloff, 10.0);
+        visualizer.set_parameter(Parameter::AggressionFalloff, f32::NAN);
+        assert_eq!(visualizer.aggression_falloff, 10.0);
+        visualizer.set_parameter(Parameter::AggressionFalloff, 6.5);
         let tuning = visualizer.tuning();
         let mut restored = Visualizer::new();
         restored.set_tuning(tuning.clone());

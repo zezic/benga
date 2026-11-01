@@ -46,19 +46,23 @@ a joint sharpness–energy heatmap and the envelope used for each decision.
 The spectral shape graph also shows **Aggression**: LF is the maximum of the
 selected low bands, MF is the median of the selected mid bands, and
 `aggression = (LF - MF + 1) / 2` on the graph's −1 to +1 scale.
+**Spectrum amount** scales this contribution from 0–100% before LF boost is
+added; it defaults to 100%. At 0%, only the LF envelope boost contributes.
 Whenever the fast LF envelope exceeds the slow one, their positive separation
 provides a boost: `max((fast - slow) / fast, 0)`, using the LF measurement floor.
 Its strength is multiplied by `clamp(LF - MF + 1, 0, 1)`: no boost when LF is
 1.0 or more below MF, half strength at −0.5, and full strength when LF equals
 or exceeds MF. This compares the actual envelopes, independently of the
 **Bass attack** offset or gap/drop gates. **LF boost** shows the weighted
-addition. **LF boost gain** beside
-**Warm sound relaxation** scales that addition from 0× (off) through 1×
-(the default) to 4×. Spectral attenuation still applies at every gain, and
-the gain saves automatically. The displayed value and spring
-stiffness follow an envelope with immediate rise and a slow exponential fall
-(3-second time constant), so brief bass gaps preserve aggression. It advances
-with the audio and resets when capture restarts. Shape aggression, amplified
+addition. **LF boost gain** scales that addition from 0× (off) through 1×
+(the default) to 4×. Spectral attenuation still uses the measured LF/MF levels,
+independently of Spectrum amount. Both controls save automatically. The
+displayed value and spring stiffness follow an envelope with immediate rise
+and an adjustable exponential fall. **Aggression falloff** sets its time
+constant from 0–10 seconds, defaulting to 3 seconds. Larger values bridge
+longer bass gaps; zero makes falling aggression immediate. Live adjustments
+preserve the current envelope value. It advances with the audio and resets
+when capture restarts. Shape aggression, amplified
 LF boost and the envelope stay unclamped; the percentage readouts can exceed
 100% or fall below 0%. Above 100%, spring stiffness follows aggression directly:
 150% means 1.5× and 200% means 2×, with a ceiling of 2× the configured stiffness.

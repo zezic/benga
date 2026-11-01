@@ -244,6 +244,8 @@ mod tests {
         config.edit().tuning.kick_decay = 4.5;
         config.edit().tuning.spectral_relaxation = 0.9;
         config.edit().tuning.lf_boost_gain = 2.5;
+        config.edit().tuning.spectrum_amount = 0.4;
+        config.edit().tuning.aggression_falloff = 6.5;
         config.edit().tuning.aggression_bands = crate::visualizer::AggressionBands {
             lf_start: 1,
             lf_end: 5,
@@ -273,6 +275,8 @@ mod tests {
         assert_eq!(config.tuning.kick_decay, 4.5);
         assert_eq!(config.tuning.spectral_relaxation, 0.75);
         assert_eq!(config.tuning.lf_boost_gain, 1.0);
+        assert_eq!(config.tuning.spectrum_amount, 1.0);
+        assert_eq!(config.tuning.aggression_falloff, 3.0);
         assert_eq!(
             config.tuning.aggression_bands,
             crate::visualizer::AggressionBands::default()
@@ -341,6 +345,12 @@ mod tests {
             "(tuning: (lf_boost_gain: -0.1))",
             "(tuning: (lf_boost_gain: 4.1))",
             "(tuning: (lf_boost_gain: NaN))",
+            "(tuning: (spectrum_amount: -0.1))",
+            "(tuning: (spectrum_amount: 1.1))",
+            "(tuning: (spectrum_amount: NaN))",
+            "(tuning: (aggression_falloff: -0.1))",
+            "(tuning: (aggression_falloff: 10.1))",
+            "(tuning: (aggression_falloff: NaN))",
             "(tuning: (aggression_bands: (lf_start: 4, lf_end: 4)))",
             "(tuning: (aggression_bands: (mf_start: 10, mf_end: 7)))",
             "(tuning: (aggression_bands: (mf_end: 17)))",

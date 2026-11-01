@@ -454,10 +454,10 @@ impl AnalysisOverlay {
             fonts,
             "aggression_value",
             if self.no_audio {
-                "AGGRESSION -- · LF BOOST -- · STIFFNESS --".to_owned()
+                "AGGRESSION -- · LF BOOST -- · CAMERA K --".to_owned()
             } else {
                 format!(
-                    "AGGRESSION {:.0}% · LF BOOST +{:.0}% · STIFFNESS {:.0}%",
+                    "AGGRESSION {:.0}% · LF BOOST +{:.0}% · CAMERA K {:.0}%",
                     self.aggression.value * 100.0,
                     self.aggression.lf_boost * 100.0,
                     self.stiffness_scale * 100.0,

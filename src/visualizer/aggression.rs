@@ -63,7 +63,8 @@ pub struct SpectralAggression {
     pub lf_boost: f32,
     /// Unclamped aggression, including LF boost when added. The base shape maps
     /// a low-minus-mid difference of -1 to warm (0), and +1 to aggressive (1).
-    /// Spring control maps values above one directly to at most 2x stiffness.
+    /// POI camera control maps values above one to at most 2x stiffness;
+    /// the model flip caps this scale at one.
     pub value: f32,
 }
 
@@ -122,6 +123,7 @@ impl SpectralAggression {
 
     /// Relax warm sound, then apply aggression above one directly as overdrive.
     /// The positive floor and 2x ceiling bound spring control, not the envelope.
+    /// The model flip uses only the relaxation, capping the result at one.
     pub fn stiffness_scale(self, relaxation: f32) -> f32 {
         let scale = if self.value > 1.0 {
             self.value

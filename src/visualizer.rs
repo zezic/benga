@@ -21,6 +21,8 @@ mod percussion_stereo_tests;
 mod presentation;
 mod renderer;
 mod showcase;
+#[cfg(test)]
+mod snare_guard_tests;
 mod spectrum;
 mod splash;
 mod transients;
@@ -86,6 +88,8 @@ pub use renderer::Renderer;
 pub use ui::{Ui, UiFrame, View};
 
 const MAX_PENDING_ACTIONS: usize = 64;
+/// Give a possible drop priority over nearby snare model actions in an armed gap.
+const SNARE_DROP_GRACE_SECONDS: f64 = 0.050;
 const MAX_HISTORY: usize = 17;
 const HISTORY_SECONDS: f64 = 2.0;
 /// Inspector traces are sampled independently of the panel refresh rate.
@@ -1529,6 +1533,8 @@ pub struct Visualizer {
     detectors: DetectorSettings,
     onsets: OnsetBank,
     pending_actions: VecDeque<Action>,
+    /// Audio-clock deadlines captured while the gap is armed, one per snare.
+    deferred_snares: VecDeque<f64>,
     rng: Rng,
     scene: Scene,
     showcase: Showcase,
@@ -1605,6 +1611,7 @@ impl Visualizer {
             detectors: DetectorSettings::default(),
             onsets: OnsetBank::new(),
             pending_actions: VecDeque::with_capacity(MAX_PENDING_ACTIONS),
+            deferred_snares: VecDeque::with_capacity(MAX_PENDING_ACTIONS),
             rng,
             scene: Scene::new(),
             showcase,
@@ -1914,6 +1921,7 @@ impl Visualizer {
         self.audio_gain = None;
         self.reset_analysis();
         self.pending_actions.clear();
+        self.deferred_snares.clear();
         self.scene.reset_temporal();
         self.frames.clear();
         self.kick = 0.0;
@@ -1965,6 +1973,10 @@ impl Visualizer {
             if let Some(spectrum) = self.analyzer.push_stereo(input) {
                 self.observe(spectrum, hop);
             }
+            // Both analyzers must get this sample before a snare expires, so
+            // a drop at its deadline can still consume it. Release per sample
+            // so a later drop in the same callback cannot cancel an overdue snare.
+            self.release_deferred_snares();
         }
     }
 
@@ -2005,11 +2017,25 @@ impl Visualizer {
         }
         if let Some(power) = events.drop {
             self.drop_hits = self.drop_hits.saturating_add(1);
+            self.deferred_snares.clear();
             self.push_action(Action::Drop(power));
         }
         if events.snare.is_some() {
             self.snare_hits = self.snare_hits.saturating_add(1);
-            self.push_action(Action::Snare);
+            if events.drop.is_none() {
+                // Read the gap at detection: a subsequent drop clears the
+                // detector's flag before the next display update.
+                if self.onsets.status().drop.armed {
+                    if self.deferred_snares.len() == MAX_PENDING_ACTIONS {
+                        self.deferred_snares.pop_front();
+                    }
+                    self.deferred_snares.push_back(
+                        self.percussion_analyzer.audio_time() + SNARE_DROP_GRACE_SECONDS,
+                    );
+                } else {
+                    self.push_action(Action::Snare);
+                }
+            }
         }
         if events.hat.is_some() {
             self.hat_hits = self.hat_hits.saturating_add(1);
@@ -2018,6 +2044,17 @@ impl Visualizer {
         if let Some(power) = events.kick {
             self.kick_hits = self.kick_hits.saturating_add(1);
             self.push_action(Action::Kick(power));
+        }
+    }
+
+    fn release_deferred_snares(&mut self) {
+        while self
+            .deferred_snares
+            .front()
+            .is_some_and(|&deadline| self.percussion_analyzer.audio_time() >= deadline)
+        {
+            self.deferred_snares.pop_front();
+            self.push_action(Action::Snare);
         }
     }
 
@@ -3386,7 +3423,7 @@ impl Visualizer {
         }
     }
 
-    /// Runtime multiplier shared by the model and camera springs.
+    /// Runtime multiplier for camera springs; the model flip caps it at one.
     pub fn spectral_stiffness_scale(&self) -> f32 {
         self.spectral_aggression()
             .stiffness_scale(self.spectral_relaxation)
@@ -3426,10 +3463,12 @@ impl Visualizer {
             self.kick = 0.0;
         }
         self.flip.set_target(self.flip_target());
+        // Aggression can soften a flip, but must not overdrive its spring.
+        let flip_stiffness_scale = stiffness_scale.min(1.0);
         self.flip.advance(
             dt,
-            self.detectors.flip_stiffness * stiffness_scale,
-            self.detectors.flip_damping * stiffness_scale.max(1.0).sqrt(),
+            self.detectors.flip_stiffness * flip_stiffness_scale,
+            self.detectors.flip_damping,
         );
         // A selector entry and a held POI entry both wait for the flip to
         // finish upright before they can start. Every mesh-focus effect is
@@ -5415,37 +5454,58 @@ mod tests {
     }
 
     #[test]
-    fn aggression_overdrive_doubles_flip_stiffness_with_damping_compensation() {
-        let mut visualizer = loaded_aggression_test_visualizer();
-        visualizer.set_detector_settings(DetectorSettings {
-            snare_flip_every: 1,
-            ..DetectorSettings::default()
-        });
-        visualizer.aggression_envelope.observe(3.0, 0.0);
-        visualizer.handle_action(Action::Snare, 0.0, 0.75);
-        let tuning = visualizer.tuning();
-        let settings = visualizer.detectors.clone();
-        let mut expected = visualizer.flip;
-        expected.set_target(visualizer.flip_target());
-        expected.advance(
-            0.05,
-            settings.flip_stiffness * 2.0,
-            settings.flip_damping * 2.0_f32.sqrt(),
-        );
-        visualizer.update(
-            AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(0.05)),
-            ShutterFrames::try_from(1.0).unwrap(),
-            0.05,
-            &Palette::from_theme(ThemeId::default()),
-            (1280.0, 720.0),
-            1.0,
-            1.0,
-        );
-        assert_eq!(visualizer.spectral_stiffness_scale(), 2.0);
-        assert_eq!(visualizer.flip.value(), expected.value());
-        assert_eq!(visualizer.flip.velocity(), expected.velocity());
-        assert_eq!(visualizer.tuning(), tuning);
-        assert_eq!(visualizer.detectors, settings);
+    fn aggression_relaxes_flip_stiffness_but_caps_it_at_nominal() {
+        for (relaxation, aggression, expected_scale) in [
+            (1.0, 0.0, 0.05),
+            (0.75, 0.0, 0.25),
+            (1.0, 0.5, 0.5),
+            (0.0, 0.0, 1.0),
+            (0.75, 1.0, 1.0),
+            (0.75, 1.5, 1.0),
+            (0.75, 2.0, 1.0),
+            (0.75, 3.0, 1.0),
+            (0.0, 3.0, 1.0),
+        ] {
+            let mut visualizer = loaded_aggression_test_visualizer();
+            visualizer.set_detector_settings(DetectorSettings {
+                snare_flip_every: 1,
+                ..DetectorSettings::default()
+            });
+            visualizer.set_parameter(Parameter::SpectralRelaxation, relaxation);
+            visualizer.aggression_envelope.observe(aggression, 0.0);
+            visualizer.handle_action(Action::Snare, 0.0, 0.75);
+            let tuning = visualizer.tuning();
+            let settings = visualizer.detectors.clone();
+            let mut expected = visualizer.flip;
+            expected.set_target(visualizer.flip_target());
+            let mut start = AudioTime::ZERO;
+            for _ in 0..6 {
+                expected.advance(
+                    0.05,
+                    settings.flip_stiffness * expected_scale,
+                    settings.flip_damping,
+                );
+                let end = start.shifted(0.05);
+                visualizer.update(
+                    AudioInterval::new(start, end),
+                    ShutterFrames::try_from(1.0).unwrap(),
+                    0.05,
+                    &Palette::from_theme(ThemeId::default()),
+                    (1280.0, 720.0),
+                    1.0,
+                    1.0,
+                );
+                assert_eq!(
+                    visualizer.flip.value(),
+                    expected.value(),
+                    "flip response at relaxation {relaxation}, aggression {aggression}"
+                );
+                assert_eq!(visualizer.flip.velocity(), expected.velocity());
+                start = end;
+            }
+            assert_eq!(visualizer.tuning(), tuning);
+            assert_eq!(visualizer.detectors, settings);
+        }
     }
 
     #[test]
@@ -7044,6 +7104,96 @@ mod tests {
             (visualizer.flip_target() - TAU).abs() < 1e-5,
             "a drop entry must also finish the flip upright"
         );
+    }
+
+    #[test]
+    fn gap_armed_near_coincident_snare_and_drop_preserve_forward_flip_targets() {
+        for initial_half_turns in [0, 1] {
+            for snare_first in [true, false] {
+                let mut visualizer = visualizer_before_a_poi_successor()
+                    .expect("the bundled models must include a POI successor");
+                visualizer.spectral_relaxation = 0.0;
+                let gap_hold = visualizer.detectors.arrangement.gap_rms_hold + 0.01;
+                visualizer.observe(Spectrum::default(), gap_hold);
+                assert!(visualizer.onsets.status().drop.armed);
+                visualizer.flip_half_turns = initial_half_turns;
+                visualizer.flip.reset(visualizer.flip_target());
+                visualizer.flip.impulse(0.75);
+                let revision = visualizer.model_revision();
+                let snare = detection::DetectorEvents {
+                    snare: Some(1.0),
+                    ..detection::DetectorEvents::default()
+                };
+                let drop = detection::DetectorEvents {
+                    drop: Some(1.0),
+                    ..detection::DetectorEvents::default()
+                };
+                // The percussion and arrangement analyzers emit separately;
+                // both actions can reach the same display update in either order.
+                for events in if snare_first {
+                    [snare, drop]
+                } else {
+                    [drop, snare]
+                } {
+                    visualizer.emit_detector_events(events);
+                }
+
+                // The armed gap lets a drop consume a nearby snare before it
+                // adds a flip. Only an already inverted start needs a forward
+                // half turn to finish upright, regardless of emission order.
+                let expected_target = if initial_half_turns == 0 { 0.0 } else { TAU };
+                let dt = 1.0 / 60.0;
+                let mut expected = visualizer.flip;
+                expected.set_target(expected_target);
+                expected.advance(
+                    dt,
+                    visualizer.detectors.flip_stiffness,
+                    visualizer.detectors.flip_damping,
+                );
+                visualizer.update(
+                    AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(f64::from(dt))),
+                    ShutterFrames::try_from(1.0).unwrap(),
+                    dt,
+                    &Palette::from_theme(ThemeId::default()),
+                    (1280.0, 440.0),
+                    1.0,
+                    1.0,
+                );
+
+                assert_ne!(visualizer.model_revision(), revision);
+                assert_eq!(visualizer.showcase.mode(), showcase::ShowcaseMode::Poi);
+                assert_eq!(visualizer.flip_target(), expected_target);
+                assert_eq!(visualizer.flip.value(), expected.value());
+                assert_eq!(visualizer.flip.velocity(), expected.velocity());
+            }
+        }
+    }
+
+    #[test]
+    fn manual_model_switch_preserves_an_in_flight_flip() {
+        let mut visualizer = loaded_visualizer();
+        assert!(visualizer.model_position().expect("models loaded").1 > 1);
+        visualizer.handle_action(Action::Snare, 0.0, 0.75);
+        visualizer.flip.set_target(visualizer.flip_target());
+        visualizer.flip.advance(
+            1.0 / 60.0,
+            visualizer.detectors.flip_stiffness,
+            visualizer.detectors.flip_damping,
+        );
+        let target = visualizer.flip_target();
+        let value = visualizer.flip.value();
+        let velocity = visualizer.flip.velocity();
+        assert!(value > 0.0 && velocity > 0.0);
+        let pitch = visualizer.scene.current.as_ref().unwrap().pose.pitch;
+        let revision = visualizer.model_revision();
+
+        visualizer.navigate_model(Adjustment::Increase);
+
+        assert_ne!(visualizer.model_revision(), revision);
+        assert_eq!(visualizer.flip_target(), target);
+        assert_eq!(visualizer.flip.value(), value);
+        assert_eq!(visualizer.flip.velocity(), velocity);
+        assert_eq!(visualizer.scene.current.as_ref().unwrap().pose.pitch, pitch);
     }
 
     #[test]

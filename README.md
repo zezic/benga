@@ -95,8 +95,9 @@ longer bass gaps; zero makes falling aggression immediate. Live adjustments
 preserve the current envelope value. It advances with the audio and resets
 when capture restarts. Shape aggression, amplified
 LF boost and the envelope stay unclamped; the percentage readouts can exceed
-100% or fall below 0%. Above 100%, spring stiffness follows aggression directly:
-150% means 1.5× and 200% means 2×, with a ceiling of 2× the configured stiffness.
+100% or fall below 0%. Above 100%, POI camera spring stiffness follows aggression
+directly: 150% means 1.5× and 200% means 2×, with a ceiling of 2× the configured stiffness.
+The 180° model flip spring stays at its configured stiffness above 100%.
 The meter spans 0–200%, marking the 100% baseline and the 2× ceiling.
 Larger raw peaks hold this ceiling for longer as the envelope falls.
 Drag the colored LF/MF boundary handles to select whole bands. LF defaults to
@@ -105,11 +106,11 @@ the lowest two (32–70 Hz), and MF to six bands spanning 151 Hz–1.56 kHz.
 look-at point, orbit and FOV springs.
 At the default 100%, fully warm sound uses the 5% minimum stiffness;
 100% aggression uses the configured stiffness. Zero disables the warm-sound
-reduction; overdrive above 100% remains active. The strongest relaxation keeps
-at least 5% stiffness so springs continue moving. Damping stays at its configured
-value during relaxation and scales by the square root of the stiffness multiplier
-during overdrive, preserving its damping ratio. The ranges, gain and relaxation
-amount save automatically.
+reduction; POI camera overdrive above 100% remains active. The strongest relaxation
+keeps at least 5% stiffness so springs continue moving. Damping stays at its configured
+value for the model flip and during camera relaxation. Camera overdrive scales
+damping by the square root of the stiffness multiplier, preserving its damping
+ratio. The ranges, gain and relaxation amount save automatically.
 The energy-loss graph compares the smoothed mix with its learned reference:
 positive dB means quieter, and the solid loss trace must rise above the dashed
 requirement. **Mix loss hold** can arm the gap from this loss alone, without a
@@ -136,6 +137,10 @@ a drop consumes it; elapsed time and level recovery do not disarm it.
 This makes shape changes that precede energy loss visible. Gap controls are
 grouped beside their reference, shape, energy,
 timing, and bass-return graphs.
+Snares detected while the gap is armed update detector readouts and hit counters
+immediately, but their model action waits 50 ms on the audio clock. A drop within
+that window cancels the held snare action. Otherwise the action fires once after
+50 ms, even if the gap remains armed. Snares detected without an armed gap act immediately.
 Drop confirmation uses adjustable **Fast envelope** and **Slow envelope** times
 for the weighted low-frequency spectrum, defaulting to about 50 ms and 501 ms.
 **Bass attack** sets how much of the fast envelope must

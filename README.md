@@ -46,6 +46,19 @@ a joint sharpness–energy heatmap and the envelope used for each decision.
 The spectral shape graph also shows **Aggression**: LF is the maximum of the
 selected low bands, MF is the median of the selected mid bands, and
 `aggression = clamp((LF - MF + 1) / 2, 0, 1)` on the graph's −1 to +1 scale.
+Whenever the fast LF envelope exceeds the slow one, their positive separation
+provides a boost: `max((fast - slow) / fast, 0)`, using the LF measurement floor.
+Its strength is multiplied by `clamp(LF - MF + 1, 0, 1)`: no boost when LF is
+1.0 or more below MF, half strength at −0.5, and full strength when LF equals
+or exceeds MF. This compares the actual envelopes, independently of the
+**Bass attack** offset or gap/drop gates. The combined aggression is capped at
+100%; **LF boost** shows the weighted addition. **LF boost gain** beside
+**Warm sound relaxation** scales that addition from 0× (off) through 1×
+(the default) to 4×. Spectral attenuation still applies at every gain, and
+the gain saves automatically. The displayed value and spring
+stiffness follow an envelope with immediate rise and a slow exponential fall
+(3-second time constant), so brief bass gaps preserve aggression. It advances
+with the audio and resets when capture restarts.
 Drag the colored LF/MF boundary handles to select whole bands. LF defaults to
 the lowest four (32–151 Hz), and MF to four bands centered near 590, 870,
 1,280 and 1,890 Hz (485 Hz–2.3 kHz). **Relaxation** controls how much warm sound

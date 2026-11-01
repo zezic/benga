@@ -243,6 +243,7 @@ mod tests {
             .adjusted(crate::frame_schedule::Adjustment::Increase);
         config.edit().tuning.kick_decay = 4.5;
         config.edit().tuning.spectral_relaxation = 0.9;
+        config.edit().tuning.lf_boost_gain = 2.5;
         config.edit().tuning.aggression_bands = crate::visualizer::AggressionBands {
             lf_start: 1,
             lf_end: 5,
@@ -271,6 +272,7 @@ mod tests {
         let config: Config = ron::from_str("(tuning: (kick_decay: 4.5))")?;
         assert_eq!(config.tuning.kick_decay, 4.5);
         assert_eq!(config.tuning.spectral_relaxation, 0.75);
+        assert_eq!(config.tuning.lf_boost_gain, 1.0);
         assert_eq!(
             config.tuning.aggression_bands,
             crate::visualizer::AggressionBands::default()
@@ -336,6 +338,9 @@ mod tests {
             "(tuning: (spectral_relaxation: -0.1))",
             "(tuning: (spectral_relaxation: 1.1))",
             "(tuning: (spectral_relaxation: NaN))",
+            "(tuning: (lf_boost_gain: -0.1))",
+            "(tuning: (lf_boost_gain: 4.1))",
+            "(tuning: (lf_boost_gain: NaN))",
             "(tuning: (aggression_bands: (lf_start: 4, lf_end: 4)))",
             "(tuning: (aggression_bands: (mf_start: 10, mf_end: 7)))",
             "(tuning: (aggression_bands: (mf_end: 17)))",

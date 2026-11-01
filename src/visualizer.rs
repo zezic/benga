@@ -28,6 +28,7 @@ mod transients;
 mod transition;
 mod ui;
 
+use aggression::AggressionEnvelope;
 pub use aggression::{AggressionBands, SpectralAggression};
 use computation::{validate_value, MixContext};
 pub use computation::{
@@ -685,6 +686,8 @@ pub struct VisualizerTuning {
     pub kick_decay: f32,
     /// Maximum stiffness reduction as the spectral balance becomes warm.
     pub spectral_relaxation: f32,
+    /// Amplification of the spectrum-weighted fast-over-slow LF contribution.
+    pub lf_boost_gain: f32,
     pub aggression_bands: AggressionBands,
     pub gains: Gains,
     pub routing: BandRouting,
@@ -700,6 +703,7 @@ impl Default for VisualizerTuning {
             inputs: InputTunings::default(),
             kick_decay: 0.0,
             spectral_relaxation: 0.75,
+            lf_boost_gain: 1.0,
             aggression_bands: AggressionBands::default(),
             gains: Gains::default(),
             routing: BandRouting::default(),
@@ -717,6 +721,7 @@ struct VisualizerTuningRaw {
     inputs: InputTunings,
     kick_decay: f32,
     spectral_relaxation: f32,
+    lf_boost_gain: f32,
     aggression_bands: AggressionBands,
     gains: Gains,
     routing: BandRouting,
@@ -733,6 +738,7 @@ impl Default for VisualizerTuningRaw {
             inputs: tuning.inputs,
             kick_decay: tuning.kick_decay,
             spectral_relaxation: tuning.spectral_relaxation,
+            lf_boost_gain: tuning.lf_boost_gain,
             aggression_bands: tuning.aggression_bands,
             gains: tuning.gains,
             routing: tuning.routing,
@@ -752,6 +758,7 @@ impl TryFrom<VisualizerTuningRaw> for VisualizerTuning {
             inputs: raw.inputs,
             kick_decay: raw.kick_decay,
             spectral_relaxation: raw.spectral_relaxation,
+            lf_boost_gain: raw.lf_boost_gain,
             aggression_bands: raw.aggression_bands,
             gains: raw.gains,
             routing: raw.routing,
@@ -775,6 +782,11 @@ impl VisualizerTuning {
             "spectral relaxation",
         )?;
         self.aggression_bands.validate()?;
+        validate_value(
+            self.lf_boost_gain,
+            Parameter::LfBoostGain.range(),
+            "LF boost gain",
+        )?;
         self.gains.validate()?;
         self.routing.validate()?;
         self.mixer.to_mixer()?;
@@ -1537,7 +1549,9 @@ pub struct Visualizer {
     kick: f32,
     kick_decay: f32,
     spectral_relaxation: f32,
+    lf_boost_gain: f32,
     aggression_bands: AggressionBands,
+    aggression_envelope: AggressionEnvelope,
     flip: Spring,
     /// Number of half turns the flip target has advanced through. The count
     /// accumulates forward so a flip never rewinds to the previous turn.
@@ -1609,7 +1623,9 @@ impl Visualizer {
             kick: 0.0,
             kick_decay: tuning.kick_decay,
             spectral_relaxation: tuning.spectral_relaxation,
+            lf_boost_gain: tuning.lf_boost_gain,
             aggression_bands: tuning.aggression_bands,
+            aggression_envelope: AggressionEnvelope::default(),
             flip: Spring::default(),
             flip_half_turns: 0,
             quake_x: Spring::default(),
@@ -1803,6 +1819,7 @@ impl Visualizer {
         self.treble_shape = inputs.treble.shape;
         self.kick_decay = tuning.kick_decay;
         self.spectral_relaxation = tuning.spectral_relaxation;
+        self.lf_boost_gain = tuning.lf_boost_gain;
         self.aggression_bands = tuning.aggression_bands;
         self.gains = tuning.gains;
         self.routing = tuning.routing;
@@ -1843,6 +1860,7 @@ impl Visualizer {
             },
             kick_decay: self.kick_decay,
             spectral_relaxation: self.spectral_relaxation,
+            lf_boost_gain: self.lf_boost_gain,
             aggression_bands: self.aggression_bands,
             gains: self.gains,
             routing: self.routing,
@@ -1917,6 +1935,7 @@ impl Visualizer {
         self.bass.reset();
         self.treble.reset();
         self.onsets.reset();
+        self.aggression_envelope = AggressionEnvelope::default();
     }
 
     /// Stereo energy feeds the short-window analyzer at the capture sample rate.
@@ -1965,6 +1984,8 @@ impl Visualizer {
         let events = self
             .onsets
             .observe(&spectrum, &band_abdr, &band_abl, &self.detectors, hop);
+        let aggression = self.instantaneous_aggression();
+        self.aggression_envelope.observe(aggression.value, hop);
         self.emit_detector_events(events);
     }
 
@@ -2702,6 +2723,7 @@ impl Visualizer {
             Parameter::KickHighHz => self.detectors.kick_high_hz,
             Parameter::Arrangement(setting) => self.detectors.arrangement.value(setting),
             Parameter::SpectralRelaxation => self.spectral_relaxation,
+            Parameter::LfBoostGain => self.lf_boost_gain,
             Parameter::AggressionLfStart => self.aggression_bands.lf_start as f32,
             Parameter::AggressionLfEnd => self.aggression_bands.lf_end as f32,
             Parameter::AggressionMfStart => self.aggression_bands.mf_start as f32,
@@ -2825,6 +2847,7 @@ impl Visualizer {
             }
             Parameter::Arrangement(setting) => self.detectors.arrangement.set(setting, value),
             Parameter::SpectralRelaxation => self.spectral_relaxation = value,
+            Parameter::LfBoostGain => self.lf_boost_gain = value,
             Parameter::AggressionLfStart => {
                 self.aggression_bands.lf_start =
                     (value.round() as usize).min(self.aggression_bands.lf_end - 1);
@@ -3320,12 +3343,19 @@ impl Visualizer {
         &self.debug_history
     }
 
-    /// LF/MF balance of the same smoothed, centered shape shown in analysis.
+    fn instantaneous_aggression(&self) -> SpectralAggression {
+        let status = self.onsets.status().drop_status;
+        SpectralAggression::from_shape(&status.shape, self.aggression_bands)
+            .with_lf_boost_gain(status.bass_hit, self.lf_boost_gain)
+    }
+
+    /// Current LF/MF levels and LF-rise boost with an enveloped aggression value.
+    /// The envelope advances on the audio clock and also drives the graph.
     pub fn spectral_aggression(&self) -> SpectralAggression {
-        SpectralAggression::from_shape(
-            &self.onsets.status().drop_status.shape,
-            self.aggression_bands,
-        )
+        SpectralAggression {
+            value: self.aggression_envelope.value(),
+            ..self.instantaneous_aggression()
+        }
     }
 
     pub fn aggression_bands(&self) -> AggressionBands {
@@ -5225,6 +5255,137 @@ mod tests {
     }
 
     #[test]
+    fn aggression_release_bridges_bass_gaps_on_the_audio_clock() {
+        let mut visualizer = Visualizer::new();
+        let tuning = visualizer.tuning();
+        let spectrum = |low, mid| Spectrum {
+            linear_bands: std::array::from_fn(|band| match band {
+                0..=3 => low,
+                7..=10 => mid,
+                _ => 0.1,
+            }),
+            rms: 0.2,
+            ..Spectrum::default()
+        };
+        visualizer.observe(spectrum(1.0, 0.01), 0.005);
+        assert_eq!(visualizer.spectral_aggression().value, 1.0);
+        for _ in 0..50 {
+            visualizer.observe(spectrum(0.01, 1.0), 0.005);
+        }
+        let raw = SpectralAggression::from_shape(
+            &visualizer.onsets.status().drop_status.shape,
+            visualizer.aggression_bands(),
+        );
+        let enveloped = visualizer.spectral_aggression();
+        assert!(raw.value < 0.2, "bass has disappeared for 250 ms");
+        assert!(enveloped.value > 0.9, "the gap must retain aggression");
+        assert_eq!(enveloped.lf_level, raw.lf_level);
+        assert_eq!(enveloped.mf_level, raw.mf_level);
+        assert!(visualizer.spectral_stiffness_scale() > 0.925);
+        for _ in 0..10 {
+            assert_eq!(visualizer.spectral_aggression(), enveloped);
+        }
+        visualizer.observe(spectrum(1.0, 0.01), 0.25);
+        let risen = visualizer.instantaneous_aggression();
+        assert!(risen.value > enveloped.value);
+        assert_eq!(visualizer.spectral_aggression().value, risen.value);
+        assert_eq!(visualizer.tuning(), tuning);
+        visualizer.reset_audio();
+        assert_eq!(
+            visualizer.spectral_aggression(),
+            SpectralAggression::default()
+        );
+        visualizer.observe(spectrum(0.01, 1.0), 0.005);
+        assert_eq!(visualizer.spectral_aggression().value, 0.0);
+    }
+
+    #[test]
+    fn lf_envelope_crossing_boosts_aggression_without_the_bass_attack_offset() {
+        let mut results = Vec::new();
+        for threshold in [0.02, 0.6] {
+            let mut visualizer = Visualizer::new();
+            visualizer.set_parameter(
+                Parameter::Arrangement(ArrangementSetting::BassHitThreshold),
+                threshold,
+            );
+            let spectrum = |level| Spectrum {
+                linear_bands: [level; BAND_COUNT],
+                rms: 0.2,
+                ..Spectrum::default()
+            };
+            visualizer.observe(spectrum(0.1), 0.01);
+            assert_eq!(visualizer.spectral_aggression().value, 0.5);
+            visualizer.observe(spectrum(0.13), 0.01);
+            let status = visualizer.onsets.status().drop_status;
+            let aggression = visualizer.spectral_aggression();
+            let shape =
+                SpectralAggression::from_shape(&status.shape, visualizer.aggression_bands());
+            assert_eq!(shape.value, 0.5, "the spectral balance stays unchanged");
+            assert!(status.bass_fast_db > status.bass_slow_db);
+            assert!(status.bass_hit > 0.02 && status.bass_hit < 0.12);
+            let expected_boost =
+                1.0 - 10.0_f32.powf((status.bass_slow_db - status.bass_fast_db) / 20.0);
+            assert!((aggression.lf_boost - expected_boost).abs() < 1e-6);
+            assert_eq!(aggression.value, 0.5 + status.bass_hit);
+            assert!(visualizer.spectral_stiffness_scale() > 0.625);
+            results.push(aggression);
+            visualizer.observe(spectrum(0.05), 0.25);
+            let falling = visualizer.spectral_aggression();
+            assert_eq!(falling.lf_boost, 0.0);
+            assert!(falling.value > 0.5 && falling.value < aggression.value);
+        }
+        assert_eq!(
+            results[0], results[1],
+            "Bass attack must not affect the boost"
+        );
+    }
+
+    #[test]
+    fn lf_boost_gain_amplifies_only_the_envelope_addition() {
+        for gain in [0.0, 1.0, 4.0] {
+            let mut visualizer = Visualizer::new();
+            visualizer.set_parameter(Parameter::LfBoostGain, gain);
+            let spectrum = |level| Spectrum {
+                linear_bands: [level; BAND_COUNT],
+                rms: 0.2,
+                ..Spectrum::default()
+            };
+            visualizer.observe(spectrum(0.1), 0.01);
+            assert_eq!(visualizer.spectral_aggression().value, 0.5);
+            visualizer.observe(spectrum(0.13), 0.01);
+            let aggression = visualizer.spectral_aggression();
+            let expected_boost = visualizer.onsets.status().drop_status.bass_hit * gain;
+            assert_eq!(aggression.lf_boost, expected_boost);
+            assert_eq!(aggression.value, 0.5 + expected_boost);
+            assert_eq!(aggression.lf_level, 0.0);
+            assert_eq!(aggression.mf_level, 0.0);
+            assert_eq!(visualizer.tuning().lf_boost_gain, gain);
+        }
+    }
+
+    #[test]
+    fn warm_spectral_balance_eliminates_the_lf_envelope_boost() {
+        let mut visualizer = Visualizer::new();
+        let spectrum = |low| Spectrum {
+            linear_bands: std::array::from_fn(|band| match band {
+                0..=6 => low,
+                7..=10 => 1.0,
+                _ => 0.1,
+            }),
+            rms: 0.2,
+            ..Spectrum::default()
+        };
+        visualizer.observe(spectrum(0.01), 0.01);
+        visualizer.observe(spectrum(0.03), 0.01);
+        let status = visualizer.onsets.status().drop_status;
+        let aggression = visualizer.spectral_aggression();
+        assert!(status.bass_hit > 0.2, "the LF envelopes have crossed");
+        assert!(aggression.lf_level - aggression.mf_level < -1.0);
+        assert_eq!(aggression.lf_boost, 0.0);
+        assert_eq!(aggression.value, 0.0);
+    }
+
+    #[test]
     fn warm_spectral_shape_slows_the_model_flip_without_changing_tuning() {
         let mut warm = loaded_visualizer();
         let mut aggressive = loaded_visualizer();
@@ -5285,6 +5446,13 @@ mod tests {
         assert_eq!(visualizer.spectral_relaxation, 1.0);
         visualizer.set_parameter(Parameter::SpectralRelaxation, f32::NAN);
         assert_eq!(visualizer.spectral_relaxation, 1.0);
+        visualizer.set_parameter(Parameter::LfBoostGain, 10.0);
+        assert_eq!(visualizer.lf_boost_gain, 4.0);
+        visualizer.set_parameter(Parameter::LfBoostGain, f32::NAN);
+        assert_eq!(visualizer.lf_boost_gain, 4.0);
+        visualizer.set_parameter(Parameter::LfBoostGain, -1.0);
+        assert_eq!(visualizer.lf_boost_gain, 0.0);
+        visualizer.set_parameter(Parameter::LfBoostGain, 2.5);
         let tuning = visualizer.tuning();
         let mut restored = Visualizer::new();
         restored.set_tuning(tuning.clone());

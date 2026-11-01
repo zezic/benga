@@ -449,11 +449,12 @@ impl AnalysisOverlay {
             fonts,
             "aggression_value",
             if self.no_audio {
-                "AGGRESSION -- · SPRING STIFFNESS --".to_owned()
+                "AGGRESSION -- · LF BOOST -- · STIFFNESS --".to_owned()
             } else {
                 format!(
-                    "AGGRESSION {:.0}% · SPRING STIFFNESS {:.0}%",
+                    "AGGRESSION {:.0}% · LF BOOST +{:.0}% · STIFFNESS {:.0}%",
                     self.aggression.value * 100.0,
+                    self.aggression.lf_boost * 100.0,
                     self.stiffness_scale * 100.0,
                 )
             },
@@ -1068,17 +1069,29 @@ impl AnalysisOverlay {
     fn update_sliders(&mut self, fonts: &mut Fonts, visualizer: &Visualizer, stage: &Stage) {
         let mut index = 0;
         if let Some(panel) = self.left {
-            self.update_slider(
-                index,
-                228.0,
-                30.0,
-                panel,
-                Parameter::SpectralRelaxation,
-                fonts,
-                visualizer,
-                stage,
-            );
-            index += 1;
+            let middle = panel.rect.center().x;
+            for (parameter, rect) in [
+                (
+                    Parameter::SpectralRelaxation,
+                    Rect::new(panel.rect.x0, panel.rect.y0, middle, panel.rect.y1),
+                ),
+                (
+                    Parameter::LfBoostGain,
+                    Rect::new(middle, panel.rect.y0, panel.rect.x1, panel.rect.y1),
+                ),
+            ] {
+                self.update_slider(
+                    index,
+                    228.0,
+                    30.0,
+                    Panel { rect, ..panel },
+                    parameter,
+                    fonts,
+                    visualizer,
+                    stage,
+                );
+                index += 1;
+            }
         }
         if let Some(panel) = self.gap_controls {
             for setting in ArrangementSetting::ALL {
@@ -3941,6 +3954,7 @@ fn grid(scene: &mut Scene, plot: Rect, stage: &Stage, palette: ScenePalette) {
 fn slider_caption(parameter: Parameter) -> &'static str {
     match parameter {
         Parameter::SpectralRelaxation => "Warm sound relaxation",
+        Parameter::LfBoostGain => "LF boost gain",
         Parameter::Arrangement(setting) => setting.label(),
         Parameter::Percussion(_, setting) => match setting {
             PercussionSetting::TaperHz => "Fade out by",
@@ -4632,7 +4646,7 @@ mod tests {
     }
 
     #[test]
-    fn spectral_range_handles_snap_to_bands_and_relaxation_remains_accessible() {
+    fn spectral_range_handles_snap_to_bands_and_aggression_sliders_remain_accessible() {
         let mut fonts = Fonts::new().unwrap();
         let mut visualizer = Visualizer::new();
         for size in [Size::new(1920.0, 1080.0), Size::new(1280.0, 720.0)] {
@@ -4666,31 +4680,33 @@ mod tests {
                 );
                 overlay.pointer_up();
             }
-            let slider = overlay
-                .sliders
-                .iter()
-                .find(|slider| slider.parameter == Parameter::SpectralRelaxation)
-                .unwrap();
-            assert!(panel.contains(slider.rect.origin()));
-            assert!(panel.contains(Point::new(slider.rect.x1, slider.rect.y1)));
-            let start = Point::new(slider.track.x0, slider.track.y0);
-            let end = Point::new(slider.track.x1, slider.track.y0);
-            assert!(matches!(
-                overlay.pointer_down(start),
-                Some(AnalysisInteraction::Parameter(
-                    Parameter::SpectralRelaxation,
-                    0.0
-                ))
-            ));
-            assert_eq!(
-                overlay.pointer_move(Some(end)),
-                Some((Parameter::SpectralRelaxation, 1.0))
-            );
-            visualizer.set_parameter(Parameter::SpectralRelaxation, 1.0);
-            assert_eq!(
-                visualizer.parameter_value(Parameter::SpectralRelaxation),
-                1.0
-            );
+            for (parameter, maximum) in [
+                (Parameter::SpectralRelaxation, 1.0),
+                (Parameter::LfBoostGain, 4.0),
+            ] {
+                let slider = overlay
+                    .sliders
+                    .iter()
+                    .find(|slider| slider.parameter == parameter)
+                    .unwrap();
+                assert!(panel.contains(slider.rect.origin()));
+                assert!(panel.contains(Point::new(slider.rect.x1, slider.rect.y1)));
+                assert!(
+                    (slider.caption.width() + slider.readout.width() + 8.0) * slider.unit
+                        <= slider.rect.width(),
+                    "slider caption and readout must fit at {size:?}"
+                );
+                let start = Point::new(slider.track.x0, slider.track.y0);
+                let end = Point::new(slider.track.x1, slider.track.y0);
+                assert!(matches!(
+                    overlay.pointer_down(start),
+                    Some(AnalysisInteraction::Parameter(selected, 0.0)) if selected == parameter
+                ));
+                assert_eq!(overlay.pointer_move(Some(end)), Some((parameter, maximum)));
+                visualizer.set_parameter(parameter, maximum);
+                assert_eq!(visualizer.parameter_value(parameter), maximum);
+                overlay.pointer_up();
+            }
         }
     }
 

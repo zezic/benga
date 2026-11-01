@@ -753,6 +753,8 @@ pub enum Parameter {
     Arrangement(ArrangementSetting),
     /// Maximum spring relaxation as spectral aggression falls.
     SpectralRelaxation,
+    /// Amplification of the spectrally weighted LF envelope addition.
+    LfBoostGain,
     AggressionLfStart,
     AggressionLfEnd,
     AggressionMfStart,
@@ -834,6 +836,7 @@ impl Parameter {
             Self::KickHighHz => "KICK HIGH Hz",
             Self::Arrangement(setting) => setting.label(),
             Self::SpectralRelaxation => "RELAXATION",
+            Self::LfBoostGain => "LF BOOST GAIN",
             Self::AggressionLfStart => "LF START",
             Self::AggressionLfEnd => "LF END",
             Self::AggressionMfStart => "MF START",
@@ -942,6 +945,7 @@ impl Parameter {
             ),
             Self::Arrangement(setting) => setting.range(),
             Self::SpectralRelaxation => (0.0, 1.0),
+            Self::LfBoostGain => (0.0, 4.0),
             Self::AggressionLfStart
             | Self::AggressionLfEnd
             | Self::AggressionMfStart
@@ -1067,6 +1071,7 @@ impl Parameter {
             Self::KickLowHz | Self::KickHighHz => 1.0,
             Self::Arrangement(setting) => setting.step(),
             Self::SpectralRelaxation => 0.01,
+            Self::LfBoostGain => 0.05,
             Self::AggressionLfStart
             | Self::AggressionLfEnd
             | Self::AggressionMfStart
@@ -1153,6 +1158,7 @@ impl Parameter {
             Self::KickLowHz | Self::KickHighHz => format!("{value:.0} Hz"),
             Self::Arrangement(setting) => setting.format(value),
             Self::SpectralRelaxation => format!("{:.0}%", value * 100.0),
+            Self::LfBoostGain => format!("{value:.2}x"),
             Self::AggressionLfStart
             | Self::AggressionLfEnd
             | Self::AggressionMfStart

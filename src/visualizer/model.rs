@@ -317,17 +317,21 @@ impl ModelSet {
             .iter()
             .map(|source| Model::load_bytes(Path::new(source.file_name), source.bytes))
             .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(Self::from_models(models, rng))
+    }
+
+    fn from_models(models: Vec<Model>, rng: &mut Rng) -> Self {
         let mut bag: VecDeque<usize> = (0..models.len()).collect();
         shuffle(&mut bag, rng);
         let current = bag
             .pop_front()
             .expect("the embedded model table is not empty");
-        Ok(Self {
+        Self {
             models,
             prepared: Vec::new(),
             current,
             bag,
-        })
+        }
     }
 
     pub fn current(&self) -> &Model {
@@ -381,7 +385,7 @@ impl ModelSet {
         self.current = self
             .bag
             .pop_front()
-            .expect("a refilled bag holds every model but the current one");
+            .expect("a refilled bag holds every model");
         true
     }
 
@@ -409,10 +413,10 @@ impl ModelSet {
         self.bag.clear();
         self.bag.extend(0..self.models.len());
         shuffle(&mut self.bag, rng);
-        // A cycle boundary must not repeat the model that is showing.
-        let current = self.current;
-        if let Some(position) = self.bag.iter().position(|index| *index == current) {
-            self.bag.remove(position);
+        // Keep the complete bag while avoiding an immediate repeat at its start.
+        if self.bag.front() == Some(&self.current) {
+            let position = 1 + rng.range(self.bag.len() - 1);
+            self.bag.swap(0, position);
         }
     }
 }
@@ -843,6 +847,23 @@ fn triangle_normal(a: Vec3, b: Vec3, c: Vec3) -> Option<Vec3> {
 mod tests {
     use super::*;
 
+    fn model_set_fixture(count: usize, rng: &mut Rng) -> ModelSet {
+        let models = (0..count)
+            .map(|index| Model {
+                name: format!("Model {index}"),
+                id: index.to_string(),
+                vertices: Vec::new(),
+                edges: Vec::new(),
+                vertex_parts: Vec::new(),
+                parts: Vec::new(),
+                anchors: BTreeMap::new(),
+                node_parts: BTreeMap::new(),
+                body: Arc::default(),
+            })
+            .collect();
+        ModelSet::from_models(models, rng)
+    }
+
     #[test]
     fn embedded_model_table_matches_source_files() -> anyhow::Result<()> {
         let paths = model_paths()?;
@@ -1099,46 +1120,63 @@ mod tests {
     }
 
     #[test]
-    fn model_set_covers_every_model_before_repeating() -> anyhow::Result<()> {
-        let mut rng = Rng::new(7);
-        let mut set = ModelSet::load(&mut rng)?;
-        let (_, total) = set.position();
-        assert!(total >= 1);
-        if total == 1 {
-            assert!(!set.advance(&mut rng));
-            return Ok(());
+    fn model_set_covers_every_model_in_each_bag_without_boundary_repeats() {
+        for count in [2, 3, 36] {
+            let mut starts = BTreeSet::new();
+            for seed in 0..32 {
+                let mut rng = Rng::new(seed);
+                let mut set = model_set_fixture(count, &mut rng);
+                starts.insert(set.current);
+                let mut previous = None;
+                let mut refill_orders = BTreeSet::new();
+                for cycle in 0..16 {
+                    let mut seen = BTreeSet::new();
+                    let mut order = Vec::new();
+                    for _ in 0..count {
+                        assert_ne!(Some(set.current), previous);
+                        assert!(
+                            seen.insert(set.current),
+                            "a full bag must visit each model once"
+                        );
+                        order.push(set.current);
+                        previous = Some(set.current);
+                        assert!(set.advance(&mut rng));
+                    }
+                    assert_eq!(seen.len(), count);
+                    if cycle > 0 {
+                        refill_orders.insert(order);
+                    }
+                }
+                if count > 2 {
+                    assert!(
+                        refill_orders.len() > 1,
+                        "refills must reshuffle the model order"
+                    );
+                }
+            }
+            assert!(
+                starts.len() > 1,
+                "startup selection must vary with the seed"
+            );
         }
-        let mut seen = vec![set.current().id.clone()];
-        for _ in 1..total {
-            assert!(set.advance(&mut rng));
-            seen.push(set.current().id.clone());
-        }
-        let count = seen.len();
-        seen.sort_unstable();
-        seen.dedup();
-        assert_eq!(seen.len(), count, "one cycle must visit every model");
-        let last = set.current().id.clone();
-        assert!(set.advance(&mut rng));
-        assert_ne!(
-            set.current().id,
-            last,
-            "a cycle boundary must not repeat the same model"
-        );
-        Ok(())
     }
 
     #[test]
-    fn manual_navigation_wraps_in_catalog_order_and_skips_automatic_repeats() -> anyhow::Result<()>
-    {
+    fn a_single_model_stays_selected() {
         let mut rng = Rng::new(7);
-        let mut set = ModelSet::load(&mut rng)?;
+        let mut set = model_set_fixture(1, &mut rng);
+        assert!(!set.advance(&mut rng));
+        assert!(!set.navigate(Adjustment::Increase));
+        assert!(!set.navigate(Adjustment::Decrease));
+        assert_eq!(set.position(), (1, 1));
+    }
+
+    #[test]
+    fn manual_navigation_wraps_in_catalog_order_and_skips_automatic_repeats() {
+        let mut rng = Rng::new(7);
+        let mut set = model_set_fixture(36, &mut rng);
         let (_, total) = set.position();
         let start = set.current;
-        if total == 1 {
-            assert!(!set.navigate(Adjustment::Increase));
-            assert!(!set.navigate(Adjustment::Decrease));
-            return Ok(());
-        }
         for step in 1..=total {
             assert!(set.navigate(Adjustment::Increase));
             assert_eq!(set.current, (start + step) % total);
@@ -1160,7 +1198,6 @@ mod tests {
         assert_ne!(manual, selected);
         assert!(set.advance(&mut rng));
         assert_ne!(set.current, selected);
-        Ok(())
     }
 
     #[test]

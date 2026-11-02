@@ -92,8 +92,10 @@ any control for a hint. They fade after 5 seconds of inactivity.
 - Use **Save as Default** to set the startup theme.
 
 Music drives the model's motion, part highlights, and close-ups of points of
-interest. Energy drops change the model unless Model Lock is enabled. Model
-changes are instant; theme colors still fade smoothly.
+interest. Each launch starts with a randomly selected model. Automatic model
+changes draw from a shuffled bag, visiting every model once before reshuffling,
+with no immediate repeat between bags. Energy drops change the model unless
+Model Lock is enabled. Model changes are instant; theme colors still fade smoothly.
 
 Renderer statistics start hidden. Hold a modifier key and click
 **Developer: show renderer stats** above the toolbar to display them.

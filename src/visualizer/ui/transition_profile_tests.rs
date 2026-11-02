@@ -9,7 +9,7 @@ fn configured_ui() -> anyhow::Result<(Ui, ThemeId)> {
     config.shutter_frames = ShutterFrames::try_from(2.0)?;
     config.theme = ThemeId::all().find(|theme| !theme.is_light()).unwrap();
     let next = ThemeId::all().find(|theme| theme.is_light()).unwrap();
-    let mut ui = Ui::new(&config)?;
+    let mut ui = Ui::with_model_seed(&config, 0x005e_ed0f_7e5e_1e55)?;
     ui.dismiss_startup();
     ui.visualizer.load_models();
     Ok((ui, next))

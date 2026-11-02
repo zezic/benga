@@ -112,6 +112,15 @@ impl Ui {
     }
 
     pub fn new(config: &Config) -> anyhow::Result<Self> {
+        use std::hash::BuildHasher;
+
+        // Each launch gets fresh randomness from std's randomized hash state.
+        let seed = std::collections::hash_map::RandomState::new().hash_one(());
+        Self::with_model_seed(config, seed)
+    }
+
+    /// Repeatable model selection and motion for tests and profiling workloads.
+    pub fn with_model_seed(config: &Config, seed: u64) -> anyhow::Result<Self> {
         let selected = if config.theme_preferences.is_disliked(config.theme) {
             config
                 .theme_preferences
@@ -122,6 +131,7 @@ impl Ui {
         };
         let mut fonts = Fonts::new()?;
         let mut visualizer = Visualizer::new();
+        visualizer.rng = super::Rng::new(seed);
         visualizer.set_model_composite(Self::model_composite(selected));
         visualizer.set_detector_settings(config.detectors.clone());
         visualizer.set_depth_fade(config.depth_fade);
@@ -696,6 +706,30 @@ mod tests {
     use crate::render::RasterAssetCache;
     use crate::visualizer::{ArrangementSetting, Detector, PercussionSetting};
     use std::time::Duration;
+
+    #[test]
+    fn startup_model_randomness_is_fresh_and_profiling_seeds_are_repeatable() -> anyhow::Result<()>
+    {
+        let config = Config::default();
+        let mut starts = std::collections::BTreeSet::new();
+        for _ in 0..8 {
+            starts.insert(Ui::new(&config)?.visualizer.rng.next());
+        }
+        assert!(
+            starts.len() > 1,
+            "launches must not reuse a fixed model seed"
+        );
+
+        let mut first = Ui::with_model_seed(&config, 7)?;
+        let mut replay = Ui::with_model_seed(&config, 7)?;
+        let mut other = Ui::with_model_seed(&config, 8)?;
+        let first_order: Vec<_> = (0..16).map(|_| first.visualizer.rng.next()).collect();
+        let replay_order: Vec<_> = (0..16).map(|_| replay.visualizer.rng.next()).collect();
+        let other_order: Vec<_> = (0..16).map(|_| other.visualizer.rng.next()).collect();
+        assert_eq!(first_order, replay_order);
+        assert_ne!(first_order, other_order);
+        Ok(())
+    }
 
     #[test]
     fn performance_history_records_while_hidden_and_survives_visibility_toggles(

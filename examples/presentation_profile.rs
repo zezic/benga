@@ -10,7 +10,7 @@ use benga::{
 use vello::{kurbo::Size, Scene};
 
 fn main() -> anyhow::Result<()> {
-    let mut ui = Ui::new(&Config::default())?;
+    let mut ui = Ui::with_model_seed(&Config::default(), 0x005e_ed0f_7e5e_1e55)?;
     ui.audio_event(AudioEvent::Config { samplerate: 48_000 });
     let view = View::fit(Size::new(1920.0, 1080.0));
     let mut scene = Scene::new();

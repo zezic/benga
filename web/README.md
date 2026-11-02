@@ -1,7 +1,9 @@
 # Download website
 
-Static site for `benga.zezic.ru`. Target webroot: `/home/benga/web`, **after design
-approval and path migration**. For local preview, run from the repository root:
+Static site for `benga.zezic.ru`. Design approved on **2026-11-02**. Target webroot:
+`/home/benga/web`; host migration and native release/installer checks remain
+pending. Hosts are currently unavailable due to technical downtime.
+For local preview, run from the repository root:
 
 ```sh
 python3 -m http.server 4173 --bind 127.0.0.1 --directory web
@@ -42,5 +44,5 @@ App icons are in `assets/icons/` at the repository root; regenerate with
 Publish only `index.html`, `style.css`, `app.js`, `favicon.ico`, `assets/` and
 `install-macos.sh` to `/home/benga/web`, owned by `benga`. Exclude this README,
 generators and tests. Complete native release/installer checks and the pending
-webroot migration, then follow [server activation](../docs/server.md). The public
-host remains in maintenance until the reviewed site is deployed.
+webroot migration after host recovery, then follow
+[server activation](../docs/server.md). The approved site has not been deployed.

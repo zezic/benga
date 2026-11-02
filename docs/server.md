@@ -1,14 +1,19 @@
 # Benga host and mirror
 
 Domain: `benga.zezic.ru`. The website belongs in **`/home/benga/web`**,
-owned by `benga` and readable by Nginx. Publication requires design approval.
+owned by `benga` and readable by Nginx. The current website design was approved
+on **2026-11-02**.
 
 ## Current state
 
 Provisioned on 2026-10-31: locked `benga` account, dedicated Nginx vhost,
-Let's Encrypt certificate and renewal hook. HTTP/HTTPS return **503**; the
-mirror is disabled and its public key is unset. Other hosted sites were checked
+Let's Encrypt certificate and renewal hook. At provisioning, HTTP/HTTPS returned
+**503**, the mirror was disabled and its public key was unset. Other sites were checked
 unchanged; configuration inventories are in `/var/lib/benga-bootstrap/`.
+
+The hosts are unavailable due to technical downtime as of 2026-11-02; their
+current state has not been reverified. Deployment awaits host recovery and
+native release/installer checks.
 
 **Host migration is pending.** Local bootstrap/public-vhost templates now use
 `/home/benga/web`; the deployed setup still uses `/srv/benga/site`. Apply the
@@ -43,7 +48,7 @@ The public vhost maps `/downloads/latest.json` and `.sig` to `current/` with
 no caching, and `/downloads/vX.Y.Z/…` to immutable versioned archives. Only
 portable ZIP/tar.gz archives are mirrored; DMG/EXE/DEB stay on GitHub Releases.
 
-## Activate after approval
+## Activate after host recovery and release checks
 
 1. Apply the website-path migration on the host using the updated local
    bootstrap/public-vhost templates. Allow Nginx to traverse `/home/benga`.

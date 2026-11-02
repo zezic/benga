@@ -99,16 +99,18 @@ restoring the sibling `.benga-backup-*` directory manually.
 
 ## First release checklist
 
-- Complete model redistribution and logo provenance records. The GPL project
-  license and third-party notices are packaged; Iosevka OFL and Gogh MIT notices
-  are included. Philly Sans's binary is excluded, but logo permission still
-  needs confirmation. See [third-party notices](../THIRD_PARTY_NOTICES.md).
+- Record model redistribution permission: the maintainer confirmed no model
+  license was supplied. Noncommercial intent does not supply that permission.
+  The GPL project license and third-party notices are packaged; Iosevka OFL,
+  Gogh MIT and the noncommercial Philly Sans logo-use notice are included.
+  Philly Sans's binary is excluded. See [third-party notices](../THIRD_PARTY_NOTICES.md).
 - Test installed startup, GPU support, audio permission denial/recovery, silence,
   output-device changes, window controls and updates on every supported OS.
 - Exercise offline checks, invalid signatures/checksums and read-only installs.
 - Review sources/version, run a validation tag, then stage the matching stable tag.
-- Obtain website design approval; test the real installer and complete the webroot
-  migration before publishing to `/home/benga/web`. Follow [server activation](server.md).
+- Website design approved on 2026-11-02. Test the real installer and complete
+  the webroot migration before publishing to `/home/benga/web` after the server
+  recovers. Follow [server activation](server.md).
 
 Interactive installed-app GPU/audio checks remain necessary on each platform;
 CI package checks do not replace these. Useful checks:

@@ -322,6 +322,7 @@ impl CapacityBench {
             None,
             1.0,
             None,
+            None,
         );
         handle.queue.submit([encoder.finish()]);
     }

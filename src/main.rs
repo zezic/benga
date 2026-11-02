@@ -588,6 +588,7 @@ impl App {
                 let content = render::FrameContent {
                     background: frame.background,
                     foreground: frame.foreground,
+                    poi_overlay: frame.poi_overlay,
                     top_overlay,
                     raster_assets: &frame.raster_assets,
                     plates: frame.plate_instances,
@@ -600,6 +601,7 @@ impl App {
                      background: &vello::wgpu::TextureView,
                      target: &vello::wgpu::TextureView,
                      foreground: Option<&vello::wgpu::TextureView>,
+                     poi: Option<&vello::wgpu::TextureView>,
                      top: Option<&vello::wgpu::TextureView>,
                      frame_timestamps: Option<&wgpu::QuerySet>| {
                         visualizer_renderer.set_frame_end_timestamp(frame_timestamps);
@@ -613,6 +615,7 @@ impl App {
                             foreground,
                             frame.overlay_composite,
                             frame.overlay_opacity,
+                            poi,
                             top,
                         );
                     };

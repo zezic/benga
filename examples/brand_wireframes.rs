@@ -147,6 +147,7 @@ fn main() -> anyhow::Result<()> {
             None,
             1.0,
             None,
+            None,
         );
         let stride = (WIDTH * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;

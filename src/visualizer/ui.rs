@@ -89,6 +89,7 @@ pub struct Ui {
     theme: Theme,
     fonts: Fonts,
     presentation: Presentation,
+    poi_scene: Scene,
     controls: Controls,
     theme_preferences: ThemePreferences,
     theme_model_revision: super::ModelRevision,
@@ -153,6 +154,7 @@ impl Ui {
             theme,
             fonts,
             presentation,
+            poi_scene: Scene::new(),
             controls: Controls::new(Instant::now()),
             theme_preferences: config.theme_preferences.clone(),
             theme_model_revision,
@@ -631,10 +633,16 @@ impl Ui {
             self.theme.colors,
         );
         let mut raster_assets = Vec::new();
+        self.poi_scene.reset();
         if let Some(stage) = self.presentation.stage() {
             self.presentation.draw(
                 scene,
                 &mut raster_assets,
+                &stage,
+                self.presentation.colors(),
+            );
+            self.presentation.draw_poi(
+                &mut self.poi_scene,
                 &stage,
                 self.presentation.colors(),
                 self.plate_mask.as_ref(),
@@ -644,6 +652,8 @@ impl Ui {
             background: Frame::Solid(self.theme.colors.background),
             overlay: self.visualizer.frame(),
             foreground: true,
+            poi_overlay: (!self.poi_scene.encoding().draw_data.is_empty())
+                .then_some(&self.poi_scene),
             overlay_composite: Some(composite),
             overlay_opacity: self.presentation_opacity.factor(),
             plate_instances: self.presentation.plate_instances(),
@@ -653,7 +663,7 @@ impl Ui {
     }
 }
 
-/// One retained background and its animated foreground overlay.
+/// Background, main infographics, model, and foreground POI callouts.
 pub struct UiFrame<'a> {
     pub background: Frame<'a>,
     /// Retained vector sources referenced by the foreground scene.
@@ -661,9 +671,11 @@ pub struct UiFrame<'a> {
     pub overlay: VisualizerFrame<'a>,
     /// Whether the foreground scene carries anything to rasterize.
     pub foreground: bool,
+    /// POI callouts rasterized separately above the model wireframe.
+    pub poi_overlay: Option<&'a Scene>,
     /// Composition mode for presentation text; `None` keeps normal blending.
     pub overlay_composite: Option<ModelComposite>,
-    /// Multiplier applied to the presentation text layer.
+    /// Multiplier applied to both presentation graphic layers.
     pub overlay_opacity: f32,
     /// Moving plate coverage requests for the GPU mask pass.
     pub plate_instances: &'a [PlateInstance],
@@ -1546,6 +1558,13 @@ mod tests {
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::RENDER_ATTACHMENT,
         );
+        let poi = make_texture(
+            "Presentation POI callouts",
+            wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        );
+        let poi_view = poi.create_view(&wgpu::TextureViewDescriptor::default());
         let top = make_texture(
             "Presentation controls",
             wgpu::TextureUsages::STORAGE_BINDING
@@ -1649,6 +1668,15 @@ mod tests {
             &foreground_view,
             &params,
         )?;
+        if let Some(poi_scene) = frame.poi_overlay {
+            renderer.render_to_texture(
+                &device.device,
+                &device.queue,
+                poi_scene,
+                &poi_view,
+                &params,
+            )?;
+        }
         if top_visible {
             renderer.render_to_texture(
                 &device.device,
@@ -1675,6 +1703,7 @@ mod tests {
             Some(&foreground_view),
             frame.overlay_composite,
             frame.overlay_opacity,
+            frame.poi_overlay.map(|_| &poi_view),
             top_visible.then_some(&top_view),
         );
         let row_bytes = width * 4;
@@ -1733,6 +1762,61 @@ mod tests {
         let second = ui.draw(&mut scene, &view, FrameRateLimit::Fps120, frame_time);
         assert!(second.foreground);
         assert!(matches!(second.background, Frame::Solid(_)));
+    }
+
+    #[test]
+    fn poi_callouts_have_a_separate_scene_from_main_infographics() -> anyhow::Result<()> {
+        use crate::visualizer::{ModelRotation, Rng};
+
+        let mut config = Config::default();
+        config.theme_preferences.auto_colors = false;
+        config.model_motion = ModelMotion::Still;
+        config.model_rotation = ModelRotation::Locked;
+        let mut ui = Ui::new(&config)?;
+        ui.visualizer.load_models();
+        for _ in 0..64 {
+            if ui.visualizer.model_id() == Some("rif_ak47") {
+                break;
+            }
+            ui.visualizer.next_model();
+        }
+        assert_eq!(ui.visualizer.model_id(), Some("rif_ak47"));
+        let view = View::fit(Size::new(1920.0, 1080.0));
+        let now = Instant::now();
+        let mut scene = Scene::new();
+        let first = ui.draw(
+            &mut scene,
+            &view,
+            FrameRateLimit::Fps120,
+            FrameTime::new(now, now + Duration::from_secs_f64(1.0 / 60.0)),
+        );
+        assert!(first.poi_overlay.is_none());
+        assert!(!scene.encoding().draw_data.is_empty());
+
+        assert!(ui.visualizer.showcase.enter_focus(&mut Rng::new(7), 1.1));
+        for frame_index in 1..121 {
+            scene.reset();
+            let start = now + Duration::from_secs_f64(frame_index as f64 / 60.0);
+            let frame = ui.draw(
+                &mut scene,
+                &view,
+                FrameRateLimit::Fps120,
+                FrameTime::new(start, start + Duration::from_secs_f64(1.0 / 60.0)),
+            );
+            if frame_index == 120 {
+                assert!(
+                    frame
+                        .poi_overlay
+                        .is_some_and(|poi| !poi.encoding().draw_data.is_empty()),
+                    "POI cards are submitted in their own scene above the model"
+                );
+                assert!(
+                    !scene.encoding().draw_data.is_empty(),
+                    "main infographics remain in the scene behind the model"
+                );
+            }
+        }
+        Ok(())
     }
 
     #[test]

@@ -21,6 +21,9 @@ use super::{
 /// and any external resources out of the crate's compiled assets.
 const MODEL_DIRECTORY: &str = "assets/models";
 
+mod body;
+pub use body::BodyMesh;
+
 /// The node whose subtree moves backward when the ejection port is focused.
 pub(super) const SLIDE_NODE: &str = "slide";
 
@@ -36,6 +39,7 @@ pub struct Model {
     parts: Vec<ModelPart>,
     anchors: BTreeMap<String, Anchor>,
     node_parts: BTreeMap<String, Vec<u16>>,
+    body: Arc<BodyMesh>,
 }
 
 impl Model {
@@ -108,12 +112,23 @@ impl Model {
             vertex_parts,
             edges,
             parts,
+            triangles,
         } = builder.finish()?;
         ensure!(
             !vertices.is_empty(),
             "the model has no mesh geometry to show"
         );
         let (model_center, model_scale) = fit_to_unit_radius(&mut vertices)?;
+        let body_started = std::time::Instant::now();
+        let body = BodyMesh::prepare_cached(path, &vertices, &triangles, &vertex_parts);
+        log::debug!(
+            "Prepared body for {}: {} -> {} triangles, {} vertices in {:?}",
+            path.display(),
+            body.source_triangle_count,
+            body.triangles.len(),
+            body.vertices.len(),
+            body_started.elapsed(),
+        );
 
         let mut anchors = BTreeMap::new();
         let mut part_anchors = Vec::with_capacity(parts.len());
@@ -187,6 +202,7 @@ impl Model {
             parts,
             anchors,
             node_parts,
+            body,
         })
     }
 
@@ -209,6 +225,11 @@ impl Model {
             edge_parts,
             u16::try_from(self.parts.len()).expect("the model has too many mesh parts"),
         )
+    }
+
+    /// Coarse solid geometry prepared once, independently of wireframe detail.
+    pub fn body(&self) -> &BodyMesh {
+        &self.body
     }
 
     /// The mesh part or empty box registered under a glTF node name.
@@ -319,7 +340,14 @@ impl ModelSet {
         self.prepared = self
             .models
             .iter()
-            .map(|model| Arc::new(PreparedModel::new(model, crease, catalog)))
+            .enumerate()
+            .map(|(index, model)| {
+                let body = self
+                    .prepared
+                    .get(index)
+                    .and_then(|prepared| prepared.gpu_topology.body.clone());
+                Arc::new(PreparedModel::new(model, crease, catalog, body))
+            })
             .collect();
     }
 
@@ -546,6 +574,7 @@ struct BuiltModel {
     vertex_parts: Vec<u16>,
     edges: Vec<ModelEdge>,
     parts: Vec<ModelPart>,
+    triangles: Vec<[u16; 3]>,
 }
 
 #[derive(Default)]
@@ -554,6 +583,7 @@ struct Builder {
     vertex_parts: Vec<u16>,
     edges: Vec<ModelEdge>,
     parts: Vec<ModelPart>,
+    triangles: Vec<[u16; 3]>,
 }
 
 impl Builder {
@@ -569,7 +599,7 @@ impl Builder {
     {
         let mut local = LocalBuilder::default();
         local.push_mesh(mesh, transform, get_buffer)?;
-        let (part_vertices, part_edges) = local.finish()?;
+        let (part_vertices, part_edges, part_triangles) = local.finish()?;
         let index = u16::try_from(self.parts.len()).context("the model has too many mesh parts")?;
         let start = self.vertices.len();
         let base = u16::try_from(start).context("the model has too many vertices")?;
@@ -588,6 +618,16 @@ impl Builder {
                 kind: edge.kind,
                 part: index,
             });
+        }
+        for triangle in part_triangles {
+            self.triangles.push([
+                base.checked_add(triangle[0])
+                    .context("the model has too many vertices")?,
+                base.checked_add(triangle[1])
+                    .context("the model has too many vertices")?,
+                base.checked_add(triangle[2])
+                    .context("the model has too many vertices")?,
+            ]);
         }
         self.parts.push(ModelPart {
             name,
@@ -613,6 +653,7 @@ impl Builder {
             vertex_parts: self.vertex_parts,
             edges: self.edges,
             parts: self.parts,
+            triangles: self.triangles,
         })
     }
 }
@@ -679,7 +720,7 @@ impl LocalBuilder {
         Ok(())
     }
 
-    fn finish(self) -> anyhow::Result<(Vec<Vec3>, Vec<ModelEdge>)> {
+    fn finish(self) -> anyhow::Result<(Vec<Vec3>, Vec<ModelEdge>, Vec<[u16; 3]>)> {
         // glTF splits vertices along UV and normal seams. Welding positions
         // keeps those seams from producing doubled wireframe edges.
         let mut vertices = Vec::new();
@@ -762,7 +803,21 @@ impl LocalBuilder {
                 }
             })
             .collect();
-        Ok((vertices, edges))
+        let triangles = triangles
+            .into_iter()
+            .filter(|&[a, b, c]| {
+                triangle_normal(
+                    vertices[a as usize],
+                    vertices[b as usize],
+                    vertices[c as usize],
+                )
+                .is_some()
+            })
+            .map(|triangle| {
+                triangle.map(|index| u16::try_from(index).expect("part vertices fit u16"))
+            })
+            .collect();
+        Ok((vertices, edges, triangles))
     }
 }
 
@@ -787,6 +842,51 @@ fn triangle_normal(a: Vec3, b: Vec3, c: Vec3) -> Option<Vec3> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_bodies_reduce_geometry_and_preserve_valid_part_surfaces() -> anyhow::Result<()> {
+        let started = std::time::Instant::now();
+        let mut source_total = 0;
+        let mut body_total = 0;
+        for path in model_paths()? {
+            let model = Model::load_file(&path)?;
+            let body = model.body();
+            source_total += body.source_triangle_count;
+            body_total += body.triangles.len();
+            assert!(!body.triangles.is_empty());
+            assert!(body.triangles.len() <= body.source_triangle_count);
+            assert_eq!(body.vertices.len(), body.vertex_parts.len());
+            assert!(body.vertices.len() <= model.vertices.len());
+            assert!(body.vertices.iter().all(|v| v.length() <= 1.0001));
+            let mut parts = BTreeSet::new();
+            for &triangle in &body.triangles {
+                let [a, b, c] = triangle.map(|index| body.vertices[usize::from(index)]);
+                assert!(triangle_normal(a, b, c).is_some());
+                let part = body.vertex_parts[usize::from(triangle[0])];
+                assert!(triangle
+                    .iter()
+                    .all(|&index| body.vertex_parts[usize::from(index)] == part));
+                parts.insert(part);
+            }
+            assert_eq!(parts.len(), model.parts.len());
+            eprintln!(
+                "{}: {} -> {} triangles ({} vertices)",
+                model.id,
+                body.source_triangle_count,
+                body.triangles.len(),
+                body.vertices.len()
+            );
+        }
+        eprintln!(
+            "Bundled body preprocessing: {source_total} -> {body_total} triangles in {:?}",
+            started.elapsed()
+        );
+        assert!(
+            body_total < source_total / 4,
+            "body geometry should be much cheaper than source meshes"
+        );
+        Ok(())
+    }
 
     #[test]
     fn preparation_covers_the_catalog_and_navigation_reuses_it() -> anyhow::Result<()> {
@@ -860,6 +960,17 @@ mod tests {
             .zip(models.prepared_models())
         {
             assert!(!Arc::ptr_eq(fine, coarse));
+            assert!(Arc::ptr_eq(
+                fine.gpu_topology
+                    .body
+                    .as_ref()
+                    .expect("the model has a body"),
+                coarse
+                    .gpu_topology
+                    .body
+                    .as_ref()
+                    .expect("the model has a body"),
+            ));
             assert_eq!(fine.poi_vertices, coarse.poi_vertices);
             assert_eq!(fine.slide_vertices, coarse.slide_vertices);
             assert!(fine.wireframe.edges().len() >= coarse.wireframe.edges().len());
@@ -1124,6 +1235,7 @@ mod tests {
             ],
             anchors: BTreeMap::new(),
             node_parts: BTreeMap::new(),
+            body: Arc::default(),
         };
         let fine = model.wireframe(CreaseThreshold::try_from(10.0)?);
         assert_eq!(fine.edges(), &[[0, 1], [0, 2], [1, 2], [3, 4]]);

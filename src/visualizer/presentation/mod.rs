@@ -286,13 +286,13 @@ impl Presentation {
         });
     }
 
+    /// Main typography and graphs sit behind the solid model backdrop.
     pub fn draw(
         &mut self,
         scene: &mut Scene,
         raster_assets: &mut Vec<RasterAsset>,
         stage: &Stage,
         palette: ScenePalette,
-        plate_mask: Option<&PlateMaskImage>,
     ) {
         if self.analyzers_visible {
             self.analysis.draw(scene, stage, palette);
@@ -309,14 +309,24 @@ impl Presentation {
             self.time,
         );
         self.selector.draw(scene, stage, palette);
+        for fx in &self.micro {
+            draw_micro(scene, stage, palette, fx);
+        }
+    }
+
+    /// Vertex callouts and POI graphs stay above the model wireframe.
+    pub fn draw_poi(
+        &self,
+        scene: &mut Scene,
+        stage: &Stage,
+        palette: ScenePalette,
+        plate_mask: Option<&PlateMaskImage>,
+    ) {
         self.poi
             .draw(scene, stage, palette, self.focus_blend, plate_mask);
         if !self.analyzers_visible {
             self.poi_graphs
                 .draw(scene, stage, palette, self.focus_blend);
-        }
-        for fx in &self.micro {
-            draw_micro(scene, stage, palette, fx);
         }
     }
 

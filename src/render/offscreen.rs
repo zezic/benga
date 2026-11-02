@@ -25,6 +25,7 @@ pub struct OffscreenRenderer {
     plate_mask: PlateMask,
     background: SceneTexture,
     foreground: Option<SceneTexture>,
+    poi_overlay: Option<SceneTexture>,
     background_ready: bool,
     target: wgpu::Texture,
     target_view: wgpu::TextureView,
@@ -97,6 +98,7 @@ impl OffscreenRenderer {
             plate_mask,
             background,
             foreground: None,
+            poi_overlay: None,
             background_ready: false,
             target,
             target_view,
@@ -172,6 +174,17 @@ impl OffscreenRenderer {
         } else {
             None
         };
+        let poi_overlay = if let Some(scene) = frame.poi_overlay {
+            Some(SceneTexture::rasterize(
+                &mut self.poi_overlay,
+                &mut self.renderer,
+                handle,
+                scene,
+                &self.params,
+            )?)
+        } else {
+            None
+        };
         let mut encoder = handle.device.create_command_encoder(&Default::default());
         let background_view = if let Some(color) = solid_color {
             self.solid_background
@@ -189,6 +202,7 @@ impl OffscreenRenderer {
             foreground,
             frame.overlay_composite,
             frame.overlay_opacity,
+            poi_overlay,
             None,
         );
         encoder.copy_texture_to_buffer(
@@ -284,6 +298,7 @@ mod tests {
                     gpu_models: &[],
                 },
                 foreground: true,
+                poi_overlay: None,
                 overlay_composite: None,
                 overlay_opacity: 1.0,
                 plate_instances: &[],
@@ -324,6 +339,27 @@ mod tests {
         foreground.reset();
         let third = renderer.render(&foreground, frame(Frame::Rebuilt(&background)))?;
         assert_eq!(third, [0, 255, 0, 255].repeat((width * height) as usize));
+
+        let mut poi = Scene::new();
+        poi.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            Color::from_rgb8(255, 0, 255),
+            None,
+            &Rect::new(0.0, 0.0, 20.0, f64::from(height)),
+        );
+        let mut with_poi = frame(Frame::Retained(&background));
+        with_poi.poi_overlay = Some(&poi);
+        let fourth = renderer.render(&foreground, with_poi)?;
+        for row in fourth.chunks_exact(width as usize * 4) {
+            assert_eq!(&row[..80], [255, 0, 255, 255].repeat(20));
+            assert_eq!(&row[80..], [0, 255, 0, 255].repeat(width as usize - 20));
+        }
+        let without_poi = renderer.render(&foreground, frame(Frame::Unchanged(&background)))?;
+        assert_eq!(
+            without_poi, third,
+            "retired POI texture must not remain visible"
+        );
         Ok(())
     }
 
@@ -352,6 +388,7 @@ mod tests {
                     gpu_models: &[],
                 },
                 foreground: true,
+                poi_overlay: None,
                 overlay_composite: None,
                 overlay_opacity: 1.0,
                 plate_instances: &[],

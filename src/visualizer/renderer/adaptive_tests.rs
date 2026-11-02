@@ -79,7 +79,9 @@ fn reduced_ribbon_layer_retains_thin_ink_and_full_resolution_scene() -> anyhow::
         mapped_at_creation: false,
     });
     let mut model = GpuModelFrame {
+        body_opacity: 1.0,
         topology: Arc::new(GpuTopology {
+            body: None,
             edges: vec![[0, 1]],
             vertex_count: 2,
             vertices: Vec::new(),
@@ -134,6 +136,7 @@ fn reduced_ribbon_layer_retains_thin_ink_and_full_resolution_scene() -> anyhow::
                     None,
                     None,
                     1.0,
+                    None,
                     Some(&top_view),
                 );
                 encoder.copy_texture_to_buffer(

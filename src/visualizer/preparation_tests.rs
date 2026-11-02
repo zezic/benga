@@ -21,6 +21,7 @@ fn measures_prepared_model_switching() {
                 sources.current(),
                 visualizer.crease_threshold,
                 visualizer.catalog.as_ref(),
+                None,
             ));
             preparation.push(before.elapsed().as_secs_f64() * 1_000_000.0);
             sources.navigate(crate::frame_schedule::Adjustment::Increase);

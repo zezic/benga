@@ -12,6 +12,7 @@ use crate::visualizer::{Frame, Renderer};
 
 fn model(topology: &Arc<GpuTopology>, color: [f32; 3], reset: u64) -> GpuModelFrame {
     GpuModelFrame {
+        body_opacity: 1.0,
         topology: Arc::clone(topology),
         projected: vec![],
         projection: None,
@@ -94,6 +95,7 @@ fn capture(
         None,
         1.0,
         None,
+        None,
     );
     encoder.copy_texture_to_buffer(
         target.as_image_copy(),
@@ -140,6 +142,7 @@ fn projected_history_survives_exchange_and_reseeds_without_stale_motion() -> any
     let device = &context.devices[id];
     assert!(supported(&device.device) && adapter_supported(device.adapter()));
     let topology = Arc::new(GpuTopology {
+        body: None,
         vertices: Vec::new(),
         bounds: [None; 2],
         vertex_count: 2,
@@ -237,6 +240,7 @@ fn unequal_frame_durations_weight_the_two_actual_intervals() -> anyhow::Result<(
     ))?;
     let device = &context.devices[id];
     let topology = Arc::new(GpuTopology {
+        body: None,
         vertices: Vec::new(),
         bounds: [None; 2],
         vertex_count: 2,
@@ -416,6 +420,7 @@ fn tight_parallel_support_preserves_float_pixels() -> anyhow::Result<()> {
             for dense in [false, true] {
                 let copies = if dense { 48 } else { 1 };
                 let topology = Arc::new(GpuTopology {
+                    body: None,
                     vertices: Vec::new(),
                     bounds: [None; 2],
                     vertex_count: 2 * copies,
@@ -424,6 +429,7 @@ fn tight_parallel_support_preserves_float_pixels() -> anyhow::Result<()> {
                 for composite in [ModelComposite::Additive, ModelComposite::Multiplicative] {
                     generation += 1;
                     let mut frame = GpuModelFrame {
+                        body_opacity: 1.0,
                         topology: Arc::clone(&topology),
                         projected: vec![],
                         projection: None,

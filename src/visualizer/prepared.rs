@@ -27,6 +27,7 @@ impl PreparedModel {
         model: &Model,
         crease: CreaseThreshold,
         catalog: Option<&crate::weapon::Catalog>,
+        gpu_body: Option<Arc<super::gpu_bridge::GpuBodyTopology>>,
     ) -> Self {
         let wireframe = Arc::new(model.wireframe(crease));
         let edge_order =
@@ -36,8 +37,27 @@ impl PreparedModel {
             .map(|index| slide_parts.contains(&wireframe.vertex_part(index)))
             .collect::<Vec<_>>()
             .into();
+        let gpu_body = gpu_body.unwrap_or_else(|| {
+            let body = model.body();
+            Arc::new(super::gpu_bridge::GpuBodyTopology {
+                vertices: body
+                    .vertices
+                    .iter()
+                    .zip(&body.vertex_parts)
+                    .map(|(vertex, part)| {
+                        [
+                            vertex.x,
+                            vertex.y,
+                            vertex.z,
+                            f32::from(slide_parts.contains(part)),
+                        ]
+                    })
+                    .collect(),
+                indices: body.triangles.iter().flatten().copied().collect(),
+            })
+        });
         let gpu_topology =
-            super::gpu_bridge::GpuTopology::with_slide_vertices(&wireframe, &slide_vertices);
+            super::gpu_bridge::GpuTopology::with_body(&wireframe, &slide_vertices, Some(gpu_body));
         let mut pois = Vec::new();
         let mut poi_vertices = BTreeMap::new();
         if let Some(weapon) = catalog.and_then(|catalog| catalog.weapons.get(&model.id)) {

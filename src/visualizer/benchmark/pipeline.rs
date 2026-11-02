@@ -178,6 +178,7 @@ struct Pipeline {
     target: wgpu::Texture,
     background_view: wgpu::TextureView,
     foreground_view: wgpu::TextureView,
+    poi_view: wgpu::TextureView,
     controls_view: wgpu::TextureView,
     target_view: wgpu::TextureView,
     background_ready: bool,
@@ -243,6 +244,11 @@ impl Pipeline {
             wgpu::TextureFormat::Rgba8Unorm,
             layer_usage,
         );
+        let poi = make(
+            "Pipeline POI callouts",
+            wgpu::TextureFormat::Rgba8Unorm,
+            layer_usage,
+        );
         let controls = make(
             "Pipeline controls",
             wgpu::TextureFormat::Rgba8Unorm,
@@ -255,6 +261,7 @@ impl Pipeline {
         );
         let background_view = background.create_view(&Default::default());
         let foreground_view = foreground.create_view(&Default::default());
+        let poi_view = poi.create_view(&Default::default());
         let controls_view = controls.create_view(&Default::default());
         let target_view = target.create_view(&Default::default());
         let mut renderer = crate::render::renderer(&handle.device)?;
@@ -287,10 +294,11 @@ impl Pipeline {
             solid_background: SolidBackground::default(),
             assets: RasterAssetCache::new(),
             plate_mask,
-            _textures: vec![background, foreground, controls],
+            _textures: vec![background, foreground, poi, controls],
             target,
             background_view,
             foreground_view,
+            poi_view,
             controls_view,
             target_view,
             background_ready: false,
@@ -474,6 +482,16 @@ impl Pipeline {
                 &self.params,
             )?;
         }
+        let poi_overlay = frame.poi_overlay.filter(|_| foreground_enabled);
+        if let Some(poi_scene) = poi_overlay {
+            self.renderer.render_to_texture(
+                &handle.device,
+                &handle.queue,
+                poi_scene,
+                &self.poi_view,
+                &self.params,
+            )?;
+        }
         if controls_visible {
             self.renderer.render_to_texture(
                 &handle.device,
@@ -512,6 +530,7 @@ impl Pipeline {
             (foreground_enabled && frame.foreground).then_some(&self.foreground_view),
             frame.overlay_composite,
             frame.overlay_opacity,
+            poi_overlay.map(|_| &self.poi_view),
             controls_visible.then_some(&self.controls_view),
         );
         handle.queue.submit([encoder.finish()]);

@@ -19,6 +19,19 @@ Adaptive quality starts at **1× native resolution**, lowers the model
 layer when needed and restores detail toward 1× as headroom returns. Background,
 infographics and controls retain native resolution.
 
+Presentations draw the main text and graphs first, followed by a solid model
+body in the background color, the model wireframe, and POI callouts. The body
+uses normal alpha composition, so graphics behind the model do not show through
+its silhouette. Wireframes retain the theme's additive or multiplicative blend;
+POI callouts and controls use normal alpha above them.
+
+The body mesh is prepared when a model loads: crease-aware edge decimation
+removes surface detail first, then nearby vertices merge into a coarse indexed
+surface. This backdrop reuses cached GPU buffers, follows the model and slide
+transforms, and stays at native resolution as wireframe quality adapts.
+It uses the preceding displayed pose (**−1**), centered within the wireframe's
+two-frame exposure; startup and history resets seed it from the current pose.
+
 Model motion blur uses a fixed two-frame exposure and can be turned off.
 Benga requires a compatible GPU with compute support.
 See the [GPU integration notes](docs/gpu-ribbon-integration.md) for quality logic,

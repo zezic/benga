@@ -48,6 +48,8 @@ pub enum Frame<'a> {
 pub struct FrameContent<'a> {
     pub background: Frame<'a>,
     pub foreground: bool,
+    /// POI callouts rasterized independently above the model wireframe.
+    pub poi_overlay: Option<&'a Scene>,
     pub top_overlay: bool,
     pub raster_assets: &'a [RasterAsset],
     pub plates: &'a [PlateInstance],
@@ -501,6 +503,7 @@ pub struct RenderWindow {
     solid_background: SolidBackground,
     raster_assets: RasterAssetCache,
     foreground: Option<SceneTexture>,
+    poi_overlay: Option<SceneTexture>,
     overlay: Option<SceneTexture>,
     plate_mask: PlateMask,
     target: TargetState,
@@ -613,6 +616,7 @@ impl RenderWindow {
             solid_background: SolidBackground::default(),
             raster_assets: RasterAssetCache::new(),
             foreground: None,
+            poi_overlay: None,
             overlay: None,
             plate_mask,
             target: TargetState::Dirty,
@@ -667,6 +671,7 @@ impl RenderWindow {
             &wgpu::TextureView,
             Option<&wgpu::TextureView>,
             Option<&wgpu::TextureView>,
+            Option<&wgpu::TextureView>,
             Option<&wgpu::QuerySet>,
         ),
     ) -> anyhow::Result<Presentation> {
@@ -674,6 +679,7 @@ impl RenderWindow {
         let FrameContent {
             background,
             foreground,
+            poi_overlay,
             top_overlay,
             raster_assets,
             plates,
@@ -756,6 +762,17 @@ impl RenderWindow {
         } else {
             None
         };
+        let poi_overlay = if let Some(scene) = poi_overlay {
+            Some(SceneTexture::rasterize(
+                &mut self.poi_overlay,
+                &mut self.renderer,
+                device,
+                scene,
+                &params,
+            )?)
+        } else {
+            None
+        };
         let top_overlay = if top_overlay {
             Some(SceneTexture::rasterize(
                 &mut self.overlay,
@@ -786,6 +803,7 @@ impl RenderWindow {
             background_view,
             &view,
             overlay,
+            poi_overlay,
             top_overlay,
             timing_slot.and_then(|slot| self.gpu_timing.as_ref()?.query_set(slot)),
         );

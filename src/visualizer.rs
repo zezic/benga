@@ -12,6 +12,7 @@ mod frame_metrics;
 mod geometry;
 #[cfg(test)]
 mod gpu_app_trial_tests;
+mod gpu_body;
 mod gpu_bridge;
 #[cfg(test)]
 mod gpu_bridge_tests;
@@ -4159,6 +4160,15 @@ impl Scene {
                 )));
             }
             frames.truncate(count);
+            let progress = if count == 1 {
+                1.0
+            } else {
+                smoothstep(self.transition)
+            };
+            frames[0].body_opacity = progress;
+            if count == 2 {
+                frames[1].body_opacity = 1.0 - progress;
+            }
         }
         if let Some(current) = &mut self.current {
             current.update(

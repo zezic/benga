@@ -8,6 +8,8 @@ use adaptive_resolution::AdaptiveResolution;
 use gpu_feedback::GpuFeedback;
 #[cfg(test)]
 mod adaptive_tests;
+#[cfg(test)]
+mod presentation_tests;
 
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -124,6 +126,8 @@ impl TextureBinding {
 /// Composites the GPU model, retained UI face, and diagnostic lines.
 pub struct Renderer {
     gpu_composition: Option<GpuComposition>,
+    gpu_body: Option<super::gpu_body::GpuBodyRenderer>,
+    format: wgpu::TextureFormat,
     gpu_ribbons: Option<super::gpu_ribbons::GpuRibbonRenderer>,
     adaptive_resolution: AdaptiveResolution,
     gpu_feedback: GpuFeedback,
@@ -367,6 +371,8 @@ impl Renderer {
         let line_buffer = create_instance_buffer::<LineInstance>(device, line_capacity);
         Self {
             gpu_composition: None,
+            gpu_body: None,
+            format,
             gpu_ribbons: None,
             adaptive_resolution: AdaptiveResolution::default(),
             gpu_feedback: GpuFeedback::default(),
@@ -624,6 +630,7 @@ impl Renderer {
         overlay: Option<&wgpu::TextureView>,
         overlay_composite: Option<ModelComposite>,
         overlay_opacity: f32,
+        poi_overlay: Option<&wgpu::TextureView>,
         top_overlay: Option<&wgpu::TextureView>,
     ) {
         let size = [viewport.width as u32, viewport.height as u32];
@@ -661,6 +668,7 @@ impl Renderer {
             overlay,
             overlay_composite,
             overlay_opacity,
+            poi_overlay,
             top_overlay,
         );
         #[cfg(test)]
@@ -715,6 +723,7 @@ impl Renderer {
         overlay: Option<&wgpu::TextureView>,
         overlay_composite: Option<ModelComposite>,
         overlay_opacity: f32,
+        poi_overlay: Option<&wgpu::TextureView>,
         top_overlay: Option<&wgpu::TextureView>,
     ) {
         let prepare_gpu = true;
@@ -734,6 +743,28 @@ impl Renderer {
                     physical_extent,
                     model_extent,
                     frame.gpu_models,
+                );
+        }
+        if frame
+            .gpu_models
+            .iter()
+            .any(|model| model.topology.body.is_some())
+            || self.gpu_body.is_some()
+        {
+            self.gpu_body
+                .get_or_insert_with(|| {
+                    super::gpu_body::GpuBodyRenderer::new(
+                        &device.device,
+                        self.format,
+                        &self.background_layout,
+                    )
+                })
+                .prepare(
+                    &device.device,
+                    &device.queue,
+                    encoder,
+                    frame.gpu_models,
+                    physical_extent,
                 );
         }
         if self
@@ -763,7 +794,7 @@ impl Renderer {
                 .queue
                 .write_buffer(&self.line_buffer, 0, bytemuck::cast_slice(frame.lines));
         }
-        if overlay.is_some() {
+        if overlay.is_some() || poi_overlay.is_some() {
             device.queue.write_buffer(
                 &self.overlay_opacity,
                 0,
@@ -772,7 +803,7 @@ impl Renderer {
                 }),
             );
         }
-        let overlay_binding = overlay.map(|view| {
+        let bind_overlay = |view: &wgpu::TextureView| {
             device.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Visualizer foreground overlay"),
                 layout: &self.overlay_layout,
@@ -787,7 +818,9 @@ impl Renderer {
                     },
                 ],
             })
-        });
+        };
+        let overlay_binding = overlay.map(bind_overlay);
+        let poi_binding = poi_overlay.map(bind_overlay);
         if let Some(view) = top_overlay {
             if self
                 .top_overlay
@@ -890,6 +923,19 @@ impl Renderer {
             &[],
         );
         pass.draw(0..3, 0..1);
+        if let Some(binding) = &overlay_binding {
+            let pipeline = match overlay_composite {
+                None => &self.overlay_normal_pipeline,
+                Some(ModelComposite::Additive) => &self.overlay_additive_pipeline,
+                Some(ModelComposite::Multiplicative) => &self.overlay_multiply_pipeline,
+            };
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, binding, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        if let Some(body) = &self.gpu_body {
+            body.draw(&mut pass, &self.background.as_ref().unwrap().bindings);
+        }
         {
             let pipeline = match frame.model_composite {
                 ModelComposite::Additive => &self.ribbon_upsample_additive,
@@ -909,13 +955,8 @@ impl Renderer {
             pass.set_vertex_buffer(0, self.line_buffer.slice(..));
             pass.draw(0..6, 0..line_count as u32);
         }
-        if let Some(binding) = &overlay_binding {
-            let pipeline = match overlay_composite {
-                None => &self.overlay_normal_pipeline,
-                Some(ModelComposite::Additive) => &self.overlay_additive_pipeline,
-                Some(ModelComposite::Multiplicative) => &self.overlay_multiply_pipeline,
-            };
-            pass.set_pipeline(pipeline);
+        if let Some(binding) = &poi_binding {
+            pass.set_pipeline(&self.overlay_normal_pipeline);
             pass.set_bind_group(0, binding, &[]);
             pass.draw(0..3, 0..1);
         }
@@ -1200,6 +1241,7 @@ mod tests {
                     Some(&foreground),
                     composite,
                     opacity,
+                    None,
                     Some(&top_overlay),
                 );
                 encoder.copy_texture_to_buffer(
@@ -1295,7 +1337,9 @@ mod tests {
         // remain visible through float accumulation and the final conversion.
         styles.extend(std::iter::repeat_n([0.0, 0.0, 1.0, 1.0 / 1024.0], 32));
         let model = GpuModelFrame {
+            body_opacity: 1.0,
             topology: Arc::new(GpuTopology {
+                body: None,
                 edges,
                 vertex_count: 6,
                 vertices: Vec::new(),
@@ -1349,6 +1393,7 @@ mod tests {
                 None,
                 None,
                 1.0,
+                None,
                 None,
             );
             encoder.copy_texture_to_buffer(
@@ -1487,6 +1532,7 @@ mod tests {
             None,
             1.0,
             None,
+            None,
         );
         device.queue.submit([encoder.finish()]);
         let mut at = AudioTime::ZERO;
@@ -1532,6 +1578,7 @@ mod tests {
                     None,
                     1.0,
                     None,
+                    None,
                 );
                 device.queue.submit([encoder.finish()]);
             }
@@ -1554,6 +1601,7 @@ mod tests {
             None,
             None,
             1.0,
+            None,
             None,
         );
         let row_bytes = width * 4;

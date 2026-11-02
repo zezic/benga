@@ -65,7 +65,9 @@ impl RibbonFixture {
     pub(super) fn model(self, width: u32, height: u32, count: usize) -> GpuModelFrame {
         assert!(width > 0 && height > 0, "fixture viewport must be nonzero");
         let mut frame = GpuModelFrame {
+            body_opacity: 1.0,
             topology: Arc::new(GpuTopology {
+                body: None,
                 vertex_count: 2,
                 edges: vec![[0, 1]; count],
                 vertices: Vec::new(),

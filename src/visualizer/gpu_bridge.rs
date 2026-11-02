@@ -8,8 +8,16 @@ use super::geometry::{
     Camera, DepthOpacity, FocusProjection, Pose, Projected, Vec2, Vec3, Wireframe,
 };
 
+/// Compact solid backdrop, shared independently of the wireframe's edge list.
+pub struct GpuBodyTopology {
+    /// Model-space xyz and membership of the translating slide subtree.
+    pub vertices: Vec<[f32; 4]>,
+    pub indices: Vec<u16>,
+}
+
 /// Immutable and shared for a model at one crease revision.
 pub struct GpuTopology {
+    pub body: Option<Arc<GpuBodyTopology>>,
     pub edges: Vec<[u32; 2]>,
     pub vertex_count: usize,
     /// Model-space xyz and membership of the translating slide subtree.
@@ -24,7 +32,16 @@ impl GpuTopology {
         Self::with_slide_vertices(wireframe, &[])
     }
 
+    #[cfg(test)]
     pub(super) fn with_slide_vertices(wireframe: &Wireframe, slide: &[bool]) -> Arc<Self> {
+        Self::with_body(wireframe, slide, None)
+    }
+
+    pub(super) fn with_body(
+        wireframe: &Wireframe,
+        slide: &[bool],
+        body: Option<Arc<GpuBodyTopology>>,
+    ) -> Arc<Self> {
         let vertices: Vec<_> = (0..wireframe.vertex_count())
             .map(|index| {
                 let v = wireframe.vertex(index);
@@ -46,6 +63,7 @@ impl GpuTopology {
             }
         }
         Arc::new(Self {
+            body,
             edges: wireframe
                 .edges()
                 .iter()
@@ -222,6 +240,8 @@ impl GpuProjection {
 /// Source projection parameters and current production ink, uploaded once/frame.
 pub struct GpuModelFrame {
     pub topology: Arc<GpuTopology>,
+    /// Solid coverage follows model transitions independently of line intensity.
+    pub body_opacity: f32,
     /// Screen xy, depth opacity, and near-plane visibility.
     #[cfg(test)]
     pub projected: Vec<[f32; 4]>,
@@ -257,6 +277,7 @@ impl GpuModelFrame {
     pub(super) fn new(topology: Arc<GpuTopology>) -> Self {
         Self {
             topology,
+            body_opacity: 1.0,
             #[cfg(test)]
             projected: Vec::new(),
             projection: None,

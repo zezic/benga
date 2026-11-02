@@ -25,7 +25,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --disable-pip-version-check 'cryptography==50.0.2'
-      - run: python -m unittest discover -s scripts -p test_release_metadata.py
+      - run: python -m unittest discover -s scripts -p 'test_*.py'
       - name: Validate build tag and derive optional update verification key
         id: signing
         env:

@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import tomllib
 import zipfile
 
@@ -47,6 +48,29 @@ def write_readme(directory):
     shutil.copy2(ROOT / "packaging" / "FIRST-RUN.txt", directory / "FIRST-RUN.txt")
 
 
+def create_dmg(image, destination, version):
+    for attempt in range(1, 6):
+        # DiskImages can hang when its output is piped; capture into a file.
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as log:
+            try:
+                run("hdiutil", "create", "-volname", f"Benga {version}", "-srcfolder", image,
+                    "-ov", "-format", "UDZO", destination, stdout=log, stderr=subprocess.STDOUT)
+            except subprocess.CalledProcessError as error:
+                failure = error
+            else:
+                failure = None
+            log.seek(0)
+            diagnostic = log.read()
+        print(diagnostic, end="", flush=True)
+        if failure is None:
+            return
+        if "Resource busy" not in diagnostic or attempt == 5:
+            raise failure
+        delay = 2 ** attempt
+        print(f"DMG resource busy; retrying in {delay}s (attempt {attempt + 1}/5)", flush=True)
+        time.sleep(delay)
+
+
 def macos(stage, output, binary, basename, version, no_dmg):
     app = stage / "Benga.app"
     contents = app / "Contents"
@@ -75,8 +99,7 @@ def macos(stage, output, binary, basename, version, no_dmg):
         shutil.copytree(app, image / "Benga.app", symlinks=True)
         (image / "Applications").symlink_to("/Applications", target_is_directory=True)
         write_readme(image)
-        run("hdiutil", "create", "-volname", f"Benga {version}", "-srcfolder", image,
-            "-ov", "-format", "UDZO", output / f"{basename}.dmg")
+        create_dmg(image, output / f"{basename}.dmg", version)
 
 
 def windows(stage, output, binary, basename, version):

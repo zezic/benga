@@ -115,4 +115,4 @@ restoring the sibling `.benga-backup-*` directory manually.
 Interactive installed-app GPU/audio checks remain necessary on each platform;
 CI package checks do not replace these. Useful checks:
 `cargo test --locked`, `cargo run --example window_chrome_probe`, and
-`target/release-tools/bin/python -m unittest discover -s scripts -p test_release_metadata.py`.
+`target/release-tools/bin/python -m unittest discover -s scripts -p 'test_*.py'`.

@@ -15,8 +15,6 @@ mod gpu_app_trial_tests;
 mod gpu_bridge;
 #[cfg(test)]
 mod gpu_bridge_tests;
-#[cfg(feature = "gpu-ribbon-prototype")]
-pub mod gpu_ribbon_prototype;
 mod gpu_ribbons;
 mod model;
 mod percussion;
@@ -85,7 +83,6 @@ use crate::{
     audio::timeline::{AudioInterval, AudioTime},
     config::ShutterFrames,
     frame_schedule::Adjustment,
-    shutter::ShutterWindow,
     theme::{mix, Accent, ThemeId},
 };
 
@@ -104,7 +101,9 @@ pub use ui::{Ui, UiFrame, View};
 const MAX_PENDING_ACTIONS: usize = 64;
 /// Give a possible drop priority over nearby snare model actions in an armed gap.
 const SNARE_DROP_GRACE_SECONDS: f64 = 0.050;
+#[cfg(test)]
 const MAX_HISTORY: usize = 17;
+#[cfg(test)]
 const HISTORY_SECONDS: f64 = 2.0;
 /// Inspector traces are sampled independently of the panel refresh rate.
 const DEBUG_SAMPLE_INTERVAL: f32 = 1.0 / 60.0;
@@ -516,6 +515,7 @@ struct MotionFade {
 }
 
 impl MotionFade {
+    #[cfg(test)]
     fn factor(self, distance: f32, width: f32) -> f32 {
         let speed = distance / (width + distance);
         let remaining = 1.0 - speed;
@@ -872,6 +872,7 @@ impl LineInstance {
 
     /// A shaded line with a flat, square end cap instead of the default round
     /// cap. Used for the rigid wireframe model.
+    #[cfg(test)]
     fn flat(
         start: Vec2,
         end: Vec2,
@@ -1341,8 +1342,8 @@ pub struct DebugSnapshot {
     pub ribbons: usize,
 }
 
-/// One triangle of analytical swept-line motion blur, with independent color
-/// and opacity at each vertex. Field order matches the storage buffer in ribbons.wgsl.
+/// Scalar reference triangle used to verify the GPU sweep geometry in tests.
+#[cfg(test)]
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct RibbonInstance {
@@ -1360,6 +1361,7 @@ pub struct RibbonInstance {
     pub style: [f32; 2],
 }
 
+#[cfg(test)]
 impl RibbonInstance {
     /// A single alpha-interpolated triangle. The three vertices carry
     /// independent colors.
@@ -1511,15 +1513,7 @@ impl Diagnosis {
 pub struct Frame<'a> {
     /// Diagnostic overlays drawn with normal blending.
     pub lines: &'a [LineInstance],
-    /// The model wireframe drawn with the themed composite.
-    pub model_lines: &'a [LineInstance],
-    /// Swept model motion blur drawn with the themed composite.
-    pub ribbons: &'a [RibbonInstance],
     pub model_composite: ModelComposite,
-    /// Largest prepared model, used to reserve GPU storage before animation.
-    pub model_edge_capacity: usize,
-    /// True only after resolving the opt-in request and fallback conditions.
-    pub gpu_active: bool,
     pub gpu_models: &'a [gpu_bridge::GpuModelFrame],
 }
 
@@ -1562,12 +1556,6 @@ pub struct Visualizer {
     model_rotation: ModelRotation,
     model_revision: ModelRevision,
     model_composite: ModelComposite,
-    model_lines: Vec<LineInstance>,
-    model_ribbons: Vec<RibbonInstance>,
-    gpu_requested: bool,
-    gpu_supported: bool,
-    gpu_edge_capacity: usize,
-    gpu_active: bool,
     gpu_status: &'static str,
     gpu_models: Vec<gpu_bridge::GpuModelFrame>,
     gpu_viewport: Option<(f32, f32)>,
@@ -1575,7 +1563,6 @@ pub struct Visualizer {
     model_motion: ModelMotion,
     motion_opacity: MotionOpacity,
     motion_fade_power: MotionFadePower,
-    frames: ShutterWindow,
     kick: f32,
     kick_decay: f32,
     spectral_relaxation: f32,
@@ -1646,20 +1633,13 @@ impl Visualizer {
             model_rotation: ModelRotation::default(),
             model_revision: ModelRevision::default(),
             model_composite: ModelComposite::default(),
-            model_lines: Vec::new(),
-            model_ribbons: Vec::new(),
-            gpu_requested: false,
-            gpu_supported: true,
-            gpu_edge_capacity: usize::MAX,
-            gpu_active: false,
-            gpu_status: "CPU ribbons",
+            gpu_status: "GPU ribbons: GPU projection / shutter 2",
             gpu_models: Vec::new(),
             gpu_viewport: None,
             line_width: LineWidth::default(),
             model_motion: ModelMotion::default(),
             motion_opacity: MotionOpacity::default(),
             motion_fade_power: MotionFadePower::default(),
-            frames: ShutterWindow::default(),
             kick: 0.0,
             kick_decay: tuning.kick_decay,
             spectral_relaxation: tuning.spectral_relaxation,
@@ -1752,13 +1732,20 @@ impl Visualizer {
         );
     }
 
-    fn reserve_model_buffers(&mut self, vertices: usize, edges: usize) {
-        self.scene.reserve(vertices, edges);
-        self.model_lines
-            .reserve(edges.saturating_sub(self.model_lines.len()));
-        // A crossing swept edge emits at most four body and four wing triangles.
-        self.model_ribbons
-            .reserve((edges * 8).saturating_sub(self.model_ribbons.len()));
+    fn reserve_model_buffers(&mut self, _vertices: usize, edges: usize) {
+        if self.gpu_models.is_empty() {
+            if let Some(current) = &self.scene.current {
+                self.gpu_models
+                    .push(gpu_bridge::GpuModelFrame::new(Arc::clone(
+                        &current.gpu_topology,
+                    )));
+            }
+        }
+        for frame in &mut self.gpu_models {
+            frame
+                .styles
+                .reserve(edges.saturating_sub(frame.styles.len()));
+        }
     }
 
     /// Steps through the automatic shuffled cycle when model rotation is on.
@@ -1938,7 +1925,6 @@ impl Visualizer {
         self.pending_actions.clear();
         self.deferred_snares.clear();
         self.scene.reset_temporal();
-        self.frames.clear();
         self.kick = 0.0;
         self.flip.reset(0.0);
         self.flip_half_turns = 0;
@@ -2120,33 +2106,36 @@ impl Visualizer {
     pub fn frame(&self) -> Frame<'_> {
         Frame {
             lines: &self.lines,
-            model_lines: &self.model_lines,
-            ribbons: &self.model_ribbons,
             model_composite: self.model_composite,
-            model_edge_capacity: self.model_lines.capacity(),
-            gpu_active: self.gpu_active,
-            gpu_models: if self.gpu_active {
-                &self.gpu_models
-            } else {
-                &[]
-            },
+            gpu_models: &self.gpu_models,
         }
     }
 
-    /// Process-local renderer selection. Animation and audio keep advancing.
-    pub fn set_gpu_ribbons(&mut self, requested: bool) {
-        if self.gpu_requested != requested {
-            self.gpu_requested = requested;
-            self.scene.reset_temporal();
+    /// Validate the prepared catalog before playback or export starts.
+    pub fn validate_gpu_models(&mut self, capacity: usize) -> anyhow::Result<()> {
+        if matches!(self.models, Models::Unloaded) {
+            self.load_models();
         }
-    }
-
-    pub fn set_gpu_ribbons_supported(&mut self, supported: bool) {
-        self.gpu_supported = supported;
-    }
-
-    pub fn set_gpu_ribbon_edge_capacity(&mut self, capacity: usize) {
-        self.gpu_edge_capacity = capacity;
+        let Some(current) = &self.scene.current else {
+            anyhow::bail!("No model catalog is available for GPU rendering");
+        };
+        anyhow::ensure!(
+            current.wireframe_edge_count() <= capacity,
+            "Model {} exceeds the GPU edge capacity of {capacity}",
+            current.name
+        );
+        let Models::Ready(models) = &self.models else {
+            return Ok(());
+        };
+        for model in models.prepared_models() {
+            let edges = model.gpu_topology.edges.len();
+            anyhow::ensure!(
+                edges <= capacity,
+                "Model {} requires {edges} GPU edges, but this device supports {capacity}",
+                model.name
+            );
+        }
+        Ok(())
     }
 
     pub fn gpu_ribbon_status(&self) -> &'static str {
@@ -2155,9 +2144,6 @@ impl Visualizer {
 
     /// Conservative three-pose support for layout, independent of tessellation.
     pub fn swept_model_bounds(&self) -> Option<vello::kurbo::Rect> {
-        if !self.gpu_active {
-            return None;
-        }
         self.scene
             .current
             .iter()
@@ -3349,8 +3335,8 @@ impl Visualizer {
                 .current
                 .as_ref()
                 .map_or(1.0, |model| model.entrance),
-            lines: self.lines.len() + self.model_lines.len(),
-            ribbons: self.model_ribbons.len(),
+            lines: self.line_count(),
+            ribbons: 0,
         }
     }
 
@@ -3399,7 +3385,7 @@ impl Visualizer {
     pub fn update(
         &mut self,
         frame: AudioInterval,
-        shutter: ShutterFrames,
+        _shutter: ShutterFrames,
         dt: f32,
         palette: &Palette,
         viewport: (f32, f32),
@@ -3471,7 +3457,6 @@ impl Visualizer {
             self.detectors.quake_stiffness,
             self.detectors.quake_damping,
         );
-        let exposure = self.frames.interval(frame, shutter);
         let music = Music {
             bands: self.bands.map(|band| band.value),
             raw_bands: self.last_spectrum.bands,
@@ -3486,34 +3471,14 @@ impl Visualizer {
         };
         let width =
             (viewport.0.min(viewport.1) / 440.0).clamp(0.62, 2.6) * 1.4 * self.line_width.factor();
-        let topology_supported = self
-            .scene
-            .current
-            .iter()
-            .chain(self.scene.outgoing.iter())
-            .all(|model| model.wireframe_edge_count() <= self.gpu_edge_capacity);
-        let gpu_status = if !self.gpu_requested {
-            "CPU ribbons"
-        } else if !self.gpu_supported {
-            "CPU fallback: GPU device limits"
-        } else if !topology_supported {
-            "CPU fallback: model exceeds GPU buffer limits"
-        } else if self.model_motion == ModelMotion::Still {
+        self.gpu_status = if self.model_motion == ModelMotion::Still {
             "GPU lines: GPU projection / motion blur off"
-        } else if shutter.frames() != 2.0 {
-            "CPU fallback: GPU requires shutter 2"
         } else {
             "GPU ribbons: GPU projection / shutter 2"
         };
-        let gpu_active = self.gpu_requested
-            && self.gpu_supported
-            && topology_supported
-            && (self.model_motion == ModelMotion::Still || shutter.frames() == 2.0);
-        if self.gpu_active != gpu_active || self.gpu_viewport != Some(viewport) {
+        if self.gpu_viewport != Some(viewport) {
             self.scene.reset_temporal();
         }
-        self.gpu_active = gpu_active;
-        self.gpu_status = gpu_status;
         self.gpu_viewport = Some(viewport);
         let quake_scale = (viewport.0.min(viewport.1) / 440.0).clamp(0.62, 2.6) * QUAKE_PIXELS;
         let shake = if self.showcase.mode() == showcase::ShowcaseMode::Normal
@@ -3527,8 +3492,6 @@ impl Visualizer {
             Vec2::new(0.0, 0.0)
         };
         self.lines.clear();
-        self.model_lines.clear();
-        self.model_ribbons.clear();
         if self.scene.current.is_none() {
             self.gpu_models.clear();
             self.diagnosis.vertex = None;
@@ -3547,7 +3510,7 @@ impl Visualizer {
             &self.routing,
             &self.mixer,
             &self.property_gates,
-            exposure.start(),
+            frame.start(),
             frame.end(),
             camera,
             &self.palette,
@@ -3562,13 +3525,11 @@ impl Visualizer {
             flip_pitch,
             shake,
             self.time,
-            &mut self.model_lines,
-            &mut self.model_ribbons,
-            if gpu_active {
-                Some(&mut self.gpu_models)
-            } else {
-                None
-            },
+            #[cfg(test)]
+            &mut Vec::new(),
+            #[cfg(test)]
+            &mut Vec::new(),
+            Some(&mut self.gpu_models),
         );
         self.record_debug_sample();
         let ui_scale = ui_scale.max(0.25);
@@ -4059,25 +4020,14 @@ impl Scene {
         self.transition = 1.0;
     }
 
-    /// Size both reusable animation slots before a model can enter the scene.
-    fn reserve(&mut self, vertices: usize, edges: usize) {
-        for runtime in self
-            .current
-            .iter_mut()
-            .chain(self.outgoing.iter_mut())
-            .chain(self.spare.iter_mut())
-        {
-            runtime.reserve(vertices, edges);
-        }
-    }
-
     fn set_prepared(&mut self, model: &PreparedModel) {
         if let Some(current) = &mut self.current {
             current.set_prepared(model);
         }
     }
 
-    /// Reuse the retired animation slot and immutable model preparation.
+    /// Cut directly to the complete new model using a reserved animation slot.
+    /// Reset its history so motion blur never bridges different source meshes.
     fn switch(&mut self, model: &PreparedModel, motion: ModelMotion, accent: f32) {
         let mut entering = self
             .outgoing
@@ -4099,18 +4049,12 @@ impl Scene {
         entering.roll = current.roll;
         entering.style = current.style;
         entering.phase = current.phase;
-        let slots = current
-            .wireframe_edge_count()
-            .max(entering.wireframe_edge_count());
-        entering.edge_dissolve.incoming(0.0, slots);
-        entering.active_edges = 0;
-        self.current
-            .as_mut()
-            .expect("a model is shown")
-            .edge_dissolve
-            .freeze();
-        self.outgoing = self.current.replace(entering);
-        self.transition = 0.0;
+        self.spare = self.current.replace(entering);
+        if let Some(retired) = &mut self.spare {
+            retired.clear_history();
+        }
+        self.outgoing = None;
+        self.transition = 1.0;
     }
 
     fn recycle_outgoing(&mut self) {
@@ -4146,7 +4090,7 @@ impl Scene {
         routing: &BandRouting,
         mixer: &Mixer,
         gates: &PropertyGates,
-        exposure_start: AudioTime,
+        _exposure_start: AudioTime,
         frame_end: AudioTime,
         camera: Camera,
         palette: &Palette,
@@ -4158,8 +4102,8 @@ impl Scene {
         flip_pitch: f32,
         shake: Vec2,
         time: f32,
-        out: &mut Vec<LineInstance>,
-        out_ribbons: &mut Vec<RibbonInstance>,
+        #[cfg(test)] out: &mut Vec<LineInstance>,
+        #[cfg(test)] out_ribbons: &mut Vec<RibbonInstance>,
         mut out_gpu: Option<&mut Vec<gpu_bridge::GpuModelFrame>>,
     ) {
         let Some(current) = &self.current else {
@@ -4224,7 +4168,7 @@ impl Scene {
                 routing,
                 mixer,
                 gates,
-                exposure_start,
+                _exposure_start,
                 frame_end,
                 camera,
                 palette,
@@ -4236,7 +4180,9 @@ impl Scene {
                 flip_pitch,
                 shake,
                 time,
+                #[cfg(test)]
                 out,
+                #[cfg(test)]
                 out_ribbons,
                 out_gpu.as_deref_mut().map(|frames| &mut frames[0]),
             );
@@ -4249,7 +4195,7 @@ impl Scene {
                 routing,
                 mixer,
                 gates,
-                exposure_start,
+                _exposure_start,
                 frame_end,
                 camera,
                 palette,
@@ -4261,7 +4207,9 @@ impl Scene {
                 flip_pitch,
                 shake,
                 time,
+                #[cfg(test)]
                 out,
+                #[cfg(test)]
                 out_ribbons,
                 out_gpu.as_deref_mut().map(|frames| &mut frames[1]),
             );
@@ -4313,21 +4261,27 @@ struct ModelRuntime {
     rotation_offset_pitch: f32,
     /// Vertices that move with the ejecting slide subtree.
     slide_vertices: Arc<[bool]>,
+    #[cfg(test)]
     history: VecDeque<PoseSnapshot>,
     /// Recycled pose storage; clearing history never frees its edge buffers.
+    #[cfg(test)]
     history_buffers: Vec<Vec<LineGeometry>>,
+    #[cfg(test)]
     vertices: Vec<Projected>,
     /// Latest GPU view; only UI anchor/diagnosis vertices are projected on CPU.
     gpu_projection: Option<gpu_bridge::GpuProjection>,
+    #[cfg(test)]
     current: Vec<LineGeometry>,
 }
 
+#[cfg(test)]
 #[derive(Clone)]
 struct PoseSnapshot {
     at: AudioTime,
     lines: Vec<LineGeometry>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 struct LineGeometry {
     start: Vec2,
@@ -4338,6 +4292,7 @@ struct LineGeometry {
 }
 
 /// Per-edge ink for one screen-space exposure sweep.
+#[cfg(test)]
 #[derive(Clone, Copy)]
 struct SweepInk {
     rgb: [f32; 3],
@@ -4432,11 +4387,16 @@ impl ModelRuntime {
         tint: ModelTint,
         motion_blur: bool,
     ) -> Self {
-        let mut runtime = Self::unallocated(model, pose, target_style, tint, motion_blur);
-        runtime.reserve(
-            model.wireframe.vertex_count(),
-            model.wireframe.edges().len(),
-        );
+        let runtime = Self::unallocated(model, pose, target_style, tint, motion_blur);
+        #[cfg(test)]
+        let runtime = {
+            let mut runtime = runtime;
+            runtime.reserve(
+                model.wireframe.vertex_count(),
+                model.wireframe.edges().len(),
+            );
+            runtime
+        };
         runtime
     }
 
@@ -4483,14 +4443,19 @@ impl ModelRuntime {
             rotation_offset_yaw: 0.0,
             rotation_offset_pitch: 0.0,
             slide_vertices: Arc::clone(&model.slide_vertices),
+            #[cfg(test)]
             history: VecDeque::new(),
+            #[cfg(test)]
             history_buffers: Vec::new(),
+            #[cfg(test)]
             vertices: Vec::new(),
             gpu_projection: None,
+            #[cfg(test)]
             current: Vec::new(),
         }
     }
 
+    #[cfg(test)]
     fn reserve(&mut self, vertices: usize, edges: usize) {
         self.vertices
             .reserve(vertices.saturating_sub(self.vertices.len()));
@@ -4515,6 +4480,7 @@ impl ModelRuntime {
     fn clear_history(&mut self) {
         self.gpu_generation = gpu_bridge::generation();
         self.gpu_bounds.clear();
+        #[cfg(test)]
         while let Some(snapshot) = self.history.pop_front() {
             self.history_buffers.push(snapshot.lines);
         }
@@ -4529,13 +4495,20 @@ impl ModelRuntime {
         motion_blur: bool,
     ) {
         self.clear_history();
-        self.vertices.clear();
-        self.current.clear();
+        #[cfg(test)]
+        {
+            self.vertices.clear();
+            self.current.clear();
+        }
         let mut fresh = Self::unallocated(model, pose, target_style, tint, motion_blur);
-        std::mem::swap(&mut self.history, &mut fresh.history);
-        std::mem::swap(&mut self.history_buffers, &mut fresh.history_buffers);
-        std::mem::swap(&mut self.vertices, &mut fresh.vertices);
-        std::mem::swap(&mut self.current, &mut fresh.current);
+        #[cfg(test)]
+        {
+            std::mem::swap(&mut self.history, &mut fresh.history);
+            std::mem::swap(&mut self.history_buffers, &mut fresh.history_buffers);
+            std::mem::swap(&mut self.vertices, &mut fresh.vertices);
+            std::mem::swap(&mut self.current, &mut fresh.current);
+        }
+        std::mem::swap(&mut self.gpu_bounds, &mut fresh.gpu_bounds);
         *self = fresh;
     }
 
@@ -4549,8 +4522,11 @@ impl ModelRuntime {
         self.edge_dissolve = transition::EdgeDissolve::from_order(model.edge_order.clone());
         self.active_edges = self.wireframe.edges().len();
         self.clear_history();
-        self.vertices.clear();
-        self.current.clear();
+        #[cfg(test)]
+        {
+            self.vertices.clear();
+            self.current.clear();
+        }
     }
 
     fn name(&self) -> &str {
@@ -4595,7 +4571,7 @@ impl ModelRuntime {
         routing: &BandRouting,
         mixer: &Mixer,
         gates: &PropertyGates,
-        exposure_start: AudioTime,
+        _exposure_start: AudioTime,
         frame_end: AudioTime,
         camera: Camera,
         palette: &Palette,
@@ -4607,10 +4583,12 @@ impl ModelRuntime {
         flip_pitch: f32,
         shake: Vec2,
         time: f32,
-        out: &mut Vec<LineInstance>,
-        out_ribbons: &mut Vec<RibbonInstance>,
+        #[cfg(test)] out: &mut Vec<LineInstance>,
+        #[cfg(test)] out_ribbons: &mut Vec<RibbonInstance>,
         gpu: Option<&mut gpu_bridge::GpuModelFrame>,
     ) {
+        #[cfg(test)]
+        let exposure_start = _exposure_start;
         let context = music.context(
             self.style,
             *gains,
@@ -4679,6 +4657,7 @@ impl ModelRuntime {
         self.pose.scale =
             self.frozen_scale + (target_scale - self.frozen_scale) * model_motion.abs();
         self.line_energy = gates.drive(Property::Line, mixer.value(MixPoint::Line, &context));
+        #[cfg(test)]
         self.vertices.clear();
         // A flip is a discrete spring transition, not a continuous motion. It
         // keeps its full spring action across the motion fade so entering POI
@@ -4802,117 +4781,127 @@ impl ModelRuntime {
             );
             // UI anchors and diagnosis project only their requested vertices.
             // Model vertices, edge history and ribbon expansion stay on GPU.
+            #[cfg(test)]
             self.current.clear();
             return;
         }
-        self.gpu_projection = None;
-        if blend != 0.0 {
-            self.project_vertices(showcase.slide_offset, camera.focused_projector(pose, focus));
-        } else {
-            self.project_vertices(showcase.slide_offset, |world| camera.project(world, pose));
-        }
-        self.current.clear();
-        self.current
-            .extend(self.wireframe.edges().iter().map(|edge| {
-                let a = self.vertices[edge[0] as usize];
-                let b = self.vertices[edge[1] as usize];
-                let visible = a.visible && b.visible;
-                LineGeometry {
-                    start: if visible { a.screen } else { camera.center },
-                    end: if visible { b.screen } else { camera.center },
-                    start_depth_opacity: if visible {
-                        depth_opacity.factor(a.depth)
-                    } else {
-                        0.0
-                    },
-                    end_depth_opacity: if visible {
-                        depth_opacity.factor(b.depth)
-                    } else {
-                        0.0
-                    },
-                    visible,
-                }
-            }));
-        let exposure = if self.motion_blur {
-            let mut lines = if self.history.len() == MAX_HISTORY {
-                self.history.pop_front().expect("history is full").lines
+        #[cfg(not(test))]
+        unreachable!("model frames require GPU projection");
+        #[cfg(test)]
+        {
+            self.gpu_projection = None;
+            if blend != 0.0 {
+                self.project_vertices(showcase.slide_offset, camera.focused_projector(pose, focus));
             } else {
-                self.history_buffers
-                    .pop()
-                    .expect("history buffers were reserved before playback")
-            };
-            lines.clone_from(&self.current);
-            self.history.push_back(PoseSnapshot {
-                at: frame_end,
-                lines,
-            });
-            while self
-                .history
-                .front()
-                .is_some_and(|snapshot| frame_end.seconds_since(snapshot.at) > HISTORY_SECONDS)
-            {
-                let snapshot = self.history.pop_front().expect("the expired pose exists");
-                self.history_buffers.push(snapshot.lines);
+                self.project_vertices(showcase.slide_offset, |world| camera.project(world, pose));
             }
-            self.exposure_poses(exposure_start, frame_end)
-        } else {
-            None
-        };
-        // Cull only the emitted instances; the temporal history keeps every
-        // edge so a sweep stays correct when the edge re-enters the viewport.
-        let screen = ScreenBounds::new(camera.viewport);
-        let mut active_edges = 0;
-        for (index, current) in self.current.iter().enumerate() {
-            let transition_alpha = self.edge_dissolve.alpha(index);
-            if transition_alpha <= 0.0 {
-                continue;
-            }
-            active_edges += 1;
-            if !current.visible {
-                continue;
-            }
-            let ink = self.edge_ink(index, palette, showcase, alpha);
-            let rgb = [ink[0], ink[1], ink[2]];
-            let edge_alpha = ink[3];
-
-            let Some(exposure) = &exposure else {
-                let start_color = [
-                    rgb[0],
-                    rgb[1],
-                    rgb[2],
-                    edge_alpha * current.start_depth_opacity,
-                ];
-                let end_color = [
-                    rgb[0],
-                    rgb[1],
-                    rgb[2],
-                    edge_alpha * current.end_depth_opacity,
-                ];
-                if start_color[3] == 0.0 && end_color[3] == 0.0 {
+            self.current.clear();
+            self.current
+                .extend(self.wireframe.edges().iter().map(|edge| {
+                    let a = self.vertices[edge[0] as usize];
+                    let b = self.vertices[edge[1] as usize];
+                    let visible = a.visible && b.visible;
+                    LineGeometry {
+                        start: if visible { a.screen } else { camera.center },
+                        end: if visible { b.screen } else { camera.center },
+                        start_depth_opacity: if visible {
+                            depth_opacity.factor(a.depth)
+                        } else {
+                            0.0
+                        },
+                        end_depth_opacity: if visible {
+                            depth_opacity.factor(b.depth)
+                        } else {
+                            0.0
+                        },
+                        visible,
+                    }
+                }));
+            let exposure =
+                if self.motion_blur {
+                    let mut lines = if self.history.len() == MAX_HISTORY {
+                        self.history.pop_front().expect("history is full").lines
+                    } else {
+                        self.history_buffers
+                            .pop()
+                            .expect("history buffers were reserved before playback")
+                    };
+                    lines.clone_from(&self.current);
+                    self.history.push_back(PoseSnapshot {
+                        at: frame_end,
+                        lines,
+                    });
+                    while self.history.front().is_some_and(|snapshot| {
+                        frame_end.seconds_since(snapshot.at) > HISTORY_SECONDS
+                    }) {
+                        let snapshot = self.history.pop_front().expect("the expired pose exists");
+                        self.history_buffers.push(snapshot.lines);
+                    }
+                    self.exposure_poses(exposure_start, frame_end)
+                } else {
+                    None
+                };
+            // Cull only the emitted instances; the temporal history keeps every
+            // edge so a sweep stays correct when the edge re-enters the viewport.
+            let screen = ScreenBounds::new(camera.viewport);
+            let mut active_edges = 0;
+            for (index, current) in self.current.iter().enumerate() {
+                let transition_alpha = self.edge_dissolve.alpha(index);
+                if transition_alpha <= 0.0 {
                     continue;
                 }
-                let line =
-                    LineInstance::flat(current.start, current.end, start_color, end_color, width);
-                if line.intersects(screen) {
-                    out.push(line);
+                active_edges += 1;
+                if !current.visible {
+                    continue;
                 }
-                continue;
-            };
+                let ink = self.edge_ink(index, palette, showcase, alpha);
+                let rgb = [ink[0], ink[1], ink[2]];
+                let edge_alpha = ink[3];
 
-            push_sweep(
-                exposure.first.line(index),
-                exposure.last.line(index),
-                SweepInk {
-                    rgb,
-                    alpha: edge_alpha,
-                    width,
-                },
-                motion_fade,
-                screen,
-                out_ribbons,
-            );
+                let Some(exposure) = &exposure else {
+                    let start_color = [
+                        rgb[0],
+                        rgb[1],
+                        rgb[2],
+                        edge_alpha * current.start_depth_opacity,
+                    ];
+                    let end_color = [
+                        rgb[0],
+                        rgb[1],
+                        rgb[2],
+                        edge_alpha * current.end_depth_opacity,
+                    ];
+                    if start_color[3] == 0.0 && end_color[3] == 0.0 {
+                        continue;
+                    }
+                    let line = LineInstance::flat(
+                        current.start,
+                        current.end,
+                        start_color,
+                        end_color,
+                        width,
+                    );
+                    if line.intersects(screen) {
+                        out.push(line);
+                    }
+                    continue;
+                };
+
+                push_sweep(
+                    exposure.first.line(index),
+                    exposure.last.line(index),
+                    SweepInk {
+                        rgb,
+                        alpha: edge_alpha,
+                        width,
+                    },
+                    motion_fade,
+                    screen,
+                    out_ribbons,
+                );
+            }
+            self.active_edges = active_edges;
         }
-        self.active_edges = active_edges;
     }
 
     fn edge_ink(
@@ -4980,6 +4969,7 @@ impl ModelRuntime {
             self.gpu_generation = gpu_bridge::generation();
         }
         gpu.topology = Arc::clone(&self.gpu_topology);
+        #[cfg(test)]
         gpu.projected.clear();
         gpu.projection = Some(projection);
         let bounds = projection.bounds(&self.gpu_topology);
@@ -5021,17 +5011,34 @@ impl ModelRuntime {
         if self.gpu_projection.is_some() {
             self.wireframe.vertex_count()
         } else {
-            self.vertices.len()
+            #[cfg(test)]
+            {
+                self.vertices.len()
+            }
+            #[cfg(not(test))]
+            {
+                0
+            }
         }
     }
 
     fn projected_vertex(&self, index: usize) -> Projected {
         self.gpu_projection.map_or_else(
-            || self.vertices[index],
+            || {
+                #[cfg(test)]
+                {
+                    self.vertices[index]
+                }
+                #[cfg(not(test))]
+                {
+                    unreachable!("model anchors require a GPU projection frame")
+                }
+            },
             |projection| projection.projected(self.gpu_topology.vertices[index]),
         )
     }
 
+    #[cfg(test)]
     fn project_vertices(&mut self, slide_offset: Vec3, project: impl Fn(Vec3) -> Projected) {
         for index in 0..self.wireframe.vertex_count() {
             self.vertices
@@ -5051,6 +5058,7 @@ impl ModelRuntime {
     /// The two recorded poses spanning one shutter exposure. The middle pose is
     /// reconstructed as the median of the endpoints, never sampled from history,
     /// so the gradient is centred on a straight interpolation of the exposure.
+    #[cfg(test)]
     fn exposure_poses(&self, start: AudioTime, end: AudioTime) -> Option<ExposurePoses<'_>> {
         if end <= start || self.history.len() < 2 {
             return None;
@@ -5065,6 +5073,7 @@ impl ModelRuntime {
         })
     }
 
+    #[cfg(test)]
     fn pose_at(&self, time: AudioTime) -> Option<SampledPose<'_>> {
         let first = self.history.front()?;
         let last = self.history.back()?;
@@ -5095,12 +5104,14 @@ impl ModelRuntime {
     }
 }
 
+#[cfg(test)]
 struct ExposurePoses<'a> {
     first: SampledPose<'a>,
     last: SampledPose<'a>,
 }
 
 /// A shutter endpoint borrows history and interpolates only the edges emitted.
+#[cfg(test)]
 enum SampledPose<'a> {
     Recorded(&'a [LineGeometry]),
     Interpolated {
@@ -5110,6 +5121,7 @@ enum SampledPose<'a> {
     },
 }
 
+#[cfg(test)]
 impl SampledPose<'_> {
     #[inline]
     fn line(&self, index: usize) -> LineGeometry {
@@ -5122,21 +5134,13 @@ impl SampledPose<'_> {
             } => lerp_line(before[index], after[index], *fraction),
         }
     }
-
-    #[cfg(test)]
-    fn iter(&self) -> impl Iterator<Item = LineGeometry> + '_ {
-        let count = match self {
-            Self::Recorded(lines) => lines.len(),
-            Self::Interpolated { before, .. } => before.len(),
-        };
-        (0..count).map(|index| self.line(index))
-    }
 }
 
 /// A constant-width quad stroke with independent opacity at each end. Used for
 /// the short, faded-in intersection cores rather than the full median edges.
 /// A single beveled V stroke through X. The two arms share one join edge, so the
 /// intersection opacity is composited once instead of twice.
+#[cfg(test)]
 fn segment_intersection(a0: Vec2, a1: Vec2, b0: Vec2, b1: Vec2) -> Option<Vec2> {
     let r = a1 - a0;
     let s = b1 - b0;
@@ -5154,6 +5158,7 @@ fn segment_intersection(a0: Vec2, a1: Vec2, b0: Vec2, b1: Vec2) -> Option<Vec2> 
     }
 }
 
+#[cfg(test)]
 fn lerp_line(from: LineGeometry, to: LineGeometry, fraction: f32) -> LineGeometry {
     LineGeometry {
         start: from.start.lerp(to.start, fraction),
@@ -5170,6 +5175,7 @@ fn lerp_line(from: LineGeometry, to: LineGeometry, fraction: f32) -> LineGeometr
 /// The body is the median pose. The incoming and outgoing gradients exist only
 /// after both poses have cleared the body cross-section; inside it they would
 /// overdraw the body and take its long-edge coverage with them.
+#[cfg(test)]
 fn push_sweep(
     first: LineGeometry,
     last: LineGeometry,
@@ -5380,6 +5386,7 @@ fn push_sweep(
 }
 
 /// Appends a ribbon only when it can contribute ink to the render target.
+#[cfg(test)]
 fn push_ribbon(out: &mut Vec<RibbonInstance>, screen: ScreenBounds, ribbon: RibbonInstance) {
     if ribbon.start_color[3] == 0.0 && ribbon.end_color[3] == 0.0 && ribbon.third_color[3] == 0.0 {
         return;
@@ -6637,54 +6644,6 @@ mod tests {
     }
 
     #[test]
-    fn longer_shutter_keeps_more_of_the_recorded_motion_path() {
-        fn trail(shutter: f32) -> (usize, f32) {
-            let mut visualizer = loaded_visualizer();
-            visualizer.set_model_motion(ModelMotion::Swept);
-            let palette = Palette::from_theme(crate::theme::ThemeId::default());
-            let mut frame =
-                AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
-            for _ in 0..14 {
-                visualizer.debug_music([0.8; BAND_COUNT], 0.8);
-                visualizer.update(
-                    frame,
-                    ShutterFrames::try_from(shutter).unwrap(),
-                    1.0 / 60.0,
-                    &palette,
-                    (1280.0, 440.0),
-                    1.0,
-                    1.0,
-                );
-                frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
-            }
-            let exposure_start = frame.start().shifted(-f64::from(shutter) / 60.0);
-            let exposure = visualizer
-                .scene
-                .current
-                .as_ref()
-                .expect("the model is loaded")
-                .exposure_poses(exposure_start, frame.start())
-                .expect("exposure poses");
-            let movement = exposure
-                .first
-                .iter()
-                .zip(exposure.last.iter())
-                .map(|(first, last)| {
-                    (last.start - first.start)
-                        .length()
-                        .max((last.end - first.end).length())
-                })
-                .sum();
-            (visualizer.frame().ribbons.len(), movement)
-        }
-        let (short_count, short_movement) = trail(1.0);
-        let (long_count, long_movement) = trail(8.0);
-        assert!(short_count > 0);
-        assert!(long_count > 0);
-        assert!(long_movement > short_movement);
-    }
-
-    #[test]
     fn near_opacity_floor_scales_below_the_line_energy_base() {
         fn peak_alpha(near_opacity: NearOpacity) -> f32 {
             let mut visualizer = loaded_visualizer();
@@ -6703,9 +6662,10 @@ mod tests {
             );
             visualizer
                 .frame()
-                .model_lines
+                .gpu_models
                 .iter()
-                .flat_map(|line| [line.start_color[3], line.end_color[3]])
+                .flat_map(gpu_endpoint_opacity)
+                .flatten()
                 .fold(0.0, f32::max)
         }
 
@@ -6716,6 +6676,25 @@ mod tests {
             low < normal * 0.1,
             "a 1% near-opacity floor must scale the line opacity below the 60% line base"
         );
+    }
+
+    fn gpu_endpoint_opacity(model: &gpu_bridge::GpuModelFrame) -> Vec<[f32; 2]> {
+        let projected = model.cpu_projected();
+        model
+            .topology
+            .edges
+            .iter()
+            .zip(&model.styles)
+            .filter(|(edge, _)| {
+                projected[edge[0] as usize][3] > 0.0 && projected[edge[1] as usize][3] > 0.0
+            })
+            .map(|(edge, style)| {
+                [
+                    style[3] * projected[edge[0] as usize][2],
+                    style[3] * projected[edge[1] as usize][2],
+                ]
+            })
+            .collect()
     }
 
     #[test]
@@ -6734,11 +6713,16 @@ mod tests {
             1.0,
         );
         let frame = visualizer.frame();
-        assert!(!frame.model_lines.is_empty(), "the model has edges");
+        assert!(
+            !frame.gpu_models[0].topology.edges.is_empty(),
+            "the model has edges"
+        );
+        let endpoint_opacity = gpu_endpoint_opacity(&frame.gpu_models[0]);
         let alphas: Vec<f32> = frame
-            .model_lines
+            .gpu_models
             .iter()
-            .flat_map(|line| [line.start_color[3], line.end_color[3]])
+            .flat_map(gpu_endpoint_opacity)
+            .flatten()
             .collect();
         let min = alphas.iter().copied().fold(f32::INFINITY, f32::min);
         let max = alphas.iter().copied().fold(f32::NEG_INFINITY, f32::max);
@@ -6747,10 +6731,9 @@ mod tests {
             "depth fade must dim the farthest endpoint: {min}..{max}"
         );
         assert!(
-            frame
-                .model_lines
+            endpoint_opacity
                 .iter()
-                .any(|line| (line.start_color[3] - line.end_color[3]).abs() > 0.01),
+                .any(|alpha| (alpha[0] - alpha[1]).abs() > 0.01),
             "an edge must interpolate between its endpoint depths"
         );
 
@@ -6768,15 +6751,10 @@ mod tests {
             1.0,
             1.0,
         );
-        for edge in &visualizer
-            .scene
-            .current
-            .as_ref()
-            .expect("the model is loaded")
-            .current
-        {
-            assert_eq!(edge.start_depth_opacity, 1.0);
-            assert_eq!(edge.end_depth_opacity, 1.0);
+        let projected = visualizer.frame().gpu_models[0].cpu_projected();
+        assert!(!projected.is_empty());
+        for vertex in projected {
+            assert_eq!(vertex[2], 1.0);
         }
     }
 
@@ -7681,14 +7659,14 @@ mod tests {
             frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
         }
         let model = visualizer.scene.current.as_ref().expect("a model is shown");
-        let lines = visualizer.frame().model_lines;
-        assert_eq!(lines.len(), model.wireframe.edges().len());
+        let styles = &visualizer.frame().gpu_models[0].styles;
+        assert_eq!(styles.len(), model.wireframe.edges().len());
         let mut selected_alpha = 0.0;
         let mut selected_count = 0;
         let mut other_alpha = 0.0;
         let mut other_count = 0;
-        for (index, line) in lines.iter().enumerate() {
-            let alpha = line.start_color[3] + line.end_color[3];
+        for (index, style) in styles.iter().enumerate() {
+            let alpha = style[3];
             if model.wireframe.edge_part(index) == selected {
                 selected_alpha += alpha;
                 selected_count += 1;
@@ -7737,10 +7715,11 @@ mod tests {
         let focus = visualizer.showcase.frame().focus;
         assert!(focus.blend > 0.9, "the camera reaches the POI framing");
         assert!(focus.radius > 0.0);
-        let lines = visualizer.frame().model_lines;
-        assert!(!lines.is_empty());
-        for line in lines {
-            for value in line.endpoints {
+        let projected = visualizer.frame().gpu_models[0].cpu_projected();
+        assert!(!projected.is_empty());
+        assert!(projected.iter().any(|point| point[3] > 0.0));
+        for point in projected {
+            for value in point {
                 assert!(value.is_finite());
             }
         }
@@ -7768,15 +7747,8 @@ mod tests {
             frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
             let frame = visualizer.frame();
             let mut rgbs: Vec<[f32; 3]> = Vec::new();
-            for line in frame.model_lines {
-                for color in [line.start_color, line.end_color] {
-                    if color[3] > 0.0 {
-                        rgbs.push([color[0], color[1], color[2]]);
-                    }
-                }
-            }
-            for ribbon in frame.ribbons {
-                for color in [ribbon.start_color, ribbon.end_color, ribbon.third_color] {
+            for model in frame.gpu_models {
+                for color in &model.styles {
                     if color[3] > 0.0 {
                         rgbs.push([color[0], color[1], color[2]]);
                     }
@@ -7851,6 +7823,7 @@ mod tests {
         let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
         let mut first_anchor = None;
         let mut latest_anchor = None;
+        let mut seen_follow_lag = false;
         for step in 0..120 {
             visualizer.debug_music([0.7; BAND_COUNT], 0.7);
             visualizer.update(
@@ -7866,17 +7839,17 @@ mod tests {
                 // Make the follow test independent of which vertex the RNG
                 // picked: the top vertices clamp the readout anchor to the
                 // viewport edge and can keep it there for the whole run.
-                let vertex = visualizer
+                let current = visualizer
                     .scene
                     .current
                     .as_ref()
-                    .expect("the model is loaded")
-                    .vertices
-                    .iter()
-                    .enumerate()
+                    .expect("the model is loaded");
+                let vertex = (0..current.projected_vertex_count())
+                    .map(|index| (index, current.projected_vertex(index)))
+                    .filter(|(_, projected)| projected.visible)
                     .max_by(|(_, a), (_, b)| a.screen.y.total_cmp(&b.screen.y))
                     .map(|(index, _)| index)
-                    .expect("the cube has vertices");
+                    .expect("the model has visible GPU-projected vertices");
                 visualizer.diagnosis.vertex = Some(TrackedVertex::new(
                     vertex,
                     visualizer
@@ -7888,6 +7861,19 @@ mod tests {
                 ));
                 visualizer.diagnosis.anchor = visualizer.diagnosis_target((1280.0, 440.0), 1.0);
                 visualizer.diagnosis.refresh_timer = 0.0;
+            }
+            let tracked = visualizer
+                .diagnosis
+                .vertex
+                .as_ref()
+                .expect("the diagnosis follows a model vertex");
+            let projected = visualizer
+                .vertex_screen(u16::try_from(tracked.index).expect("fixture vertex fits u16"))
+                .expect("the selected GPU vertex has a projected position");
+            assert_eq!(tracked.data.screen, Vec2::new(projected[0], projected[1]));
+            if step > 0 {
+                let target = visualizer.diagnosis_target((1280.0, 440.0), 1.0);
+                seen_follow_lag |= (target - visualizer.diagnosis.anchor).length() > 0.01;
             }
             if let Some(readout) = visualizer.diagnosis() {
                 assert!(
@@ -7909,6 +7895,10 @@ mod tests {
         let first = first_anchor.expect("diagnosis must become visible");
         let latest = latest_anchor.expect("diagnosis must stay visible");
         assert!((first[0] - latest[0]).abs() + (first[1] - latest[1]).abs() > 0.05);
+        assert!(
+            seen_follow_lag,
+            "the readout must ease toward its moving vertex"
+        );
         let frame = visualizer.frame();
         assert!(
             !frame.lines.is_empty(),
@@ -7969,8 +7959,11 @@ mod tests {
             && band.abl.is_finite()
             && band.drp.is_finite()));
         assert!(!snapshot.scene.is_empty());
-        assert!(snapshot.lines + snapshot.ribbons > 0);
-        assert!(snapshot.ribbons > 0);
+        assert!(snapshot.lines > 0);
+        assert_eq!(
+            snapshot.ribbons, 0,
+            "GPU triangles are never built on the host"
+        );
         assert!(snapshot.properties.iter().all(|value| value.is_finite()));
         let history = visualizer.debug_history();
         assert!(history.samples().count() >= 3);
@@ -8440,11 +8433,19 @@ mod tests {
             return;
         }
         let first = visualizer.scene_name().to_owned();
-        let initial_lines = visualizer.line_count();
         visualizer.handle_action(Action::Drop(1.0), 0.0, 0.75);
         assert_ne!(visualizer.scene_name(), first);
-        assert!(visualizer.scene.outgoing.is_some());
-        assert_eq!(visualizer.line_count(), initial_lines);
+        assert!(visualizer.scene.outgoing.is_none());
+        assert_eq!(visualizer.scene.transition, 1.0);
+        assert_eq!(
+            visualizer.line_count(),
+            visualizer
+                .scene
+                .current
+                .as_ref()
+                .unwrap()
+                .wireframe_edge_count()
+        );
         // Step through the rest of the bag cycle: every model appears once.
         let mut seen = vec![first, visualizer.scene_name().to_owned()];
         for _ in 2..total {
@@ -8576,7 +8577,7 @@ mod tests {
     }
 
     #[test]
-    fn motion_blur_draws_covered_ribbons_at_rest() -> anyhow::Result<()> {
+    fn motion_blur_keeps_gpu_projection_and_ink_at_rest() -> anyhow::Result<()> {
         let mut visualizer = loaded_visualizer();
         visualizer.set_model_motion(ModelMotion::Swept);
         let palette = Palette::from_theme(ThemeId::default());
@@ -8600,43 +8601,17 @@ mod tests {
             frame.lines.is_empty(),
             "model motion blur draws swept ribbons at every speed"
         );
-        assert!(!frame.ribbons.is_empty());
+        assert_eq!(frame.gpu_models.len(), 1);
+        let model = &frame.gpu_models[0];
+        assert!(model.projection.is_some());
         assert!(
-            frame.ribbons.iter().any(|ribbon| ribbon.style[1] != 0.0),
-            "support edges carry analytic coverage masks"
+            model.styles.iter().any(|style| style[3] > 0.0),
+            "resting edges retain visible ink"
         );
-        Ok(())
-    }
-
-    #[test]
-    fn slow_wide_edges_keep_only_the_body() -> anyhow::Result<()> {
-        let mut visualizer = loaded_visualizer();
-        visualizer.set_model_motion(ModelMotion::Swept);
-        visualizer.set_line_width(LineWidth::try_from(3.0)?);
-        let palette = Palette::from_theme(ThemeId::default());
-        let shutter = ShutterFrames::try_from(2.0)?;
-        let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
-        for _ in 0..300 {
-            visualizer.debug_music([0.0; BAND_COUNT], 0.0);
-            visualizer.update(
-                frame,
-                shutter,
-                1.0 / 60.0,
-                &palette,
-                (1280.0, 440.0),
-                1.0,
-                1.0,
-            );
-            frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
-        }
-        let frame = visualizer.frame();
-        assert!(!frame.ribbons.is_empty());
-        assert!(
-            frame
-                .ribbons
-                .iter()
-                .all(|ribbon| ribbon.style[1] == 3.0 || ribbon.style[1] == 6.0),
-            "slow wide edges must emit only the covered body, not wings inside it"
+        assert!(model.cpu_projected().iter().any(|vertex| vertex[3] > 0.0));
+        assert_eq!(
+            visualizer.scene.current.as_ref().unwrap().gpu_bounds.len(),
+            3
         );
         Ok(())
     }
@@ -8853,17 +8828,26 @@ mod tests {
             frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
         };
 
+        visualizer.set_model_motion(ModelMotion::Still);
         step(&mut visualizer);
-        assert!(!visualizer.frame().model_lines.is_empty());
-        assert!(visualizer.frame().ribbons.is_empty());
+        assert_eq!(visualizer.frame().gpu_models.len(), 1);
+        assert!(visualizer.gpu_ribbon_status().starts_with("GPU lines"));
+        let still_generation = visualizer.frame().gpu_models[0].reset;
+        assert_eq!(
+            visualizer.scene.current.as_ref().unwrap().gpu_bounds.len(),
+            1
+        );
 
         visualizer.set_model_motion(ModelMotion::Swept);
         for _ in 0..4 {
             step(&mut visualizer);
         }
-        assert!(
-            !visualizer.frame().ribbons.is_empty(),
-            "fast model edges should sweep"
+        assert_eq!(visualizer.frame().gpu_models.len(), 1);
+        assert!(visualizer.gpu_ribbon_status().starts_with("GPU ribbons"));
+        assert_ne!(visualizer.frame().gpu_models[0].reset, still_generation);
+        assert_eq!(
+            visualizer.scene.current.as_ref().unwrap().gpu_bounds.len(),
+            3
         );
         assert!(
             visualizer.line_count() > 1_000,
@@ -8872,8 +8856,12 @@ mod tests {
 
         visualizer.set_model_motion(ModelMotion::Still);
         step(&mut visualizer);
-        assert!(!visualizer.frame().model_lines.is_empty());
-        assert!(visualizer.frame().ribbons.is_empty());
+        assert_eq!(visualizer.frame().gpu_models.len(), 1);
+        assert!(visualizer.gpu_ribbon_status().starts_with("GPU lines"));
+        assert_eq!(
+            visualizer.scene.current.as_ref().unwrap().gpu_bounds.len(),
+            1
+        );
         Ok(())
     }
 
@@ -8894,7 +8882,7 @@ mod tests {
                 1.0,
                 1.0,
             );
-            visualizer.frame().model_lines[0].style[0]
+            visualizer.frame().gpu_models[0].width
         };
 
         visualizer.set_line_width(LineWidth::try_from(1.0)?);
@@ -8926,24 +8914,17 @@ mod tests {
         );
         let fine = {
             let displayed = visualizer.frame();
-            let lines = displayed.lines.len() + displayed.model_lines.len();
-            assert!(lines > 1_000);
-            assert!(
-                displayed.ribbons.is_empty(),
-                "the rigid model does not sweep"
-            );
-            assert!(
-                displayed
-                    .model_lines
-                    .iter()
-                    .all(|line| line.style[1] == 1.0),
-                "the model wireframe uses flat caps"
-            );
+            assert_eq!(displayed.gpu_models.len(), 1);
+            let model = &displayed.gpu_models[0];
+            let edges = model.topology.edges.len();
+            assert!(edges > 1_000);
+            assert_eq!(model.styles.len(), edges);
+            assert!(model.projection.is_some());
             assert!(
                 displayed.lines.iter().all(|line| line.style[1] == 0.0),
                 "diagnosis lines keep round caps"
             );
-            lines
+            edges
         };
         visualizer.set_crease_threshold(CreaseThreshold::try_from(70.0)?);
         let next = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
@@ -8957,7 +8938,7 @@ mod tests {
             1.0,
         );
         let coarse = visualizer.frame();
-        assert!(coarse.lines.len() + coarse.model_lines.len() < fine);
+        assert!(coarse.gpu_models[0].topology.edges.len() < fine);
         Ok(())
     }
 }

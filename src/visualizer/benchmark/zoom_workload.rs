@@ -149,8 +149,6 @@ fn gpu_zoom_snapshot_projects_lazy_source_vertices_for_diagnostics() -> anyhow::
     ui.dismiss_startup();
     let visualizer = ui.benchmark_visualizer_mut();
     visualizer.load_models();
-    visualizer.set_gpu_ribbons(true);
-    visualizer.set_gpu_ribbons_supported(true);
     let mut view = View::fit(Size::new(1280.0, 720.0));
     let script = ZoomWorkload {
         near: 0.7,
@@ -167,7 +165,7 @@ fn gpu_zoom_snapshot_projects_lazy_source_vertices_for_diagnostics() -> anyhow::
         FrameRateLimit::Fps60,
         FrameTime::new(start, start + Duration::from_secs_f64(1.0 / 60.0)),
     );
-    assert!(frame.overlay.gpu_active);
+    assert!(!frame.overlay.gpu_models.is_empty());
     assert!(frame.overlay.gpu_models[0].projected.is_empty());
     let current = ui
         .benchmark_visualizer_mut()

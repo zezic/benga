@@ -1,4 +1,4 @@
-//! Deterministic CPU workload without a window or GPU.
+//! Deterministic host scene construction without a window or GPU submission.
 use std::time::{Duration, Instant};
 
 use benga::{
@@ -17,7 +17,8 @@ fn main() -> anyhow::Result<()> {
     let origin = Instant::now();
     let mut measured = Duration::ZERO;
     let mut rebuilt = 0;
-    let mut ribbons = 0;
+    let mut edges = 0;
+    let mut style_bytes = 0;
     for index in 0..660 {
         let start = origin + Duration::from_secs_f64(index as f64 / 60.0);
         let end = origin + Duration::from_secs_f64((index + 1) as f64 / 60.0);
@@ -43,13 +44,17 @@ fn main() -> anyhow::Result<()> {
         if index >= 60 {
             measured += before.elapsed();
             rebuilt += usize::from(matches!(frame.background, benga::render::Frame::Rebuilt(_)));
-            ribbons += frame.overlay.ribbons.len();
+            for model in frame.overlay.gpu_models {
+                edges += model.topology.edges.len();
+                style_bytes += std::mem::size_of_val(model.styles.as_slice());
+            }
         }
     }
     println!(
-        "CPU draw: {:.1} us/frame; {rebuilt}/600 background rebuilds; {} ribbons/frame",
+        "Host scene construction: {:.1} us/frame; {rebuilt}/600 background rebuilds; {} GPU source edges/frame; {} edge-style bytes/frame (excludes GPU submission and drawing)",
         measured.as_secs_f64() * 1e6 / 600.0,
-        ribbons / 600
+        edges / 600,
+        style_bytes / 600,
     );
     Ok(())
 }

@@ -138,7 +138,9 @@ impl GpuProjection {
                 self.camera[0] + view[0] * perspective,
                 self.camera[1] - view[1] * perspective,
             ),
+            #[cfg(test)]
             depth,
+            #[cfg(test)]
             visible: raw > self.camera[3],
         }
     }
@@ -221,6 +223,7 @@ impl GpuProjection {
 pub struct GpuModelFrame {
     pub topology: Arc<GpuTopology>,
     /// Screen xy, depth opacity, and near-plane visibility.
+    #[cfg(test)]
     pub projected: Vec<[f32; 4]>,
     /// Production uses compute projection; frozen test fixtures may supply records.
     pub projection: Option<GpuProjection>,
@@ -254,6 +257,7 @@ impl GpuModelFrame {
     pub(super) fn new(topology: Arc<GpuTopology>) -> Self {
         Self {
             topology,
+            #[cfg(test)]
             projected: Vec::new(),
             projection: None,
             styles: Vec::new(),

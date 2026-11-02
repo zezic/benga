@@ -1265,45 +1265,9 @@ fn horizontal_lanes(visualizer: &Visualizer, stage: &Stage) -> Vec<Rect> {
 }
 
 fn model_bounds(visualizer: &Visualizer, stage: &Stage) -> Option<Rect> {
-    let frame = visualizer.frame();
-    if frame.gpu_active {
-        return visualizer
-            .swept_model_bounds()
-            .map(|rect| rect.inflate(stage.px(24.0), stage.px(24.0)));
-    }
-    let mut bounds: Option<Rect> = None;
-    let mut include = |x: f32, y: f32, padding: f64| {
-        if x.is_finite() && y.is_finite() {
-            let point = Rect::new(
-                f64::from(x) - padding,
-                f64::from(y) - padding,
-                f64::from(x) + padding,
-                f64::from(y) + padding,
-            );
-            bounds = Some(bounds.map_or(point, |old| old.union(point)));
-        }
-    };
-    for line in frame.model_lines {
-        if line.start_color[3].max(line.end_color[3]) <= 0.0 {
-            continue;
-        }
-        let padding = f64::from(line.style[0].max(1.0)) * 0.5 + 1.5;
-        include(line.endpoints[0], line.endpoints[1], padding);
-        include(line.endpoints[2], line.endpoints[3], padding);
-    }
-    for ribbon in frame.ribbons {
-        if ribbon.start_color[3]
-            .max(ribbon.end_color[3])
-            .max(ribbon.third_color[3])
-            <= 0.0
-        {
-            continue;
-        }
-        include(ribbon.start[0], ribbon.start[1], 0.0);
-        include(ribbon.start[2], ribbon.start[3], 0.0);
-        include(ribbon.end[0], ribbon.end[1], 0.0);
-    }
-    bounds.map(|rect| rect.inflate(stage.px(24.0), stage.px(24.0)))
+    visualizer
+        .swept_model_bounds()
+        .map(|rect| rect.inflate(stage.px(24.0), stage.px(24.0)))
 }
 
 fn matching_event(kind: PlotKind, events: Events) -> bool {
@@ -2782,7 +2746,6 @@ mod tests {
         };
         let stage = Stage::new(Size::new(1920.0, 1080.0));
         let mut visualizer = Visualizer::new();
-        visualizer.set_gpu_ribbons(true);
         let palette = crate::visualizer::Palette::from_theme(crate::theme::ThemeId::default());
         for index in 0..3 {
             let start = AudioTime::ZERO.shifted(index as f64 / 60.0);
@@ -2796,9 +2759,7 @@ mod tests {
                 1.0,
             );
         }
-        assert!(visualizer.frame().gpu_active);
-        assert!(visualizer.frame().ribbons.is_empty());
-        assert!(visualizer.frame().model_lines.is_empty());
+        assert!(!visualizer.frame().gpu_models.is_empty());
         let support = visualizer.swept_model_bounds().expect("projected support");
         let model = model_bounds(&visualizer, &stage).expect("graph exclusion");
         assert_eq!(model, support.inflate(stage.px(24.0), stage.px(24.0)));
@@ -2809,23 +2770,23 @@ mod tests {
 
     #[test]
     fn full_width_rows_reserve_the_model_and_its_motion_blur() {
-        use crate::visualizer::{LineInstance, RibbonInstance};
         let stage = Stage::new(Size::new(1920.0, 1080.0));
         let mut visualizer = Visualizer::new();
-        visualizer.model_lines.push(LineInstance {
-            endpoints: [700.0, 400.0, 1200.0, 600.0],
-            start_color: [1.0; 4],
-            end_color: [1.0; 4],
-            style: [2.0, 0.0, 0.0, 0.0],
-        });
-        visualizer.model_ribbons.push(RibbonInstance {
-            start: [700.0, 600.0, 1200.0, 650.0],
-            end: [1000.0, 700.0],
-            start_color: [1.0; 4],
-            end_color: [1.0; 4],
-            third_color: [1.0; 4],
-            style: [0.0; 2],
-        });
+        visualizer.load_models();
+        let current = visualizer
+            .scene
+            .current
+            .as_mut()
+            .expect("prepared current model");
+        // The GPU path publishes a ring of conservative projected supports,
+        // including the lower endpoint reached during the exposure.
+        current.gpu_bounds.clear();
+        current
+            .gpu_bounds
+            .push_back((0.0, Some(Rect::new(700.0, 400.0, 1200.0, 600.0))));
+        current
+            .gpu_bounds
+            .push_back((1.0 / 60.0, Some(Rect::new(700.0, 600.0, 1200.0, 700.0))));
         let model = model_bounds(&visualizer, &stage).unwrap();
         assert!(
             model.y1 >= 724.0,

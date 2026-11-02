@@ -61,63 +61,15 @@ fn runtimes(scene: &Scene) -> impl Iterator<Item = &ModelRuntime> {
         .chain(scene.spare.iter())
 }
 
-fn slot_pointers(scene: &Scene) -> BTreeSet<(usize, usize)> {
-    runtimes(scene)
-        .map(|runtime| {
-            (
-                runtime.vertices.as_ptr() as usize,
-                runtime.current.as_ptr() as usize,
-            )
-        })
-        .collect()
-}
-
-fn history_pointers(scene: &Scene) -> BTreeSet<usize> {
-    runtimes(scene)
-        .flat_map(|runtime| {
-            runtime
-                .history_buffers
-                .iter()
-                .chain(runtime.history.iter().map(|snapshot| &snapshot.lines))
-                .map(|lines| lines.as_ptr() as usize)
-        })
-        .collect()
-}
-
-fn assert_reserved(visualizer: &Visualizer) {
-    let models = prepared(visualizer);
-    let vertices = models
-        .prepared_models()
-        .iter()
-        .map(|model| model.wireframe.vertex_count())
-        .max()
-        .unwrap();
-    let edges = models
-        .prepared_models()
-        .iter()
-        .map(|model| model.wireframe.edges().len())
-        .max()
-        .unwrap();
+fn assert_gpu_storage(visualizer: &Visualizer) {
     assert_eq!(runtimes(&visualizer.scene).count(), 2);
     for runtime in runtimes(&visualizer.scene) {
-        assert!(runtime.vertices.capacity() >= vertices);
-        assert!(runtime.current.capacity() >= edges);
-        assert!(runtime.history.capacity() >= MAX_HISTORY);
-        assert!(runtime.history_buffers.capacity() >= MAX_HISTORY);
-        assert_eq!(
-            runtime.history.len() + runtime.history_buffers.len(),
-            MAX_HISTORY
-        );
-        for lines in runtime
-            .history_buffers
-            .iter()
-            .chain(runtime.history.iter().map(|snapshot| &snapshot.lines))
-        {
-            assert!(lines.capacity() >= edges);
-        }
+        assert!(runtime.gpu_bounds.capacity() >= 3);
+        assert!(runtime.gpu_bounds.len() <= 3);
+        assert!(runtime.vertices.is_empty());
+        assert!(runtime.current.is_empty());
+        assert!(runtime.history.is_empty());
     }
-    assert!(visualizer.model_lines.capacity() >= edges);
-    assert!(visualizer.model_ribbons.capacity() >= edges * 8);
 }
 
 fn tick(visualizer: &mut Visualizer, time: &mut AudioTime) {
@@ -135,26 +87,22 @@ fn tick(visualizer: &mut Visualizer, time: &mut AudioTime) {
 }
 
 #[test]
-fn startup_prepares_every_model_and_reuses_both_slots_through_interrupted_switches() {
+fn startup_prepares_every_model_and_shares_gpu_topology_through_instant_switches() {
     let mut visualizer = loaded();
     let cached = prepared(&visualizer).prepared_models().to_vec();
     assert_eq!(cached.len(), prepared(&visualizer).position().1);
     assert!(visualizer.scene.current.is_some());
     assert!(visualizer.scene.spare.is_some());
     assert!(visualizer.scene.outgoing.is_none());
-    assert_reserved(&visualizer);
-    let slots = slot_pointers(&visualizer.scene);
-    let histories = history_pointers(&visualizer.scene);
-    assert_eq!(slots.len(), 2);
-    assert_eq!(histories.len(), MAX_HISTORY * 2);
+    assert_gpu_storage(&visualizer);
     let mut time = AudioTime::ZERO;
-    let mut completed = 0;
-    let mut interrupted = 0;
+    tick(&mut visualizer, &mut time);
     for step in 0..cached.len() * 2 {
-        if visualizer.scene.outgoing.is_some() {
-            interrupted += 1;
-        }
+        let previous_generation = visualizer.scene.current.as_ref().unwrap().gpu_generation;
         visualizer.next_model();
+        assert!(visualizer.scene.outgoing.is_none());
+        assert!(visualizer.scene.spare.is_some());
+        assert_eq!(visualizer.scene.transition, 1.0);
         let models = prepared(&visualizer);
         let expected = &cached[models.position().0 - 1];
         assert!(Arc::ptr_eq(models.current_prepared(), expected));
@@ -164,29 +112,32 @@ fn startup_prepares_every_model_and_reuses_both_slots_through_interrupted_switch
             &current.slide_vertices,
             &expected.slide_vertices
         ));
+        assert_ne!(current.gpu_generation, previous_generation);
+        assert!(current.history.is_empty() && current.current.is_empty());
+        assert!(current.gpu_bounds.is_empty());
+        assert_eq!(current.active_edges, expected.wireframe.edges().len());
+        assert!((0..current.active_edges).all(|index| current.edge_dissolve.alpha(index) == 1.0));
         assert_eq!(visualizer.showcase.pois().as_ptr(), expected.pois.as_ptr());
-        tick(&mut visualizer, &mut time);
-        if step % 12 == 0 {
-            for _ in 0..12 {
-                tick(&mut visualizer, &mut time);
-            }
-            assert!(visualizer.scene.outgoing.is_none());
-            assert!(visualizer.scene.spare.is_some());
-            completed += 1;
+        // Include same-frame cuts and cuts after GPU history has accumulated.
+        if step % 3 != 0 {
+            tick(&mut visualizer, &mut time);
+            assert_eq!(visualizer.gpu_models.len(), 1);
+            assert!(Arc::ptr_eq(
+                &visualizer.gpu_models[0].topology,
+                &expected.gpu_topology,
+            ));
         }
-        assert_eq!(slot_pointers(&visualizer.scene), slots);
-        assert_eq!(history_pointers(&visualizer.scene), histories);
+        assert_gpu_storage(&visualizer);
     }
-    assert!(completed > 0 && interrupted > 0);
 }
 
 #[test]
-fn history_storage_survives_resets_motion_toggles_and_crease_expansion() {
+fn gpu_history_resets_motion_toggles_and_crease_expansion_without_cpu_geometry() {
     let mut visualizer = Visualizer::new();
     visualizer.set_model_rotation(ModelRotation::Locked);
     visualizer.set_crease_threshold(CreaseThreshold::MAX);
     visualizer.load_models();
-    assert_reserved(&visualizer);
+    assert_gpu_storage(&visualizer);
     let coarse_edges: usize = prepared(&visualizer)
         .prepared_models()
         .iter()
@@ -199,40 +150,45 @@ fn history_storage_survives_resets_motion_toggles_and_crease_expansion() {
         .map(|model| model.wireframe.edges().len())
         .sum();
     assert!(fine_edges > coarse_edges);
-    assert_reserved(&visualizer);
-    let slots = slot_pointers(&visualizer.scene);
-    let histories = history_pointers(&visualizer.scene);
+    assert_gpu_storage(&visualizer);
     let mut time = AudioTime::ZERO;
     for _ in 0..MAX_HISTORY + 2 {
         tick(&mut visualizer, &mut time);
     }
     assert_eq!(
-        visualizer.scene.current.as_ref().unwrap().history.len(),
-        MAX_HISTORY
+        visualizer.scene.current.as_ref().unwrap().gpu_bounds.len(),
+        3
     );
-    assert_eq!(history_pointers(&visualizer.scene), histories);
+    assert_gpu_storage(&visualizer);
+    let generation = visualizer.gpu_models[0].reset;
     visualizer.reset_audio();
     assert!(visualizer
         .scene
         .current
         .as_ref()
         .unwrap()
-        .history
+        .gpu_bounds
         .is_empty());
-    assert_eq!(history_pointers(&visualizer.scene), histories);
     tick(&mut visualizer, &mut time);
+    assert_ne!(visualizer.gpu_models[0].reset, generation);
     visualizer.next_model();
     tick(&mut visualizer, &mut time);
     visualizer.set_model_motion(ModelMotion::Still);
-    assert!(runtimes(&visualizer.scene).all(|runtime| runtime.history.is_empty()));
-    assert_eq!(history_pointers(&visualizer.scene), histories);
+    assert!(runtimes(&visualizer.scene).all(|runtime| runtime.gpu_bounds.is_empty()));
+    tick(&mut visualizer, &mut time);
+    assert_eq!(
+        visualizer.scene.current.as_ref().unwrap().gpu_bounds.len(),
+        1
+    );
     visualizer.set_model_motion(ModelMotion::Swept);
     for _ in 0..prepared(&visualizer).position().1 {
         visualizer.next_model();
         tick(&mut visualizer, &mut time);
-        assert_reserved(&visualizer);
-        assert_eq!(slot_pointers(&visualizer.scene), slots);
-        assert_eq!(history_pointers(&visualizer.scene), histories);
+        assert_gpu_storage(&visualizer);
+        assert_eq!(
+            visualizer.scene.current.as_ref().unwrap().gpu_bounds.len(),
+            1
+        );
     }
 }
 

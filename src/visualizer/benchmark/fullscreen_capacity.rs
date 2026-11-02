@@ -315,11 +315,7 @@ impl CapacityBench {
             Size::new(f64::from(self.extent[0]), f64::from(self.extent[1])),
             Frame {
                 lines: &[],
-                model_lines: &[],
-                ribbons: &[],
                 model_composite: composite,
-                model_edge_capacity: 0,
-                gpu_active: true,
                 gpu_models: std::slice::from_ref(model),
             },
             None,

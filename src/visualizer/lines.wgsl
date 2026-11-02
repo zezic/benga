@@ -24,9 +24,6 @@ struct LineInk {
     coverage: f32,
 }
 
-const COLOR_STEP: f32 = 1.0 / 255.0;
-const COLOR_CEIL: f32 = 254.0 / 255.0;
-
 @vertex
 fn line_vertex(
     @builtin(vertex_index) vertex_index: u32,
@@ -101,24 +98,4 @@ fn line_fragment(vertex: VertexOutput) -> @location(0) vec4<f32> {
     let ink = line_ink(vertex);
     let alpha = ink.color.a * ink.coverage;
     return vec4(ink.color.rgb * alpha, alpha);
-}
-
-@fragment
-fn line_additive_fragment(vertex: VertexOutput) -> @location(0) vec4<f32> {
-    let ink = line_ink(vertex);
-    let alpha = ink.color.a * ink.coverage;
-    // An additive color with a zero component contributes nothing there.
-    let rgb = max(ink.color.rgb, vec3<f32>(COLOR_STEP));
-    return vec4(rgb * alpha, alpha);
-}
-
-@fragment
-fn line_multiply_fragment(vertex: VertexOutput) -> @location(0) vec4<f32> {
-    let ink = line_ink(vertex);
-    let alpha = ink.color.a * ink.coverage;
-    // A multiplicative color with a full component leaves that channel
-    // untouched; step every full component down so the line always tints it.
-    let rgb = min(ink.color.rgb, vec3<f32>(COLOR_CEIL));
-    let multiplier = mix(vec3<f32>(1.0), rgb, alpha);
-    return vec4(multiplier, 1.0);
 }

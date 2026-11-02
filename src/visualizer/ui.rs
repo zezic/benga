@@ -72,17 +72,11 @@ impl View {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
-struct FaceSettings {
-    viewport: Size,
-    background: Color,
-}
-
 /// The presentation, its optional analyzers, and the audio cursor.
 pub struct Ui {
-    gpu_experiment: bool,
     frame_metrics: super::frame_metrics::FrameMetrics,
     performance: performance::PerformanceHud,
+    renderer_stats_visible: bool,
     startup: Splash,
     pointer: Option<Point>,
     presentation_click: ClickSequence,
@@ -93,10 +87,7 @@ pub struct Ui {
     preamp: PreampDb,
     audio: AudioCursor,
     theme: Theme,
-    shutter_frames: ShutterFrames,
     fonts: Fonts,
-    face: Scene,
-    face_settings: Option<FaceSettings>,
     presentation: Presentation,
     controls: Controls,
     theme_preferences: ThemePreferences,
@@ -147,9 +138,9 @@ impl Ui {
         let presentation = Presentation::new(&Palette::from_theme(selected), theme.colors);
         let startup = Splash::new(&mut fonts)?;
         Ok(Self {
-            gpu_experiment: false,
             frame_metrics: super::frame_metrics::FrameMetrics::default(),
             performance: performance::PerformanceHud::default(),
+            renderer_stats_visible: false,
             startup,
             pointer: None,
             presentation_click: ClickSequence::default(),
@@ -160,10 +151,7 @@ impl Ui {
             preamp: config.preamp_db,
             audio: AudioCursor::new(),
             theme,
-            shutter_frames: config.shutter_frames,
             fonts,
-            face: Scene::new(),
-            face_settings: None,
             presentation,
             controls: Controls::new(Instant::now()),
             theme_preferences: config.theme_preferences.clone(),
@@ -238,6 +226,21 @@ impl Ui {
         self.controls.activate(Instant::now());
     }
 
+    pub fn renderer_stats_visible(&self) -> bool {
+        self.renderer_stats_visible
+    }
+
+    pub fn toggle_renderer_stats(&mut self) {
+        self.set_renderer_stats_visible(!self.renderer_stats_visible);
+    }
+
+    /// Developer overlays are session-only and do not alter saved preferences.
+    pub fn set_renderer_stats_visible(&mut self, visible: bool) {
+        self.renderer_stats_visible = visible;
+        self.presentation_click.reset();
+        self.controls.activate(Instant::now());
+    }
+
     /// Supplies the GPU coverage mask used by moving contrast plates.
     pub fn set_plate_mask(&mut self, mask: Option<PlateMaskImage>) {
         self.plate_mask = mask;
@@ -288,26 +291,8 @@ impl Ui {
         }
     }
 
-    pub fn set_shutter(&mut self, shutter: ShutterFrames) {
-        self.shutter_frames = shutter;
-    }
-
-    pub fn set_gpu_ribbons(&mut self, enabled: bool) {
-        self.gpu_experiment |= enabled;
-        self.visualizer.set_gpu_ribbons(enabled);
-    }
-
-    pub fn toggle_gpu_ribbons(&mut self) {
-        self.visualizer
-            .set_gpu_ribbons(!self.visualizer.gpu_requested);
-    }
-
-    pub fn set_gpu_ribbons_supported(&mut self, supported: bool) {
-        self.visualizer.set_gpu_ribbons_supported(supported);
-    }
-
-    pub fn set_gpu_ribbon_edge_capacity(&mut self, capacity: usize) {
-        self.visualizer.set_gpu_ribbon_edge_capacity(capacity);
+    pub fn validate_gpu_models(&mut self, capacity: usize) -> anyhow::Result<()> {
+        self.visualizer.validate_gpu_models(capacity)
     }
 
     pub fn gpu_ribbon_status(&self) -> &'static str {
@@ -327,16 +312,14 @@ impl Ui {
         downsize: f32,
         model_extent: Option<[u32; 2]>,
     ) {
-        if self.gpu_experiment {
-            self.frame_metrics.record_rendered(
-                at,
-                interval,
-                cpu_work,
-                self.gpu_ribbon_status(),
-                downsize,
-                model_extent,
-            );
-        }
+        self.frame_metrics.record_rendered(
+            at,
+            interval,
+            cpu_work,
+            self.gpu_ribbon_status(),
+            downsize,
+            model_extent,
+        );
     }
 
     /// Preserve the history while breaking the plot across hidden/unavailable frames.
@@ -345,7 +328,7 @@ impl Ui {
     }
 
     pub fn draw_performance(&mut self, scene: &mut Scene, view: &View, now: Instant) -> bool {
-        if !self.gpu_experiment {
+        if !self.renderer_stats_visible {
             return false;
         }
         self.performance.draw(
@@ -524,6 +507,9 @@ impl Ui {
         now: Instant,
     ) -> bool {
         scene.reset();
+        // Keep interactive controls above statistics, including when UI scaling
+        // puts the developer buttons inside the graph's screen bounds.
+        let performance_visible = self.draw_performance(scene, view, now);
         let diagnostics_visible = self.draw_analysis_controls(scene);
         let analyzers_visible = self.analyzers_visible();
         let toolbar_visible = self.controls.draw(
@@ -536,6 +522,7 @@ impl Ui {
                 model: self.visualizer.scene_name(),
                 fullscreen,
                 analyzers_visible,
+                renderer_stats_visible: self.renderer_stats_visible,
                 palette: self.presentation.colors(),
                 background: self.theme.colors.background,
                 history: self.visualizer.debug_history(),
@@ -547,7 +534,6 @@ impl Ui {
         } else {
             None
         });
-        let performance_visible = self.draw_performance(scene, view, now);
         diagnostics_visible || toolbar_visible || performance_visible
     }
 
@@ -600,17 +586,6 @@ impl Ui {
         self.visualizer.set_model_motion(motion);
     }
 
-    fn draw_face(&mut self, view: &View) {
-        self.face.reset();
-        self.face.fill(
-            Fill::NonZero,
-            Affine::IDENTITY,
-            self.theme.colors.background,
-            None,
-            &Rect::from_origin_size(Point::ORIGIN, view.viewport),
-        );
-    }
-
     pub fn draw(
         &mut self,
         scene: &mut Scene,
@@ -639,7 +614,7 @@ impl Ui {
         let palette = Palette::from_theme(self.theme.selected());
         self.visualizer.update(
             frame_interval,
-            self.shutter_frames,
+            ShutterFrames::default(),
             dt,
             &palette,
             (view.viewport.width as f32, view.viewport.height as f32),
@@ -655,15 +630,6 @@ impl Ui {
             &self.visualizer.palette(),
             self.theme.colors,
         );
-        let settings = FaceSettings {
-            viewport: view.viewport,
-            background: self.theme.colors.background,
-        };
-        let rebuild = self.face_settings != Some(settings);
-        if rebuild {
-            self.draw_face(view);
-            self.face_settings = Some(settings);
-        }
         let mut raster_assets = Vec::new();
         if let Some(stage) = self.presentation.stage() {
             self.presentation.draw(
@@ -675,11 +641,7 @@ impl Ui {
             );
         }
         UiFrame {
-            background: if rebuild {
-                Frame::Rebuilt(&self.face)
-            } else {
-                Frame::Retained(&self.face)
-            },
+            background: Frame::Solid(self.theme.colors.background),
             overlay: self.visualizer.frame(),
             foreground: true,
             overlay_composite: Some(composite),
@@ -713,6 +675,8 @@ pub struct UiFrame<'a> {
 mod cache_regression_tests;
 #[cfg(test)]
 mod graph_previews;
+#[cfg(test)]
+mod transition_profile_tests;
 
 #[cfg(test)]
 mod tests {
@@ -722,7 +686,8 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn performance_history_is_opt_in_and_survives_renderer_switches() -> anyhow::Result<()> {
+    fn performance_history_records_while_hidden_and_survives_visibility_toggles(
+    ) -> anyhow::Result<()> {
         let mut ui = Ui::new(&Config::default())?;
         let now = Instant::now();
         let view = View::fit(Size::new(1280.0, 720.0));
@@ -734,39 +699,33 @@ mod tests {
             2.0,
             Some([640, 360]),
         );
-        assert_eq!(ui.frame_metrics.samples().count(), 0);
+        assert_eq!(ui.frame_metrics.samples().count(), 1);
+        assert!(!ui.renderer_stats_visible());
         assert!(!ui.draw_performance(&mut scene, &view, now));
-
-        ui.set_gpu_ribbons(true);
-        ui.visualizer.gpu_status = "GPU ribbons: GPU projection / shutter 2";
-        ui.record_frame_performance(
-            now,
-            Duration::from_millis(16),
-            Duration::from_millis(4),
-            2.0,
-            Some([640, 360]),
-        );
-        ui.toggle_gpu_ribbons();
-        ui.visualizer.gpu_status = "CPU ribbons";
+        assert!(scene.encoding().draw_data.is_empty());
+        ui.set_renderer_stats_visible(true);
+        assert!(ui.draw_performance(&mut scene, &view, now));
+        ui.set_renderer_stats_visible(false);
         let next = now + Duration::from_millis(32);
         ui.record_frame_performance(
             next,
             Duration::from_millis(32),
             Duration::from_millis(12),
             1.0,
-            None,
+            Some([1280, 720]),
         );
+        scene.reset();
+        assert!(!ui.draw_performance(&mut scene, &view, next));
+        assert!(scene.encoding().draw_data.is_empty());
         let samples: Vec<_> = ui.frame_metrics.samples().collect();
         assert_eq!(samples.len(), 2);
-        assert!(samples[0].backend.starts_with("GPU"));
-        assert_eq!(samples[1].backend, "CPU ribbons");
-        assert!(samples[1].break_before);
         assert_eq!(samples[0].downsize, 2.0);
         assert_eq!(samples[0].model_extent, Some([640, 360]));
         assert_eq!(samples[1].downsize, 1.0);
-        assert_eq!(samples[1].model_extent, None);
+        assert_eq!(samples[1].model_extent, Some([1280, 720]));
+        ui.set_renderer_stats_visible(true);
         assert!(ui.draw_performance(&mut scene, &view, next));
-        // The experimental graphs remain visible after the normal controls fade.
+        // Explicitly enabled graphs remain visible after the normal controls fade.
         assert!(ui.draw_controls(
             &mut scene,
             &view,
@@ -774,13 +733,13 @@ mod tests {
             false,
             next + Duration::from_secs(15)
         ));
+        assert_eq!(ui.frame_metrics.samples().count(), 2);
         Ok(())
     }
 
     #[test]
     fn performance_pause_keeps_the_old_trace_and_breaks_the_new_segment() -> anyhow::Result<()> {
         let mut ui = Ui::new(&Config::default())?;
-        ui.set_gpu_ribbons(true);
         let now = Instant::now();
         ui.record_frame_performance(
             now,
@@ -857,20 +816,17 @@ mod tests {
                     AudioTime::from_samples(next_sample, SAMPLERATE),
                 );
                 scene.reset();
-                let _ =
+                let frame =
                     ui.draw_at_audio_time(&mut scene, &view, FrameTime::new(start, end), interval);
-                let latest_pose = ui
-                    .visualizer
-                    .scene
-                    .current
-                    .as_ref()
-                    .expect("the bundled model loads")
-                    .history
-                    .back()
-                    .expect("motion blur records each frame");
+                let latest_pose_at = frame
+                    .overlay
+                    .gpu_models
+                    .first()
+                    .expect("GPU projection records each frame")
+                    .at;
                 assert_eq!(
-                    latest_pose.at,
-                    interval.end(),
+                    latest_pose_at,
+                    interval.end().seconds_since(AudioTime::ZERO),
                     "{fps} FPS frame {index} must use its sample interval without waiting for a complete millisecond"
                 );
                 assert!(
@@ -1000,6 +956,55 @@ mod tests {
         ));
         ui.toggle_analyzers();
         assert!(!ui.analysis_interactive());
+        Ok(())
+    }
+
+    #[test]
+    fn renderer_stats_start_hidden_and_the_modifier_button_toggles_them_independently(
+    ) -> anyhow::Result<()> {
+        let config = Config::default();
+        let mut ui = Ui::new(&config)?;
+        let view = View::fit(Size::new(1920.0, 1080.0));
+        let now = Instant::now();
+        let mut scene = Scene::new();
+        assert!(!ui.renderer_stats_visible());
+        assert!(!ui.draw_performance(&mut scene, &view, now));
+        assert!(scene.encoding().draw_data.is_empty());
+        ui.set_control_modifiers(true);
+        ui.draw_controls(&mut scene, &view, &config, false, now);
+        let stats = ui
+            .controls
+            .target_center(|action| matches!(action, ControlAction::ToggleRendererStats));
+        assert!(matches!(
+            ui.click_controls_at(&view, stats, now),
+            Some(ControlAction::ToggleRendererStats)
+        ));
+        ui.toggle_renderer_stats();
+        assert!(ui.renderer_stats_visible());
+        assert!(!ui.analyzers_visible());
+        ui.toggle_analyzers();
+        assert!(ui.analyzers_visible());
+        assert!(ui.renderer_stats_visible());
+        ui.set_control_modifiers(false);
+        assert!(!matches!(
+            ui.click_controls_at(&view, stats, now),
+            Some(ControlAction::ToggleRendererStats)
+        ));
+        scene.reset();
+        assert!(ui.draw_performance(&mut scene, &view, now));
+        ui.set_control_modifiers(true);
+        ui.draw_controls(&mut scene, &view, &config, false, now);
+        assert!(matches!(
+            ui.click_controls_at(&view, stats, now),
+            Some(ControlAction::ToggleRendererStats)
+        ));
+        ui.toggle_renderer_stats();
+        assert!(!ui.renderer_stats_visible());
+        assert!(ui.analyzers_visible());
+        scene.reset();
+        assert!(!ui.draw_performance(&mut scene, &view, now));
+        assert!(scene.encoding().draw_data.is_empty());
+        assert!(!Ui::new(&config)?.renderer_stats_visible());
         Ok(())
     }
 
@@ -1612,22 +1617,24 @@ mod tests {
         let frame = last.expect("the presentation produced a frame");
         let mut raster_assets = RasterAssetCache::new();
         raster_assets.prepare(&mut renderer, device, &frame.raster_assets)?;
-        let background_scene = match frame.background {
-            Frame::Rebuilt(scene) | Frame::Retained(scene) | Frame::Unchanged(scene) => scene,
-        };
         let params = RenderParams {
-            base_color: vello::peniko::Color::TRANSPARENT,
+            base_color: Color::TRANSPARENT,
             width,
             height,
             antialiasing_method: crate::render::ANTIALIASING,
         };
-        renderer.render_to_texture(
-            &device.device,
-            &device.queue,
-            background_scene,
-            &background_view,
-            &params,
-        )?;
+        if let Frame::Rebuilt(background)
+        | Frame::Retained(background)
+        | Frame::Unchanged(background) = frame.background
+        {
+            renderer.render_to_texture(
+                &device.device,
+                &device.queue,
+                background,
+                &background_view,
+                &params,
+            )?;
+        }
         plate_mask.render(
             &device.device,
             &device.queue,
@@ -1655,6 +1662,9 @@ mod tests {
         let mut encoder = device
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        if let Frame::Solid(color) = frame.background {
+            crate::render::clear_background(&mut encoder, &background_view, color);
+        }
         visualizer_renderer.draw(
             device,
             &mut encoder,
@@ -1715,17 +1725,14 @@ mod tests {
 
         let expected_composite = Some(Ui::model_composite(ui.theme.selected()));
         let first = ui.draw(&mut scene, &view, FrameRateLimit::Fps120, frame_time);
-        assert!(matches!(first.background, Frame::Rebuilt(_)));
+        assert!(matches!(first.background, Frame::Solid(_)));
         assert!(first.foreground);
         assert_eq!(first.overlay_composite, expected_composite);
         assert!((first.overlay_opacity - 1.0).abs() < 1e-6);
 
         let second = ui.draw(&mut scene, &view, FrameRateLimit::Fps120, frame_time);
         assert!(second.foreground);
-        assert!(matches!(
-            second.background,
-            Frame::Retained(_) | Frame::Unchanged(_)
-        ));
+        assert!(matches!(second.background, Frame::Solid(_)));
     }
 
     #[test]
@@ -1905,6 +1912,58 @@ mod tests {
             if let Some(directory) = &directory {
                 write_preview(
                     &directory.join(format!("gap-{width}x{height}-{light}.png")),
+                    width,
+                    height,
+                    &pixels,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a compute-capable GPU"]
+    fn renders_developer_renderer_controls() -> anyhow::Result<()> {
+        let directory = std::env::var_os("BENGA_DEVELOPER_PREVIEW_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| "target/developer-controls-preview".into());
+        std::fs::create_dir_all(&directory)?;
+        for (width, height, scale) in [
+            (1920, 1080, 1.0),
+            (800, 600, 1.0),
+            (1280, 720, 2.0),
+            (360, 640, 1.0),
+        ] {
+            for visible in [false, true] {
+                let config = Config::default();
+                let mut ui = Ui::new(&config)?;
+                ui.dismiss_startup();
+                ui.set_control_modifiers(true);
+                ui.set_renderer_stats_visible(visible);
+                let now = Instant::now();
+                for index in 0..180 {
+                    ui.record_frame_performance(
+                        now - Duration::from_secs(3) + Duration::from_secs_f64(index as f64 / 60.0),
+                        Duration::from_secs_f64(1.0 / 60.0),
+                        Duration::from_millis(4),
+                        2.0,
+                        Some([width / 2, height / 2]),
+                    );
+                }
+                let mut view = View::fit(Size::new(f64::from(width), f64::from(height)));
+                view.set_ui_scale(scale);
+                let pixels =
+                    presentation_pixels(&mut ui, &view, 30, false, Some(&config), |_, _| {})?;
+                assert_eq!(pixels.len(), width as usize * height as usize * 4);
+                let button = ui
+                    .controls
+                    .target_center(|action| matches!(action, ControlAction::ToggleRendererStats));
+                assert!(matches!(
+                    ui.click_controls(&view, button),
+                    Some(ControlAction::ToggleRendererStats)
+                ));
+                write_preview(
+                    &directory.join(format!("developer-{width}x{height}-{scale}-{visible}.png")),
                     width,
                     height,
                     &pixels,

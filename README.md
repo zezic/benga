@@ -14,16 +14,13 @@ Vello/wgpu renderer. Run from the project root so Benga can find `assets/models/
 cargo run --release
 ```
 
-Desktop playback uses GPU model projection, ribbon preparation and rasterization
-by default. Adaptive quality starts at **1× native resolution**, lowers the model
+Desktop playback uses GPU model projection, ribbon preparation and rasterization.
+Adaptive quality starts at **1× native resolution**, lowers the model
 layer when needed and restores detail toward 1× as headroom returns. Background,
-infographics and controls retain native resolution. Press **R** to compare GPU
-and CPU rendering, or start with `cargo run --release -- --cpu-ribbons`.
+infographics and controls retain native resolution.
 
-GPU motion blur supports shutter 2; GPU lines with motion blur off support all
-shutter values. Saved preferences stay intact, and unsupported swept shutters or
-GPU capabilities use the CPU fallback shown in the window title. The older
-`--experimental-gpu-ribbons` flag remains an unsaved shutter-2 trial mode.
+Model motion blur uses a fixed two-frame exposure and can be turned off.
+Benga requires a compatible GPU with compute support.
 See the [GPU integration notes](docs/gpu-ribbon-integration.md) for quality logic,
 profiling controls and earlier measurements.
 
@@ -63,8 +60,8 @@ The result is an H.264 MP4 with the source audio encoded as AAC.
 timeline at the requested FPS and runs as fast as the GPU and encoder allow.
 It streams audio and frames rather than loading the whole track into memory.
 The presentation includes models, motion blur, and infographics, with controls
-and startup screens hidden. Supported model modes use GPU rendering at fixed 1×
-output resolution; the same capability and shutter fallbacks apply. Saved
+and startup screens hidden. Models use GPU rendering at fixed 1×
+output resolution. Saved
 settings remain unchanged. The last frame
 can extend past the audio by less than one frame interval. Visual choices
 remain randomized between runs, as in the desktop app.
@@ -75,14 +72,18 @@ Benga runs in presentation mode. Move the mouse to reveal the controls; hover
 any control for a hint. They fade after 5 seconds of inactivity.
 
 - Browse models and themes, lock the current model, or enable automatic colors.
-- Adjust motion blur, shutter exposure, line width, zoom, and the FPS limit.
-- Press **R** to switch the GPU and CPU model renderer for comparison.
+- Adjust motion blur, line width, zoom, and the FPS limit.
 - Adjust analyzer boost and text opacity, or manage disliked themes.
 - Double-click the background to toggle fullscreen; `Esc` leaves fullscreen.
 - Use **Save as Default** to set the startup theme.
 
 Music drives the model's motion, part highlights, and close-ups of points of
-interest. Energy drops change the model unless Model Lock is enabled.
+interest. Energy drops change the model unless Model Lock is enabled. Model
+changes are instant; theme colors still fade smoothly.
+
+Renderer statistics start hidden. Hold a modifier key and click
+**Developer: show renderer stats** above the toolbar to display them.
+Their visibility is independent of the audio analyzers.
 
 Music also introduces temporary graph compositions into the presentation. These
 include live spectral shape, aggression, energy, bass envelopes, onset timelines,
@@ -268,19 +269,25 @@ cargo run --release -- --profile
 ```
 
 The profiler uses synthetic audio, warms up for one second, measures for ten
-seconds at a 240 FPS limit, then exits. Keep its window visible. It defaults to
-the GPU renderer; `--cpu-ribbons --profile` provides a CPU comparison. It reports
+seconds at a 240 FPS limit, then exits. Keep its window visible. It uses
+the GPU renderer and reports
 FPS, CPU usage, host frame-stage timings and asynchronous GPU model/queue spans.
+Statistics start hidden. Set `BENGA_PROFILE_PERFORMANCE_OVERLAY=1` to include
+the performance graphs during a profiling run.
 Host timings include display waits; GPU queue spans can include CPU submission
 gaps and are not busy-GPU utilization counters. Profiling leaves saved settings
 untouched. The [integration notes](docs/gpu-ribbon-integration.md) describe target
 FPS, native dimensions, fixed downsize and trace controls.
 
+For scene-change stutters, the [transition performance notes](docs/scene-transition-performance.md)
+explain model/GPU buffer lifetimes and the bounded colors-only, model-only and
+combined transition replay.
+
 For a headless wireframe and motion-blur preview:
 
 ```sh
 BENGA_RENDER_PREVIEW_PATH=/tmp/benga-preview.png \
-  cargo test renders_wireframe_lines_and_swept_ribbons -- --ignored
+  cargo test renders_gpu_wireframe_and_swept_motion -- --ignored
 ```
 
 GPU preview tests require a compute-capable GPU. Other presentation previews
@@ -294,10 +301,10 @@ the streaming music-library probe, resolution/gain comparisons, and validation.
 
 Models live in [`assets/models/`](assets/models/). Before the first animation
 update, the loader welds vertices, extracts boundary and crease edges, and prepares
-every model's wireframe, dissolve order, slide mask, POI bindings, and magazine
-preview. Switching reuses this shared data and two animation slots sized for the
-largest model, including motion history and CPU/GPU geometry buffers. This trades
-startup work and memory for cheaper switches. Changing the crease threshold
+every model's wireframe, slide mask, POI bindings, and magazine preview.
+Switching reuses this shared data, two animation-state slots, reserved edge-color
+storage and GPU working buffers. Projection and motion history stay on the GPU;
+playback allocates no CPU model geometry or pose-history arrays. Changing the crease threshold
 refreshes all models immediately; animated projection, randomized captions, and
 viewport-dependent text layout still run during playback. Model metadata and POI
 authoring are described in the [model specification](assets/models-spec/weapon_visualizer_spec.md).

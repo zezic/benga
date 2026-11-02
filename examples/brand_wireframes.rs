@@ -40,6 +40,11 @@ fn main() -> anyhow::Result<()> {
         wgpu::DeviceDescriptor::default(),
     ))?;
     let device = &context.devices[id];
+    ensure!(
+        Renderer::gpu_ribbons_supported(&device.device)
+            && Renderer::gpu_ribbons_adapter_supported(device.adapter()),
+        "Brand artwork requires a compatible compute-capable GPU"
+    );
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let extent = wgpu::Extent3d {
         width: WIDTH,
@@ -80,6 +85,10 @@ fn main() -> anyhow::Result<()> {
     let target_view = target.create_view(&Default::default());
     let mut renderer = Renderer::new(&device.device, format);
     let mut visualizer = Visualizer::new();
+    let limits = device.device.limits();
+    let edge_capacity =
+        u64::from(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size) / (6 * 64);
+    visualizer.validate_gpu_models(edge_capacity as usize)?;
     visualizer.set_model_rotation(ModelRotation::Locked);
     visualizer.set_model_motion(ModelMotion::Still);
     visualizer.set_model_composite(ModelComposite::Additive);
@@ -114,10 +123,12 @@ fn main() -> anyhow::Result<()> {
             at = end;
         }
         let original = visualizer.frame();
-        ensure!(
-            !original.model_lines.is_empty(),
-            "{model} produced no wireframe"
-        );
+        let edge_count: usize = original
+            .gpu_models
+            .iter()
+            .map(|model| model.topology.edges.len())
+            .sum();
+        ensure!(edge_count > 0, "{model} produced no wireframe");
         // Exclude diagnostics; only the model's production depth and palette
         // shading belong in reusable brand artwork.
         let frame = Frame {
@@ -189,7 +200,7 @@ fn main() -> anyhow::Result<()> {
         println!(
             "{} ({model}, {} production edges)",
             path.display(),
-            original.model_lines.len()
+            edge_count
         );
     }
     Ok(())

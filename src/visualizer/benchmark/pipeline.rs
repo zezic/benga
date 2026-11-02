@@ -17,9 +17,8 @@
 //! BENGA_PIPELINE_CPU_WARMUP advances complete UI state before GPU warmup.
 //! BENGA_PIPELINE_PREVIEW_FRAMES captures comma-separated, zero-based measured
 //! frame indices as PNGs after rendering, outside every reported frame cost.
-//! BENGA_PIPELINE_GPU_RIBBONS=1 enables production GPU projection and ribbons;
-//! it requires shutter 2 and swept motion in the selected config. Use separate
-//! result directories with the same config/workload for CPU/GPU comparisons.
+//! Production GPU projection and ribbon rendering are always enabled, with
+//! a fixed two-frame shutter when motion blur is enabled.
 //! GPU runs retain full resolution by default. BENGA_PIPELINE_ADAPTIVE_RIBBONS=1
 //! replays isolated completion costs into the live resolution controller, using
 //! BENGA_PIPELINE_FPS as its target. BENGA_PIPELINE_RIBBON_DOWNSIZE fixes a linear
@@ -42,8 +41,8 @@ use anyhow::{ensure, Context};
 use serde_json::json;
 use strum::EnumCount;
 use vello::{
-    kurbo::Size,
-    peniko::Color,
+    kurbo::{Affine, Rect, Size},
+    peniko::{Color, Fill},
     util::{DeviceHandle, RenderContext},
     wgpu, RenderParams, Scene,
 };
@@ -51,7 +50,9 @@ use vello::{
 use crate::{
     config::Config,
     frame_schedule::{Adjustment, FrameRateLimit, FrameTime},
-    render::{BackgroundCache, Frame as RetainedFrame, PlateMask, RasterAssetCache},
+    render::{
+        BackgroundCache, Frame as RetainedFrame, PlateMask, RasterAssetCache, SolidBackground,
+    },
     AudioEvent,
 };
 
@@ -170,6 +171,7 @@ struct Pipeline {
     renderer: vello::Renderer,
     model_renderer: Renderer,
     background_cache: BackgroundCache,
+    solid_background: SolidBackground,
     assets: RasterAssetCache,
     plate_mask: PlateMask,
     _textures: Vec<wgpu::Texture>,
@@ -282,6 +284,7 @@ impl Pipeline {
             renderer,
             model_renderer,
             background_cache: BackgroundCache::new(),
+            solid_background: SolidBackground::default(),
             assets: RasterAssetCache::new(),
             plate_mask,
             _textures: vec![background, foreground, controls],
@@ -393,8 +396,26 @@ impl Pipeline {
     ) -> anyhow::Result<RenderTime> {
         let before = Instant::now();
         let handle = &self.context.devices[self.device_id];
+        let mut forced_solid = Scene::new();
         let background = if force_background {
             match frame.background {
+                RetainedFrame::Solid(color) => {
+                    // Keep the explicit benchmark control for measuring the
+                    // former vector-raster path against the production clear.
+                    forced_solid.fill(
+                        Fill::NonZero,
+                        Affine::IDENTITY,
+                        color,
+                        None,
+                        &Rect::new(
+                            0.0,
+                            0.0,
+                            f64::from(self.params.width),
+                            f64::from(self.params.height),
+                        ),
+                    );
+                    RetainedFrame::Rebuilt(&forced_solid)
+                }
                 RetainedFrame::Rebuilt(scene)
                 | RetainedFrame::Retained(scene)
                 | RetainedFrame::Unchanged(scene) => RetainedFrame::Rebuilt(scene),
@@ -402,8 +423,13 @@ impl Pipeline {
         } else {
             frame.background
         };
-        let background_rasterized =
-            matches!(background, RetainedFrame::Rebuilt(_)) || !self.background_ready;
+        let solid_color = if let RetainedFrame::Solid(color) = background {
+            Some(color)
+        } else {
+            None
+        };
+        let background_rasterized = solid_color.is_none()
+            && (matches!(background, RetainedFrame::Rebuilt(_)) || !self.background_ready);
         if matches!(background, RetainedFrame::Rebuilt(_)) {
             self.background_cache
                 .benchmark_invalidate(&mut self.renderer);
@@ -458,18 +484,19 @@ impl Pipeline {
             )?;
         }
         let mut encoder = handle.device.create_command_encoder(&Default::default());
+        let background_view = if let Some(color) = solid_color {
+            self.solid_background
+                .prepare(&handle.device, &mut encoder, color, &self.params)
+        } else {
+            &self.background_view
+        };
         self.model_renderer
             .benchmark_timestamps(&self.queries, 0, 1);
         let model_overlay = if components.omits_model() {
             super::super::Frame {
                 lines: frame.overlay.lines,
-                model_lines: &[],
-                ribbons: &[],
                 model_composite: frame.overlay.model_composite,
-                model_edge_capacity: 0,
-                // Omit geometry while preserving the selected backend's full
-                // resolution float composition and resolve costs.
-                gpu_active: frame.overlay.gpu_active,
+                // Omit geometry while preserving float composition and resolve.
                 gpu_models: &[],
             }
         } else {
@@ -478,7 +505,7 @@ impl Pipeline {
         self.model_renderer.draw(
             handle,
             &mut encoder,
-            &self.background_view,
+            background_view,
             &self.target_view,
             Size::new(f64::from(self.params.width), f64::from(self.params.height)),
             model_overlay,
@@ -627,11 +654,6 @@ fn measures_full_presentation_pipeline() -> anyhow::Result<()> {
     );
     let force_background = std::env::var_os("BENGA_PIPELINE_FORCE_BACKGROUND").is_some();
     let capture_coverage = std::env::var("BENGA_PIPELINE_COVERAGE").as_deref() == Ok("1");
-    let gpu_ribbons = match std::env::var("BENGA_PIPELINE_GPU_RIBBONS").as_deref() {
-        Err(std::env::VarError::NotPresent) | Ok("0" | "false") => false,
-        Ok("1" | "true") => true,
-        _ => anyhow::bail!("BENGA_PIPELINE_GPU_RIBBONS must be 0, 1, false, or true"),
-    };
     let adaptive_ribbons = match std::env::var("BENGA_PIPELINE_ADAPTIVE_RIBBONS").as_deref() {
         Err(std::env::VarError::NotPresent) | Ok("0" | "false") => false,
         Ok("1" | "true") => true,
@@ -675,10 +697,6 @@ fn measures_full_presentation_pipeline() -> anyhow::Result<()> {
         })
         .transpose()?;
     ensure!(
-        gpu_ribbons || (!adaptive_ribbons && fixed_downsize.is_none() && fixed_downsizes.is_none()),
-        "ribbon resolution controls require BENGA_PIPELINE_GPU_RIBBONS=1"
-    );
-    ensure!(
         !adaptive_ribbons || fixed_downsize.is_none(),
         "choose either adaptive ribbon resolution or a fixed downsize"
     );
@@ -715,18 +733,11 @@ fn measures_full_presentation_pipeline() -> anyhow::Result<()> {
         .any(|policy| policy.freezes_gpu_preparation())
     {
         ensure!(
-            gpu_ribbons && !adaptive_ribbons && warmup >= 3,
+            !adaptive_ribbons && warmup >= 3,
             "no_gpu_prepare requires GPU ribbons, a fixed resolution policy and at least three GPU warmup frames"
         );
     }
     let base_config = base_config()?;
-    if gpu_ribbons {
-        ensure!(
-            base_config.shutter_frames.frames() == 2.0
-                && base_config.model_motion == super::super::ModelMotion::Swept,
-            "GPU pipeline benchmark requires shutter 2 and swept model motion"
-        );
-    }
     let preview_frames: Vec<usize> = std::env::var("BENGA_PIPELINE_PREVIEW_FRAMES")
         .unwrap_or_default()
         .split(',')
@@ -768,16 +779,16 @@ fn measures_full_presentation_pipeline() -> anyhow::Result<()> {
             pipeline
                 .model_renderer
                 .benchmark_ribbon_downsize(fixed_downsize);
-            if gpu_ribbons {
-                ensure!(
-                    Renderer::gpu_ribbons_supported(&pipeline.handle().device)
-                        && Renderer::gpu_ribbons_adapter_supported(pipeline.handle().adapter()),
-                    "integrated GPU ribbons unsupported on the benchmark adapter"
-                );
-                // Toggle the model directly so neither path adds an experiment
-                // badge to the otherwise identical retained-UI workload.
-                ui.benchmark_visualizer_mut().set_gpu_ribbons(true);
-            }
+            ensure!(
+                Renderer::gpu_ribbons_supported(&pipeline.handle().device)
+                    && Renderer::gpu_ribbons_adapter_supported(pipeline.handle().adapter()),
+                "integrated GPU ribbons unsupported on the benchmark adapter"
+            );
+            let limits = pipeline.handle().device.limits();
+            ui.validate_gpu_models(
+                (u64::from(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size)
+                    / (6 * 64)) as usize,
+            )?;
             ui.set_plate_mask(Some(pipeline.plate_mask.image()));
             ui.audio_event(AudioEvent::Config { samplerate: 48_000 });
             let workload_metadata = if let Some(mode) = workload_mode.poi() {
@@ -851,23 +862,13 @@ fn measures_full_presentation_pipeline() -> anyhow::Result<()> {
                 let draw_duration = draw_start.elapsed().as_secs_f64() * 1000.0;
                 let rebuilt = matches!(frame.background, RetainedFrame::Rebuilt(_));
                 ensure!(
-                    frame.overlay.gpu_active == gpu_ribbons,
-                    "requested pipeline renderer fell back unexpectedly"
+                    frame
+                        .overlay
+                        .gpu_models
+                        .iter()
+                        .all(|model| { model.projection.is_some() && model.projected.is_empty() }),
+                    "production GPU path generated a CPU-projected model pose"
                 );
-                if gpu_ribbons {
-                    ensure!(
-                        frame.overlay.model_lines.is_empty() && frame.overlay.ribbons.is_empty(),
-                        "GPU path generated CPU model lines/ribbons"
-                    );
-                    ensure!(
-                        frame
-                            .overlay
-                            .gpu_models
-                            .iter()
-                            .all(|model| model.projection.is_some() && model.projected.is_empty()),
-                        "production GPU path generated a CPU-projected model pose"
-                    );
-                }
                 let projected_bytes = frame
                     .overlay
                     .gpu_models
@@ -887,27 +888,12 @@ fn measures_full_presentation_pipeline() -> anyhow::Result<()> {
                     .filter_map(|model| model.projection.as_ref())
                     .map(std::mem::size_of_val)
                     .sum::<usize>();
-                let geometry_bytes = std::mem::size_of_val(frame.overlay.model_lines)
-                    + std::mem::size_of_val(frame.overlay.ribbons);
+                // Projection and ribbon construction are GPU-owned; CPU
+                // expanded geometry and transparent-ribbon scans are absent.
+                let geometry_bytes = 0usize;
                 let gpu_models = frame.overlay.gpu_models.len();
-                let count = frame.overlay.ribbons.len() + frame.overlay.model_lines.len() * 2;
-                // Diagnostic only: scan outside Ui.draw and the explicitly
-                // summed frame cost. Exactly zero vertex alphas cannot tint
-                // any pixel in either themed model blend mode.
-                let transparent = if index >= cpu_warmup + warmup {
-                    frame
-                        .overlay
-                        .ribbons
-                        .iter()
-                        .filter(|ribbon| {
-                            ribbon.start_color[3] == 0.0
-                                && ribbon.end_color[3] == 0.0
-                                && ribbon.third_color[3] == 0.0
-                        })
-                        .count()
-                } else {
-                    0
-                };
+                let count = 0usize;
+                let transparent = 0usize;
                 let plate_count = frame.plate_instances.len();
                 let plate_area: f64 = frame
                     .plate_instances
@@ -957,7 +943,7 @@ fn measures_full_presentation_pipeline() -> anyhow::Result<()> {
                         Duration::from_secs_f64(1.0 / f64::from(fps)),
                     );
                 }
-                if capture_coverage && gpu_ribbons && index + 1 == cpu_warmup + warmup + measured {
+                if capture_coverage && index + 1 == cpu_warmup + warmup + measured {
                     raster_coverage = pipeline
                         .model_renderer
                         .benchmark_coverage(pipeline.handle())?;
@@ -1097,16 +1083,16 @@ fn measures_full_presentation_pipeline() -> anyhow::Result<()> {
             let mut case = json!({
                 "width":width,"height":height,"ui_scale":2.0,"fps":fps,"interval_seconds":1.0/f64::from(fps),
                 "workload":workload_mode.name(),"workload_metadata":workload_metadata,"components":components.name(),
-                "active_backend":if components.omits_model() {"model_omitted"} else if components.freezes_gpu_preparation() {"gpu_ribbons_frozen_projection_and_preparation"} else if gpu_ribbons {"gpu_ribbons_gpu_projection"} else {"cpu_ribbons"},
-                "accumulation_format":if gpu_ribbons {"Rgba16Float"} else {"Bgra8Unorm"},
-                "model_gpu_timestamp_scope":if gpu_ribbons {"model rasterization and float layer composition; excludes GPU projection, edge preparation and final resolve"} else {"final layer composition pass"},
+                "active_backend":if components.omits_model() {"model_omitted"} else if components.freezes_gpu_preparation() {"gpu_ribbons_frozen_projection_and_preparation"} else {"gpu_ribbons_gpu_projection"},
+                "accumulation_format":"Rgba16Float",
+                "model_gpu_timestamp_scope":"model rasterization and float layer composition; excludes GPU projection, edge preparation and final resolve",
                 "model_payload_bytes":{
                     "projected_pose":projected_pose_bytes,"edge_style":edge_style_bytes,
                     "cpu_expanded_geometry":cpu_geometry_bytes,"active_gpu_models":gpu_model_counts,
                     "scope":"Selected per-frame CPU-built model payload. Production uploads projection parameters and edge styles; projected_pose is zero. Excludes 16-byte projection ring metadata, ribbon frame uniforms, diagnostic lines and immutable source topology/positions. no_model policies still build these CPU payloads but omit their GPU upload. no_gpu_prepare omits GPU model uploads and preparation after its first three GPU frames.",
                 },
                 "render_settings":{
-                    "model_motion":config.model_motion,"shutter_frames":config.shutter_frames,
+                    "model_motion":config.model_motion,"shutter_frames":crate::config::ShutterFrames::default(),
                     "line_width":config.line_width,"zoom":config.zoom,"motion_opacity":config.motion_opacity,
                     "motion_fade_power":config.motion_fade_power,"depth_fade":config.depth_fade,
                     "near_opacity":config.near_opacity,"crease_threshold":config.crease_threshold,
@@ -1152,7 +1138,7 @@ fn measures_full_presentation_pipeline() -> anyhow::Result<()> {
         directory.join("results.json"),
         serde_json::to_vec_pretty(&json!({
         "cases":cases,"force_background_rebuild":force_background,"fps":fps,"workload":workload_mode.name(),
-        "gpu_ribbons_requested":gpu_ribbons,
+        "gpu_ribbons_requested":true,
         "adaptive_ribbons":adaptive_ribbons,"fixed_ribbon_downsize":fixed_downsize,
         "fixed_ribbon_downsizes":fixed_downsizes,
         "parallel_support":std::env::var("BENGA_GPU_RIBBON_PARALLEL_BOUNDS").unwrap_or_else(|_| "original".into()),

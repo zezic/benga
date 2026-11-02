@@ -310,7 +310,6 @@ fn reports_zoom_source_coverage() -> anyhow::Result<()> {
     config.model_rotation = crate::visualizer::ModelRotation::Locked;
     let mut ui = Ui::new(&config)?;
     ui.dismiss_startup();
-    ui.benchmark_visualizer_mut().set_gpu_ribbons(true);
     ui.audio_event(AudioEvent::Config { samplerate: 48000 });
     let model = select_heaviest(&mut ui)?;
     let script = zoom_workload::ZoomWorkload::from_env()?;
@@ -342,11 +341,7 @@ fn reports_zoom_source_coverage() -> anyhow::Result<()> {
             .gpu_models
             .first()
             .context("GPU projection bridge frame")?;
-        assert!(
-            frame.overlay.gpu_active
-                && frame.overlay.model_lines.is_empty()
-                && frame.overlay.ribbons.is_empty()
-        );
+        assert!(projected.projection.is_some() && projected.projected.is_empty());
         history.push_back(projected.cpu_projected());
         while history.len() < 3 {
             history.push_back(history.back().expect("current projected pose").clone());

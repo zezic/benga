@@ -79,9 +79,7 @@ pub fn run(options: Options, config: &Config) -> anyhow::Result<()> {
     let mut ui = Ui::new(config)?;
     // Export uses the same GPU model renderer at a fixed native-resolution
     // target. Encoder throughput must never change exported image quality.
-    ui.set_gpu_ribbons(true);
-    ui.set_gpu_ribbons_supported(render.gpu_ribbons_supported());
-    ui.set_gpu_ribbon_edge_capacity(render.gpu_ribbon_edge_capacity());
+    ui.validate_gpu_models(render.gpu_ribbon_edge_capacity())?;
     if let Some(db) = options.gain_db {
         ui.set_preamp(PreampDb::try_from(db)?);
     }

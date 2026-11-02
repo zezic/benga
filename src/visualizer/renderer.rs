@@ -1,6 +1,6 @@
 use vello::{kurbo::Size, util::DeviceHandle, wgpu};
 
-use super::{Frame, LineInstance, ModelComposite, RibbonInstance};
+use super::{Frame, LineInstance, ModelComposite};
 
 mod adaptive_resolution;
 mod gpu_feedback;
@@ -26,7 +26,7 @@ struct TextureBinding {
     bindings: wgpu::BindGroup,
 }
 
-/// The experimental path accumulates all layers at display resolution before a
+/// Accumulate all layers at display resolution before a
 /// single conversion to the surface format. Repeated 8-bit blends lose faint
 /// shutter contributions, even when the individual ribbon geometry is correct.
 struct GpuComposition {
@@ -121,7 +121,7 @@ impl TextureBinding {
     }
 }
 
-/// Composites the retained UI face, swept motion ribbons, and crisp lines.
+/// Composites the GPU model, retained UI face, and diagnostic lines.
 pub struct Renderer {
     gpu_composition: Option<GpuComposition>,
     gpu_ribbons: Option<super::gpu_ribbons::GpuRibbonRenderer>,
@@ -147,20 +147,12 @@ pub struct Renderer {
     background: Option<TextureBinding>,
     top_overlay: Option<TextureBinding>,
     line_pipeline: wgpu::RenderPipeline,
-    model_additive_pipeline: wgpu::RenderPipeline,
-    model_multiplicative_pipeline: wgpu::RenderPipeline,
-    model_additive_ribbon_pipeline: wgpu::RenderPipeline,
-    model_multiplicative_ribbon_pipeline: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
     uniform_bindings: wgpu::BindGroup,
     uploaded_viewport: Option<[f32; 4]>,
     line_buffer: wgpu::Buffer,
     line_capacity: usize,
-    ribbon_layout: wgpu::BindGroupLayout,
-    ribbon_bindings: wgpu::BindGroup,
-    ribbon_buffer: wgpu::Buffer,
-    ribbon_capacity: usize,
-    #[cfg(any(test, feature = "gpu-ribbon-prototype"))]
+    #[cfg(test)]
     benchmark_timestamps: Option<(wgpu::QuerySet, u32, u32)>,
     #[cfg(test)]
     benchmark_resolve_timestamps: Option<(wgpu::QuerySet, u32, u32)>,
@@ -371,94 +363,8 @@ impl Renderer {
             wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
             wgpu::ColorWrites::ALL,
         );
-        let model_additive_pipeline = geometry_pipeline(
-            device,
-            format,
-            "Visualizer model additive",
-            &line_shader,
-            "line_vertex",
-            "line_additive_fragment",
-            &uniform_layout,
-            &line_vertex_buffers,
-            additive_blend(),
-            wgpu::ColorWrites::COLOR,
-        );
-        let model_multiplicative_pipeline = geometry_pipeline(
-            device,
-            format,
-            "Visualizer model multiplicative",
-            &line_shader,
-            "line_vertex",
-            "line_multiply_fragment",
-            &uniform_layout,
-            &line_vertex_buffers,
-            multiplicative_blend(),
-            wgpu::ColorWrites::COLOR,
-        );
-
-        let ribbon_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Visualizer ribbons"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("ribbons.wgsl").into()),
-        });
-        let ribbon_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Visualizer ribbon data"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<Uniforms>() as u64
-                        ),
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<RibbonInstance>() as u64,
-                        ),
-                    },
-                    count: None,
-                },
-            ],
-        });
-        let model_additive_ribbon_pipeline = geometry_pipeline(
-            device,
-            format,
-            "Visualizer model additive ribbons",
-            &ribbon_shader,
-            "ribbon_vertex",
-            "ribbon_additive_fragment",
-            &ribbon_layout,
-            &[],
-            additive_blend(),
-            wgpu::ColorWrites::COLOR,
-        );
-        let model_multiplicative_ribbon_pipeline = geometry_pipeline(
-            device,
-            format,
-            "Visualizer model multiplicative ribbons",
-            &ribbon_shader,
-            "ribbon_vertex",
-            "ribbon_multiply_fragment",
-            &ribbon_layout,
-            &[],
-            multiplicative_blend(),
-            wgpu::ColorWrites::COLOR,
-        );
-
         let line_capacity = 256;
         let line_buffer = create_instance_buffer::<LineInstance>(device, line_capacity);
-        let ribbon_capacity = 256;
-        let (ribbon_buffer, ribbon_bindings) =
-            create_ribbon_buffer(device, &ribbon_layout, &uniforms, ribbon_capacity);
         Self {
             gpu_composition: None,
             gpu_ribbons: None,
@@ -484,20 +390,12 @@ impl Renderer {
             background: None,
             top_overlay: None,
             line_pipeline,
-            model_additive_pipeline,
-            model_multiplicative_pipeline,
-            model_additive_ribbon_pipeline,
-            model_multiplicative_ribbon_pipeline,
             uniforms,
             uniform_bindings,
             uploaded_viewport: None,
             line_buffer,
             line_capacity,
-            ribbon_layout,
-            ribbon_bindings,
-            ribbon_buffer,
-            ribbon_capacity,
-            #[cfg(any(test, feature = "gpu-ribbon-prototype"))]
+            #[cfg(test)]
             benchmark_timestamps: None,
             #[cfg(test)]
             benchmark_resolve_timestamps: None,
@@ -508,8 +406,7 @@ impl Renderer {
         }
     }
 
-    /// Check the experiment before frame construction, so unsupported devices
-    /// can build the existing CPU geometry for the same displayed frame.
+    /// Validate GPU model requirements before starting playback or export.
     pub fn gpu_ribbons_supported(device: &wgpu::Device) -> bool {
         super::gpu_ribbons::supported(device)
     }
@@ -518,8 +415,8 @@ impl Renderer {
         super::gpu_ribbons::adapter_supported(adapter)
     }
 
-    /// Adapt only the experimental model layer. Scene/UI textures stay at the
-    /// physical viewport resolution. The normal renderer keeps its full quality.
+    /// Adapt only the GPU model layer. Scene/UI textures stay at the physical
+    /// viewport resolution.
     pub fn set_adaptive_ribbon_resolution(&mut self, enabled: bool) {
         self.adaptive_resolution.enable(enabled);
         self.gpu_feedback.restart();
@@ -619,7 +516,7 @@ impl Renderer {
         self.gpu_budget = None;
     }
 
-    /// Linear reduction requested for the next experimental GPU frame.
+    /// Linear reduction requested for the next GPU frame.
     pub fn ribbon_downsize(&self) -> f32 {
         if let Some(downsize) = self.fixed_ribbon_downsize {
             return downsize;
@@ -648,7 +545,7 @@ impl Renderer {
     }
 
     /// Time the next render pass without changing the production rendering path.
-    #[cfg(any(test, feature = "gpu-ribbon-prototype"))]
+    #[cfg(test)]
     pub(super) fn benchmark_timestamps(
         &mut self,
         queries: &wgpu::QuerySet,
@@ -677,7 +574,7 @@ impl Renderer {
         self.benchmark_fill_override = pipeline;
     }
 
-    /// Time the next experimental float-to-surface resolve. Together with
+    /// Time the next float-to-surface resolve. Together with
     /// `benchmark_timestamps`, the first beginning and this end enclose the
     /// complete frozen GPU render, including both passes and their transition.
     #[cfg(test)]
@@ -704,7 +601,7 @@ impl Renderer {
             return ribbons.benchmark_coverage(handle);
         }
         Ok(serde_json::json!({"models":[],"total_screen_layers":0.0,
-            "scope":"No prepared GPU ribbon records. CPU geometry is not measured by this diagnostic."}))
+            "scope":"No prepared GPU ribbon records."}))
     }
 
     fn ensure_line_capacity(&mut self, device: &wgpu::Device, count: usize) {
@@ -713,19 +610,6 @@ impl Renderer {
         }
         self.line_capacity = count.next_power_of_two();
         self.line_buffer = create_instance_buffer::<LineInstance>(device, self.line_capacity);
-    }
-
-    fn ensure_ribbon_capacity(&mut self, device: &wgpu::Device, count: usize) {
-        if count <= self.ribbon_capacity {
-            return;
-        }
-        self.ribbon_capacity = count.next_power_of_two();
-        (self.ribbon_buffer, self.ribbon_bindings) = create_ribbon_buffer(
-            device,
-            &self.ribbon_layout,
-            &self.uniforms,
-            self.ribbon_capacity,
-        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -742,104 +626,81 @@ impl Renderer {
         overlay_opacity: f32,
         top_overlay: Option<&wgpu::TextureView>,
     ) {
-        if frame.gpu_active {
-            let size = [viewport.width as u32, viewport.height as u32];
-            if size.contains(&0) {
-                return;
-            }
-            let model_extent = self.adaptive_resolution.extent(size);
-            let model_extent = self.fixed_ribbon_downsize.map_or(model_extent, |downsize| {
-                adaptive_resolution::extent(size, downsize)
-            });
-            self.last_ribbon_extent = Some(model_extent);
-            let model_downsize = self.ribbon_downsize();
-            let composition = self.gpu_composition.get_or_insert_with(|| {
-                GpuComposition::new(&device.device, &self.background_layout, size)
-            });
-            composition.resize(&device.device, &self.background_layout, size);
-            composition.renderer.model_downsize = model_downsize;
-            composition.renderer.frame_model_timestamps = self.frame_end_timestamp.clone();
-            #[cfg(any(test, feature = "gpu-ribbon-prototype"))]
-            {
-                composition.renderer.benchmark_timestamps = self.benchmark_timestamps.take();
-            }
-            #[cfg(test)]
-            {
-                composition.renderer.benchmark_freeze_gpu = self.benchmark_freeze_gpu;
-                composition.renderer.benchmark_fill_override = self.benchmark_fill_override.clone();
-            }
-            composition.renderer.draw_layers(
-                device,
-                encoder,
-                background,
-                &composition.target,
-                viewport,
-                frame,
-                overlay,
-                overlay_composite,
-                overlay_opacity,
-                top_overlay,
-            );
-            #[cfg(test)]
-            let resolve_timestamps = self.benchmark_resolve_timestamps.take();
-            let frame_end_timestamp = self.frame_end_timestamp.take();
-            let timestamp_writes =
-                frame_end_timestamp
-                    .as_ref()
-                    .map(|queries| wgpu::RenderPassTimestampWrites {
-                        query_set: queries,
-                        beginning_of_pass_write_index: None,
-                        end_of_pass_write_index: Some(3),
-                    });
-            #[cfg(test)]
-            let timestamp_writes = timestamp_writes.or_else(|| {
-                resolve_timestamps.as_ref().map(|(set, beginning, end)| {
-                    wgpu::RenderPassTimestampWrites {
-                        query_set: set,
-                        beginning_of_pass_write_index: Some(*beginning),
-                        end_of_pass_write_index: Some(*end),
-                    }
-                })
-            });
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Visualizer float accumulation resolve"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                timestamp_writes,
-                ..Default::default()
-            });
-            pass.set_pipeline(&self.background_pipeline);
-            pass.set_bind_group(0, &composition.resolve.bindings, &[]);
-            pass.draw(0..3, 0..1);
-        } else {
-            self.frame_end_timestamp = None;
-            if self.last_ribbon_extent.take().is_some() {
-                // Shader/shutter fallback is also a backend transition. Do not
-                // let its old queued GPU samples affect a later GPU session.
-                self.reset_frame_timing();
-            } else {
-                self.adaptive_resolution.reset_timing();
-            }
-            self.draw_layers(
-                device,
-                encoder,
-                background,
-                target,
-                viewport,
-                frame,
-                overlay,
-                overlay_composite,
-                overlay_opacity,
-                top_overlay,
-            );
+        let size = [viewport.width as u32, viewport.height as u32];
+        if size.contains(&0) {
+            return;
         }
+        let model_extent = self.adaptive_resolution.extent(size);
+        let model_extent = self.fixed_ribbon_downsize.map_or(model_extent, |downsize| {
+            adaptive_resolution::extent(size, downsize)
+        });
+        self.last_ribbon_extent = Some(model_extent);
+        let model_downsize = self.ribbon_downsize();
+        let composition = self.gpu_composition.get_or_insert_with(|| {
+            GpuComposition::new(&device.device, &self.background_layout, size)
+        });
+        composition.resize(&device.device, &self.background_layout, size);
+        composition.renderer.model_downsize = model_downsize;
+        composition.renderer.frame_model_timestamps = self.frame_end_timestamp.clone();
+        #[cfg(test)]
+        {
+            composition.renderer.benchmark_timestamps = self.benchmark_timestamps.take();
+        }
+        #[cfg(test)]
+        {
+            composition.renderer.benchmark_freeze_gpu = self.benchmark_freeze_gpu;
+            composition.renderer.benchmark_fill_override = self.benchmark_fill_override.clone();
+        }
+        composition.renderer.draw_layers(
+            device,
+            encoder,
+            background,
+            &composition.target,
+            viewport,
+            frame,
+            overlay,
+            overlay_composite,
+            overlay_opacity,
+            top_overlay,
+        );
+        #[cfg(test)]
+        let resolve_timestamps = self.benchmark_resolve_timestamps.take();
+        let frame_end_timestamp = self.frame_end_timestamp.take();
+        let timestamp_writes =
+            frame_end_timestamp
+                .as_ref()
+                .map(|queries| wgpu::RenderPassTimestampWrites {
+                    query_set: queries,
+                    beginning_of_pass_write_index: None,
+                    end_of_pass_write_index: Some(3),
+                });
+        #[cfg(test)]
+        let timestamp_writes = timestamp_writes.or_else(|| {
+            resolve_timestamps.as_ref().map(|(set, beginning, end)| {
+                wgpu::RenderPassTimestampWrites {
+                    query_set: set,
+                    beginning_of_pass_write_index: Some(*beginning),
+                    end_of_pass_write_index: Some(*end),
+                }
+            })
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Visualizer float accumulation resolve"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            timestamp_writes,
+            ..Default::default()
+        });
+        pass.set_pipeline(&self.background_pipeline);
+        pass.set_bind_group(0, &composition.resolve.bindings, &[]);
+        pass.draw(0..3, 0..1);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -856,14 +717,13 @@ impl Renderer {
         overlay_opacity: f32,
         top_overlay: Option<&wgpu::TextureView>,
     ) {
-        let prepare_gpu = frame.gpu_active;
+        let prepare_gpu = true;
         #[cfg(test)]
         let prepare_gpu = prepare_gpu && !self.benchmark_freeze_gpu;
         let physical_extent = [viewport.width as u32, viewport.height as u32];
         let model_extent = adaptive_resolution::extent(physical_extent, self.model_downsize);
         // Keep the model in its own float layer even at 1x, so GPU timing
         // measures the same work at every adaptive quality.
-        let isolated_model = frame.gpu_active;
         if prepare_gpu {
             self.gpu_ribbons
                 .get_or_insert_with(|| super::gpu_ribbons::GpuRibbonRenderer::new(&device.device))
@@ -896,44 +756,12 @@ impl Renderer {
             );
             self.uploaded_viewport = Some(viewport);
         }
-        let ribbon_count = frame.ribbons.len();
-        let model_count = frame.model_lines.len();
         let line_count = frame.lines.len();
-        // CPU mode reserves before animation. GPU projection and preparation
-        // never reserve expanded CPU ribbon storage.
-        let edge_capacity = if frame.gpu_active {
-            0
-        } else {
-            frame.model_edge_capacity
-        };
-        self.ensure_ribbon_capacity(&device.device, (edge_capacity * 8).max(ribbon_count));
-        self.ensure_line_capacity(
-            &device.device,
-            edge_capacity.max(model_count) + line_count.max(2048),
-        );
-        if ribbon_count > 0 {
+        self.ensure_line_capacity(&device.device, line_count.max(2048));
+        if line_count > 0 {
             device
                 .queue
-                .write_buffer(&self.ribbon_buffer, 0, bytemuck::cast_slice(frame.ribbons));
-        }
-        let total_lines = model_count + line_count;
-        let line_stride = std::mem::size_of::<LineInstance>() as u64;
-        let model_bytes = model_count as u64 * line_stride;
-        if total_lines > 0 {
-            if model_count > 0 {
-                device.queue.write_buffer(
-                    &self.line_buffer,
-                    0,
-                    bytemuck::cast_slice(frame.model_lines),
-                );
-            }
-            if line_count > 0 {
-                device.queue.write_buffer(
-                    &self.line_buffer,
-                    model_bytes,
-                    bytemuck::cast_slice(frame.lines),
-                );
-            }
+                .write_buffer(&self.line_buffer, 0, bytemuck::cast_slice(frame.lines));
         }
         if overlay.is_some() {
             device.queue.write_buffer(
@@ -973,10 +801,10 @@ impl Renderer {
                 ));
             }
         }
-        #[cfg(any(test, feature = "gpu-ribbon-prototype"))]
+        #[cfg(test)]
         let benchmark_timestamps = self.benchmark_timestamps.take();
         let frame_model_timestamps = self.frame_model_timestamps.take();
-        if isolated_model {
+        {
             if self
                 .ribbon_layer
                 .as_ref()
@@ -1000,7 +828,7 @@ impl Renderer {
                         beginning_of_pass_write_index: Some(1),
                         end_of_pass_write_index: Some(2),
                     });
-            #[cfg(any(test, feature = "gpu-ribbon-prototype"))]
+            #[cfg(test)]
             let timestamp_writes = timestamp_writes.or_else(|| {
                 benchmark_timestamps.as_ref().map(|(set, beginning, _)| {
                     wgpu::RenderPassTimestampWrites {
@@ -1026,26 +854,16 @@ impl Renderer {
             });
             self.draw_gpu_ribbons(&mut pass, frame.model_composite);
         }
-        let timestamp_writes = if isolated_model {
-            None
-        } else {
-            frame_model_timestamps
-                .as_ref()
-                .map(|queries| wgpu::RenderPassTimestampWrites {
-                    query_set: queries,
-                    beginning_of_pass_write_index: Some(1),
-                    end_of_pass_write_index: Some(2),
-                })
-        };
-        #[cfg(any(test, feature = "gpu-ribbon-prototype"))]
+        let timestamp_writes = None;
+        #[cfg(test)]
         let timestamp_writes = timestamp_writes.or_else(|| {
-            benchmark_timestamps.as_ref().map(|(set, beginning, end)| {
-                wgpu::RenderPassTimestampWrites {
+            benchmark_timestamps
+                .as_ref()
+                .map(|(set, _, end)| wgpu::RenderPassTimestampWrites {
                     query_set: set,
-                    beginning_of_pass_write_index: (!isolated_model).then_some(*beginning),
+                    beginning_of_pass_write_index: None,
                     end_of_pass_write_index: Some(*end),
-                }
-            })
+                })
         });
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Visualizer overlay"),
@@ -1072,26 +890,7 @@ impl Renderer {
             &[],
         );
         pass.draw(0..3, 0..1);
-        if model_count > 0 {
-            let pipeline = match frame.model_composite {
-                ModelComposite::Additive => &self.model_additive_pipeline,
-                ModelComposite::Multiplicative => &self.model_multiplicative_pipeline,
-            };
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &self.uniform_bindings, &[]);
-            pass.set_vertex_buffer(0, self.line_buffer.slice(0..model_bytes));
-            pass.draw(0..6, 0..model_count as u32);
-        }
-        if ribbon_count > 0 {
-            let pipeline = match frame.model_composite {
-                ModelComposite::Additive => &self.model_additive_ribbon_pipeline,
-                ModelComposite::Multiplicative => &self.model_multiplicative_ribbon_pipeline,
-            };
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &self.ribbon_bindings, &[]);
-            pass.draw(0..3 * ribbon_count as u32, 0..1);
-        }
-        if isolated_model {
+        {
             let pipeline = match frame.model_composite {
                 ModelComposite::Additive => &self.ribbon_upsample_additive,
                 ModelComposite::Multiplicative => &self.ribbon_upsample_multiply,
@@ -1107,7 +906,7 @@ impl Renderer {
         if line_count > 0 {
             pass.set_pipeline(&self.line_pipeline);
             pass.set_bind_group(0, &self.uniform_bindings, &[]);
-            pass.set_vertex_buffer(0, self.line_buffer.slice(model_bytes..));
+            pass.set_vertex_buffer(0, self.line_buffer.slice(..));
             pass.draw(0..6, 0..line_count as u32);
         }
         if let Some(binding) = &overlay_binding {
@@ -1290,35 +1089,6 @@ fn geometry_pipeline(
     })
 }
 
-fn create_ribbon_buffer(
-    device: &wgpu::Device,
-    layout: &wgpu::BindGroupLayout,
-    uniforms: &wgpu::Buffer,
-    capacity: usize,
-) -> (wgpu::Buffer, wgpu::BindGroup) {
-    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Visualizer ribbons"),
-        size: capacity as u64 * std::mem::size_of::<RibbonInstance>() as u64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Visualizer ribbons"),
-        layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniforms.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: buffer.as_entire_binding(),
-            },
-        ],
-    });
-    (buffer, bindings)
-}
-
 fn create_instance_buffer<T>(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Visualizer instance buffer"),
@@ -1341,19 +1111,6 @@ mod tests {
         theme::Theme,
         visualizer::{ModelMotion, Visualizer},
     };
-
-    #[test]
-    fn ribbon_storage_matches_the_shader_layout() {
-        use std::mem::{offset_of, size_of};
-
-        assert_eq!(size_of::<RibbonInstance>(), 80);
-        assert_eq!(offset_of!(RibbonInstance, start), 0);
-        assert_eq!(offset_of!(RibbonInstance, start_color), 16);
-        assert_eq!(offset_of!(RibbonInstance, end_color), 32);
-        assert_eq!(offset_of!(RibbonInstance, third_color), 48);
-        assert_eq!(offset_of!(RibbonInstance, end), 64);
-        assert_eq!(offset_of!(RibbonInstance, style), 72);
-    }
 
     #[test]
     #[ignore = "requires a compute-capable GPU"]
@@ -1420,68 +1177,61 @@ mod tests {
             mapped_at_creation: false,
         });
         let mut renderer = Renderer::new(&device.device, format);
-        for gpu_active in [false, true] {
-            for composite in [
-                None,
-                Some(ModelComposite::Additive),
-                Some(ModelComposite::Multiplicative),
-            ] {
-                for opacity in [0.0, 1.0] {
-                    let mut encoder = device
-                        .device
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-                    renderer.draw(
-                        device,
-                        &mut encoder,
-                        &background,
-                        &target_view,
-                        Size::new(f64::from(width), 1.0),
-                        Frame {
-                            lines: &[],
-                            model_lines: &[],
-                            ribbons: &[],
-                            gpu_active,
-                            gpu_models: &[],
-                            model_edge_capacity: 0,
-                            model_composite: ModelComposite::Additive,
+        for composite in [
+            None,
+            Some(ModelComposite::Additive),
+            Some(ModelComposite::Multiplicative),
+        ] {
+            for opacity in [0.0, 1.0] {
+                let mut encoder = device
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+                renderer.draw(
+                    device,
+                    &mut encoder,
+                    &background,
+                    &target_view,
+                    Size::new(f64::from(width), 1.0),
+                    Frame {
+                        lines: &[],
+                        gpu_models: &[],
+                        model_composite: ModelComposite::Additive,
+                    },
+                    Some(&foreground),
+                    composite,
+                    opacity,
+                    Some(&top_overlay),
+                );
+                encoder.copy_texture_to_buffer(
+                    target.as_image_copy(),
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &readback,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(width * 4),
+                            rows_per_image: Some(1),
                         },
-                        Some(&foreground),
-                        composite,
-                        opacity,
-                        Some(&top_overlay),
+                    },
+                    target.size(),
+                );
+                device.queue.submit([encoder.finish()]);
+                let (tx, rx) = mpsc::channel();
+                readback
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
+                device.device.poll(wgpu::PollType::wait_indefinitely())?;
+                rx.recv()??;
+                let pixels = readback.slice(..).get_mapped_range()?.to_vec();
+                readback.unmap();
+                let covered = &pixels[..4];
+                let uncovered = &pixels[width as usize * 2..width as usize * 2 + 4];
+                for channel in 0..3 {
+                    let ink = if channel == 0 { 255.0 } else { 0.0 };
+                    let expected = (ink * 128.0 + f32::from(uncovered[channel]) * 127.0) / 255.0;
+                    assert!(
+                        (f32::from(covered[channel]) - expected).abs() <= 1.0,
+                        "top overlay must retain normal alpha at foreground opacity {opacity}"
                     );
-                    encoder.copy_texture_to_buffer(
-                        target.as_image_copy(),
-                        wgpu::TexelCopyBufferInfo {
-                            buffer: &readback,
-                            layout: wgpu::TexelCopyBufferLayout {
-                                offset: 0,
-                                bytes_per_row: Some(width * 4),
-                                rows_per_image: Some(1),
-                            },
-                        },
-                        target.size(),
-                    );
-                    device.queue.submit([encoder.finish()]);
-                    let (tx, rx) = mpsc::channel();
-                    readback
-                        .slice(..)
-                        .map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
-                    device.device.poll(wgpu::PollType::wait_indefinitely())?;
-                    rx.recv()??;
-                    let pixels = readback.slice(..).get_mapped_range()?.to_vec();
-                    readback.unmap();
-                    let covered = &pixels[..4];
-                    let uncovered = &pixels[width as usize * 2..width as usize * 2 + 4];
-                    for channel in 0..3 {
-                        let ink = if channel == 0 { 255.0 } else { 0.0 };
-                        let expected =
-                            (ink * 128.0 + f32::from(uncovered[channel]) * 127.0) / 255.0;
-                        assert!(
-                            (f32::from(covered[channel]) - expected).abs() <= 1.0,
-                            "top overlay must retain normal alpha at foreground opacity {opacity}"
-                        );
-                    }
                 }
             }
         }
@@ -1490,7 +1240,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires a compute-capable GPU"]
-    fn experimental_composition_preserves_edge_styles_and_faint_ink() -> anyhow::Result<()> {
+    fn gpu_composition_preserves_edge_styles_and_faint_ink() -> anyhow::Result<()> {
         use std::sync::Arc;
 
         use crate::visualizer::gpu_bridge::{GpuModelFrame, GpuTopology};
@@ -1593,11 +1343,7 @@ mod tests {
                 Size::new(f64::from(width), f64::from(height)),
                 Frame {
                     lines: &[],
-                    model_lines: &[],
-                    ribbons: &[],
-                    gpu_active: true,
                     gpu_models: std::slice::from_ref(&model),
-                    model_edge_capacity: 69_225,
                     model_composite: composite,
                 },
                 None,
@@ -1644,15 +1390,13 @@ mod tests {
             );
             let accumulation = renderer.gpu_composition.as_ref().unwrap();
             assert_eq!(accumulation.size, [width, height]);
-            assert_eq!(accumulation.renderer.ribbon_capacity, 256);
-            assert_eq!(renderer.ribbon_capacity, 256);
         }
         Ok(())
     }
 
     #[test]
     #[ignore = "requires a compute-capable GPU"]
-    fn renders_wireframe_lines_and_swept_ribbons() -> anyhow::Result<()> {
+    fn renders_gpu_wireframe_and_swept_motion() -> anyhow::Result<()> {
         let mut context = RenderContext::new();
         let id = pollster::block_on(crate::render::prepare_device(
             &mut context,
@@ -1729,7 +1473,6 @@ mod tests {
         visualizer.set_model_motion(ModelMotion::Swept);
         visualizer.load_models();
         let startup_frame = visualizer.frame();
-        assert!(startup_frame.model_lines.is_empty() && startup_frame.ribbons.is_empty());
         let mut encoder = device
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
@@ -1746,10 +1489,6 @@ mod tests {
             None,
         );
         device.queue.submit([encoder.finish()]);
-        assert!(renderer.line_capacity >= startup_frame.model_edge_capacity + 2048);
-        assert!(renderer.ribbon_capacity >= startup_frame.model_edge_capacity * 8);
-        let prepared_line_buffer = renderer.line_buffer.clone();
-        let prepared_ribbon_buffer = renderer.ribbon_buffer.clone();
         let mut at = AudioTime::ZERO;
         for frame in 0..180 {
             let mut input = Vec::with_capacity(800);
@@ -1770,7 +1509,7 @@ mod tests {
             let end = at.shifted(800.0 / 48_000.0);
             visualizer.update(
                 AudioInterval::new(at, end),
-                ShutterFrames::try_from(8.0)?,
+                ShutterFrames::default(),
                 800.0 / 48_000.0,
                 &palette,
                 (width as f32, height as f32),
@@ -1778,47 +1517,29 @@ mod tests {
                 1.0,
             );
             at = end;
+            // Seed the GPU's two preceding displayed poses before capturing
+            // the last pose; animation updates alone do not render history.
+            if (177..179).contains(&frame) {
+                let mut encoder = device.device.create_command_encoder(&Default::default());
+                renderer.draw(
+                    device,
+                    &mut encoder,
+                    &background_view,
+                    &target_view,
+                    Size::new(f64::from(width), f64::from(height)),
+                    visualizer.frame(),
+                    None,
+                    None,
+                    1.0,
+                    None,
+                );
+                device.queue.submit([encoder.finish()]);
+            }
         }
         let frame = visualizer.frame();
-        assert!(frame.lines.len() + frame.model_lines.len() + frame.ribbons.len() >= 12);
         assert!(
-            !frame.ribbons.is_empty(),
-            "motion history must produce swept ribbons"
-        );
-        let mut min_x = f32::INFINITY;
-        let mut max_x = f32::NEG_INFINITY;
-        let mut min_y = f32::INFINITY;
-        let mut max_y = f32::NEG_INFINITY;
-        for line in frame.lines.iter().chain(frame.model_lines) {
-            for (x, y) in [
-                (line.endpoints[0], line.endpoints[1]),
-                (line.endpoints[2], line.endpoints[3]),
-            ] {
-                min_x = min_x.min(x);
-                max_x = max_x.max(x);
-                min_y = min_y.min(y);
-                max_y = max_y.max(y);
-            }
-        }
-        for ribbon in frame.ribbons {
-            for (x, y) in [
-                (ribbon.start[0], ribbon.start[1]),
-                (ribbon.start[2], ribbon.start[3]),
-                (ribbon.end[0], ribbon.end[1]),
-            ] {
-                min_x = min_x.min(x);
-                max_x = max_x.max(x);
-                min_y = min_y.min(y);
-                max_y = max_y.max(y);
-            }
-        }
-
-        assert!(
-            min_x > -(width as f32) / 4.0
-                && max_x < width as f32 * 1.25
-                && min_y > -(height as f32) / 4.0
-                && max_y < height as f32 * 1.25,
-            "the projected scene ran away from the viewport: {min_x}..{max_x}, {min_y}..{max_y}"
+            !frame.gpu_models.is_empty(),
+            "animation must provide GPU projection parameters and ink"
         );
         let mut encoder = device
             .device
@@ -1835,8 +1556,6 @@ mod tests {
             1.0,
             None,
         );
-        assert_eq!(renderer.line_buffer, prepared_line_buffer);
-        assert_eq!(renderer.ribbon_buffer, prepared_ribbon_buffer);
         let row_bytes = width * 4;
         let readback = device.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Visualizer test readback"),
@@ -1878,9 +1597,9 @@ mod tests {
             })
             .count();
         eprintln!(
-            "visualizer ink pixels: {ink}; {} lines, {} ribbons",
+            "visualizer ink pixels: {ink}; {} diagnostic lines, {} GPU models",
             frame.lines.len(),
-            frame.ribbons.len()
+            frame.gpu_models.len()
         );
         assert!(ink > 2_000, "the wireframe must cover the retained face");
         if let Some(path) = std::env::var_os("BENGA_RENDER_PREVIEW_PATH") {

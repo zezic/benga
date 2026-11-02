@@ -6,7 +6,8 @@ use anyhow::{ensure, Context};
 use vello::{kurbo::Size, peniko::Color, util::RenderContext, wgpu, RenderParams, Scene};
 
 use super::{
-    BackgroundCache, Frame, PlateMask, PlateMaskImage, RasterAssetCache, SceneTexture, ANTIALIASING,
+    BackgroundCache, Frame, PlateMask, PlateMaskImage, RasterAssetCache, SceneTexture,
+    SolidBackground, ANTIALIASING,
 };
 use crate::visualizer::{Renderer as VisualizerRenderer, UiFrame};
 
@@ -19,6 +20,7 @@ pub struct OffscreenRenderer {
     renderer: vello::Renderer,
     visualizer: VisualizerRenderer,
     background_cache: BackgroundCache,
+    solid_background: SolidBackground,
     raster_assets: RasterAssetCache,
     plate_mask: PlateMask,
     background: SceneTexture,
@@ -42,6 +44,11 @@ impl OffscreenRenderer {
             wgpu::DeviceDescriptor::default(),
         ))?;
         let handle = &context.devices[device_id];
+        ensure!(
+            VisualizerRenderer::gpu_ribbons_supported(&handle.device)
+                && VisualizerRenderer::gpu_ribbons_adapter_supported(handle.adapter()),
+            "Benga requires a GPU with compute, indirect drawing and float blending support"
+        );
         let limits = handle.device.limits();
         ensure!(
             width <= limits.max_texture_dimension_2d && height <= limits.max_texture_dimension_2d,
@@ -85,6 +92,7 @@ impl OffscreenRenderer {
             renderer,
             visualizer,
             background_cache: BackgroundCache::new(),
+            solid_background: SolidBackground::default(),
             raster_assets: RasterAssetCache::new(),
             plate_mask,
             background,
@@ -109,12 +117,6 @@ impl OffscreenRenderer {
         self.plate_mask.image()
     }
 
-    pub fn gpu_ribbons_supported(&self) -> bool {
-        let handle = &self.context.devices[self.device_id];
-        VisualizerRenderer::gpu_ribbons_supported(&handle.device)
-            && VisualizerRenderer::gpu_ribbons_adapter_supported(handle.adapter())
-    }
-
     pub fn gpu_ribbon_edge_capacity(&self) -> usize {
         let limits = self.context.devices[self.device_id].device.limits();
         (u64::from(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size) / (6 * 64))
@@ -136,7 +138,14 @@ impl OffscreenRenderer {
         }
         self.raster_assets
             .prepare(&mut self.renderer, handle, &frame.raster_assets)?;
-        if matches!(frame.background, Frame::Rebuilt(_)) || !self.background_ready {
+        let solid_color = if let Frame::Solid(color) = frame.background {
+            Some(color)
+        } else {
+            None
+        };
+        if solid_color.is_none()
+            && (matches!(frame.background, Frame::Rebuilt(_)) || !self.background_ready)
+        {
             let background = self.background_cache.compose(
                 &mut self.renderer,
                 handle,
@@ -164,10 +173,16 @@ impl OffscreenRenderer {
             None
         };
         let mut encoder = handle.device.create_command_encoder(&Default::default());
+        let background_view = if let Some(color) = solid_color {
+            self.solid_background
+                .prepare(&handle.device, &mut encoder, color, &self.params)
+        } else {
+            &self.background.view
+        };
         self.visualizer.draw(
             handle,
             &mut encoder,
-            &self.background.view,
+            background_view,
             &self.target_view,
             Size::new(f64::from(self.params.width), f64::from(self.params.height)),
             frame.overlay,
@@ -265,11 +280,7 @@ mod tests {
                 raster_assets: Vec::new(),
                 overlay: VisualizerFrame {
                     lines: &[],
-                    model_lines: &[],
-                    ribbons: &[],
                     model_composite: ModelComposite::Additive,
-                    model_edge_capacity: 0,
-                    gpu_active: false,
                     gpu_models: &[],
                 },
                 foreground: true,
@@ -313,6 +324,71 @@ mod tests {
         foreground.reset();
         let third = renderer.render(&foreground, frame(Frame::Rebuilt(&background)))?;
         assert_eq!(third, [0, 255, 0, 255].repeat((width * height) as usize));
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a compute-capable GPU"]
+    fn offscreen_solid_backgrounds_match_vector_backdrops_and_preserve_retained_layers(
+    ) -> anyhow::Result<()> {
+        let (width, height) = (67, 5);
+        let mut renderer = OffscreenRenderer::new(width, height)?;
+        let mut vector = Scene::new();
+        let mut foreground = Scene::new();
+        foreground.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            Color::from_rgba8(40, 100, 240, 128),
+            None,
+            &Rect::new(0.0, 0.0, 20.0, f64::from(height)),
+        );
+        fn frame(background: Frame<'_>) -> UiFrame<'_> {
+            UiFrame {
+                background,
+                raster_assets: Vec::new(),
+                overlay: VisualizerFrame {
+                    lines: &[],
+                    model_composite: ModelComposite::Additive,
+                    gpu_models: &[],
+                },
+                foreground: true,
+                overlay_composite: None,
+                overlay_opacity: 1.0,
+                plate_instances: &[],
+                plate_ink: Color::BLACK,
+            }
+        }
+        for color in [
+            Color::from_rgb8(12, 23, 34),
+            Color::new([0.31, 0.48, 0.67, 1.0]),
+            Color::from_rgb8(240, 230, 220),
+            Color::from_rgba8(130, 60, 210, 128),
+        ] {
+            vector.reset();
+            vector.fill(
+                Fill::NonZero,
+                Affine::IDENTITY,
+                color,
+                None,
+                &Rect::new(0.0, 0.0, f64::from(width), f64::from(height)),
+            );
+            let expected = renderer.render(&foreground, frame(Frame::Rebuilt(&vector)))?;
+            // Repeat to exercise the retained solid texture, then return to the
+            // vector cache and back without changing either background's color.
+            for background in [
+                Frame::Solid(color),
+                Frame::Solid(color),
+                Frame::Retained(&vector),
+                Frame::Solid(color),
+            ] {
+                let actual = renderer.render(&foreground, frame(background))?;
+                assert_eq!(actual.len(), expected.len());
+                assert!(actual
+                    .iter()
+                    .zip(&expected)
+                    .all(|(actual, expected)| actual.abs_diff(*expected) <= 1));
+            }
+        }
         Ok(())
     }
 }

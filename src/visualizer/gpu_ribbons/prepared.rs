@@ -39,12 +39,19 @@ pub(super) struct PreparedRibbons {
     render_bindings: wgpu::BindGroup,
     counters: wgpu::Buffer,
     edge_count: u32,
-    #[cfg(test)]
-    benchmark_triangles: wgpu::Buffer,
-    #[cfg(test)]
-    benchmark_parallel: wgpu::Buffer,
-    #[cfg(test)]
-    benchmark_indices: wgpu::Buffer,
+    storage: RibbonStorage,
+}
+
+/// Large working buffers survive model exchanges. Bind groups expose only the
+/// current model's range so WGSL array lengths keep their original meaning.
+struct RibbonStorage {
+    triangles: wgpu::Buffer,
+    parallel: wgpu::Buffer,
+    triangle_indices: wgpu::Buffer,
+    edge_masks: wgpu::Buffer,
+    edge_offsets: wgpu::Buffer,
+    block_totals: wgpu::Buffer,
+    body_data: wgpu::Buffer,
 }
 
 #[cfg(test)]
@@ -429,49 +436,18 @@ impl PreparedRibbons {
                 | diagnostic_usage,
             mapped_at_creation: false,
         });
-        fn bind(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
-            wgpu::BindGroupEntry {
-                binding,
-                resource: buffer.as_entire_binding(),
-            }
-        }
-        let prepare_bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Experimental edge preparation resources"),
-            layout: &pipelines.prepare_layout,
-            entries: &[
-                bind(0, uniforms),
-                bind(1, edges),
-                bind(2, history),
-                bind(3, &triangles),
-                bind(4, &parallel),
-                bind(5, &counters),
-                bind(6, &body_data),
-                bind(7, &edge_masks),
-                bind(8, styles),
-            ],
-        });
-        let render_bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Experimental classified ribbon draw resources"),
-            layout: &pipelines.render_layout,
-            entries: &[
-                bind(0, uniforms),
-                bind(1, &triangles),
-                bind(2, &parallel),
-                bind(3, &body_data),
-                bind(4, &triangle_indices),
-                bind(5, styles),
-            ],
-        });
-        let prefix_bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Experimental deterministic list compaction resources"),
-            layout: &pipelines.prefix_layout,
-            entries: &[
-                bind(0, &edge_masks),
-                bind(1, &edge_offsets),
-                bind(2, &block_totals),
-                bind(3, &triangle_indices),
-            ],
-        });
+        let storage = RibbonStorage {
+            triangles,
+            parallel,
+            triangle_indices,
+            edge_masks,
+            edge_offsets,
+            block_totals,
+            body_data,
+        };
+        let (prepare_bindings, render_bindings, prefix_bindings) = Self::bindings(
+            device, &pipelines, uniforms, edges, history, styles, &counters, &storage, edge_count,
+        );
         Self {
             pipelines,
             prepare_bindings,
@@ -479,21 +455,106 @@ impl PreparedRibbons {
             render_bindings,
             counters,
             edge_count,
-            #[cfg(test)]
-            benchmark_triangles: triangles,
-            #[cfg(test)]
-            benchmark_parallel: parallel,
-            #[cfg(test)]
-            benchmark_indices: triangle_indices,
+            storage,
         }
+    }
+
+    fn bindings(
+        device: &wgpu::Device,
+        pipelines: &RibbonPipelines,
+        uniforms: &wgpu::Buffer,
+        edges: &wgpu::Buffer,
+        history: &wgpu::Buffer,
+        styles: &wgpu::Buffer,
+        counters: &wgpu::Buffer,
+        storage: &RibbonStorage,
+        edge_count: u32,
+    ) -> (wgpu::BindGroup, wgpu::BindGroup, wgpu::BindGroup) {
+        fn bind(binding: u32, buffer: &wgpu::Buffer, bytes: u64) -> wgpu::BindGroupEntry<'_> {
+            wgpu::BindGroupEntry {
+                binding,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(bytes),
+                }),
+            }
+        }
+        let count = u64::from(edge_count.max(1));
+        let prepare_bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Experimental edge preparation resources"),
+            layout: &pipelines.prepare_layout,
+            entries: &[
+                bind(0, uniforms, uniforms.size()),
+                bind(1, edges, count * 8),
+                bind(2, history, history.size()),
+                bind(3, &storage.triangles, count * 6 * 64),
+                bind(4, &storage.parallel, count * 2 * 64),
+                bind(5, counters, counters.size()),
+                bind(6, &storage.body_data, count * 32),
+                bind(7, &storage.edge_masks, count * 16),
+                bind(8, styles, count * 16),
+            ],
+        });
+        let render_bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Experimental classified ribbon draw resources"),
+            layout: &pipelines.render_layout,
+            entries: &[
+                bind(0, uniforms, uniforms.size()),
+                bind(1, &storage.triangles, count * 6 * 64),
+                bind(2, &storage.parallel, count * 2 * 64),
+                bind(3, &storage.body_data, count * 32),
+                bind(4, &storage.triangle_indices, count * (6 * 3 + 2) * 4),
+                bind(5, styles, count * 16),
+            ],
+        });
+        let prefix_bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Experimental deterministic list compaction resources"),
+            layout: &pipelines.prefix_layout,
+            entries: &[
+                bind(0, &storage.edge_masks, count * 16),
+                bind(1, &storage.edge_offsets, count * 16),
+                bind(2, &storage.block_totals, count.div_ceil(64) * 16),
+                bind(3, &storage.triangle_indices, count * (6 * 3 + 2) * 4),
+            ],
+        });
+        (prepare_bindings, render_bindings, prefix_bindings)
+    }
+
+    /// Reuse high-water scratch storage while exposing the new model's actual
+    /// edge count to compaction and indirect-draw indexing.
+    pub fn rebind(
+        &mut self,
+        device: &wgpu::Device,
+        uniforms: &wgpu::Buffer,
+        edges: &wgpu::Buffer,
+        history: &wgpu::Buffer,
+        styles: &wgpu::Buffer,
+        edge_count: u32,
+    ) {
+        let (prepare, render, prefix) = Self::bindings(
+            device,
+            &self.pipelines,
+            uniforms,
+            edges,
+            history,
+            styles,
+            &self.counters,
+            &self.storage,
+            edge_count,
+        );
+        self.prepare_bindings = prepare;
+        self.render_bindings = render;
+        self.prefix_bindings = prefix;
+        self.edge_count = edge_count;
     }
 
     #[cfg(test)]
     pub(super) fn benchmark_buffers(&self) -> BenchmarkBuffers<'_> {
         BenchmarkBuffers {
-            triangles: &self.benchmark_triangles,
-            parallel: &self.benchmark_parallel,
-            indices: &self.benchmark_indices,
+            triangles: &self.storage.triangles,
+            parallel: &self.storage.parallel,
+            indices: &self.storage.triangle_indices,
             counters: &self.counters,
             edge_count: self.edge_count,
             tight_parallel_support: self.pipelines.tight_parallel_support,

@@ -42,8 +42,6 @@ fn visualizer() -> Visualizer {
         0.5,
         &StyleTuning::default(),
     );
-    visualizer.set_gpu_ribbons(true);
-    visualizer.set_gpu_ribbons_supported(true);
     visualizer
 }
 
@@ -72,8 +70,7 @@ fn active_bridge_skips_cpu_tessellation_and_publishes_three_pose_layout_support(
             (1280.0, 720.0),
         );
         let frame = visualizer.frame();
-        assert!(frame.gpu_active);
-        assert!(frame.model_lines.is_empty() && frame.ribbons.is_empty());
+        assert_eq!(frame.gpu_models.len(), 1);
         let gpu = &frame.gpu_models[0];
         assert!(
             gpu.projected.is_empty(),
@@ -272,7 +269,32 @@ fn bridge_ink_and_projection_match_cpu_for_focus_slide_selector_highlight_and_di
 }
 
 #[test]
-fn exchanges_keep_separate_histories_and_reuse_prepared_topology() {
+fn instant_model_swaps_publish_only_the_new_complete_model() {
+    let mut visualizer = visualizer();
+    step(&mut visualizer, 0.0, 0.02, 2.0, (1280.0, 720.0));
+    let old_generation = visualizer.gpu_models[0].reset;
+    let next = prepared("instant fixture");
+    visualizer.scene.switch(&next, ModelMotion::Swept, 0.6);
+    assert!(
+        visualizer.scene.outgoing.is_none(),
+        "an instant switch must retire the old model before the next frame"
+    );
+    assert_eq!(visualizer.scene.transition, 1.0);
+    let current = visualizer.scene.current.as_ref().unwrap();
+    assert_eq!(current.active_edges, next.wireframe.edges().len());
+    assert!((0..current.active_edges).all(|index| current.edge_dissolve.alpha(index) == 1.0));
+    assert!(current.history.is_empty() && current.current.is_empty());
+    assert!(current.gpu_bounds.is_empty());
+    step(&mut visualizer, 0.02, 0.04, 2.0, (1280.0, 720.0));
+    assert_eq!(visualizer.gpu_models.len(), 1);
+    let frame = &visualizer.gpu_models[0];
+    assert_ne!(frame.reset, old_generation);
+    assert!(Arc::ptr_eq(&frame.topology, &next.gpu_topology));
+    assert_eq!(frame.styles.len(), next.wireframe.edges().len());
+}
+
+#[test]
+fn instant_swaps_reuse_prepared_topology_with_fresh_history() {
     let mut visualizer = visualizer();
     let first_model = prepared("return fixture");
     visualizer.scene.set_prepared(&first_model);
@@ -284,14 +306,10 @@ fn exchanges_keep_separate_histories_and_reuse_prepared_topology() {
         .scene
         .switch(&second_model, ModelMotion::Swept, 0.6);
     step(&mut visualizer, 0.02, 0.04, 2.0, (1280.0, 720.0));
-    assert_eq!(visualizer.gpu_models.len(), 2);
-    assert_ne!(
-        visualizer.gpu_models[0].reset,
-        visualizer.gpu_models[1].reset
-    );
-    assert_eq!(visualizer.gpu_models[1].reset, first_generation);
-    assert!(Arc::ptr_eq(
-        &visualizer.gpu_models[1].topology,
+    assert_eq!(visualizer.gpu_models.len(), 1);
+    assert_ne!(visualizer.gpu_models[0].reset, first_generation);
+    assert!(!Arc::ptr_eq(
+        &visualizer.gpu_models[0].topology,
         &first_topology
     ));
     assert!(Arc::ptr_eq(
@@ -307,7 +325,8 @@ fn exchanges_keep_separate_histories_and_reuse_prepared_topology() {
         &visualizer.gpu_models[0].topology,
         &first_model.gpu_topology
     ));
-    assert_eq!(visualizer.gpu_models[1].reset, second_generation);
+    assert_eq!(visualizer.gpu_models.len(), 1);
+    assert_ne!(visualizer.gpu_models[0].reset, second_generation);
     assert_ne!(visualizer.gpu_models[0].reset, first_generation);
     // A preparation revision gets new immutable topology and a fresh history.
     let revision = prepared("return fixture");
@@ -335,8 +354,8 @@ fn resize_switch_and_timeline_discontinuities_reseed_without_resetting_animation
     let old = visualizer.gpu_models[0].reset;
     let pose = visualizer.scene.current.as_ref().unwrap().pose;
     let time = visualizer.time;
-    visualizer.set_gpu_ribbons(false);
-    visualizer.set_gpu_ribbons(true);
+    visualizer.set_model_motion(ModelMotion::Still);
+    visualizer.set_model_motion(ModelMotion::Swept);
     assert_eq!(visualizer.time, time);
     assert_eq!(
         visualizer.scene.current.as_ref().unwrap().pose.yaw,
@@ -356,34 +375,25 @@ fn resize_switch_and_timeline_discontinuities_reseed_without_resetting_animation
 }
 
 #[test]
-fn unsupported_swept_shutter_and_device_choose_cpu_fallback() {
-    for shutter in [1.0, 2.5, 3.0] {
+fn legacy_exposure_settings_keep_the_fixed_two_frame_gpu_path() {
+    for shutter in [1.0, 2.0, 2.5, 3.0, 16.0] {
         let mut visualizer = visualizer();
         step(&mut visualizer, 0.0, 0.02, shutter, (1280.0, 720.0));
-        assert!(!visualizer.frame().gpu_active);
-        assert!(visualizer.frame().gpu_models.is_empty());
+        assert_eq!(visualizer.frame().gpu_models.len(), 1);
         assert!(visualizer.gpu_ribbon_status().contains("shutter 2"));
-        assert!(!visualizer.frame().model_lines.is_empty());
+        let current = visualizer.scene.current.as_ref().unwrap();
+        assert!(current.vertices.is_empty() && current.current.is_empty());
+        assert!(current.history.is_empty());
     }
-    for motion in [ModelMotion::Swept, ModelMotion::Still] {
-        let mut visualizer = visualizer();
-        visualizer.set_gpu_ribbons_supported(false);
-        visualizer.set_model_motion(motion);
-        step(&mut visualizer, 0.0, 0.02, 2.0, (1280.0, 720.0));
-        assert!(!visualizer.frame().gpu_active);
-        assert!(!visualizer.frame().model_lines.is_empty());
-        assert!(visualizer.gpu_ribbon_status().contains("device limits"));
-    }
+}
+
+#[test]
+fn model_capacity_is_validated_before_gpu_frames_are_built() {
     let mut visualizer = visualizer();
-    visualizer.set_gpu_ribbon_edge_capacity(2);
+    assert!(visualizer.validate_gpu_models(2).is_err());
+    assert!(visualizer.validate_gpu_models(3).is_ok());
     step(&mut visualizer, 0.0, 0.02, 2.0, (1280.0, 720.0));
-    assert!(!visualizer.frame().gpu_active);
-    assert!(!visualizer.frame().model_lines.is_empty());
-    assert!(visualizer.gpu_ribbon_status().contains("model exceeds"));
-    visualizer.set_gpu_ribbon_edge_capacity(3);
-    step(&mut visualizer, 0.02, 0.04, 2.0, (1280.0, 720.0));
-    assert!(visualizer.frame().gpu_active);
-    assert!(visualizer.frame().model_lines.is_empty());
+    assert_eq!(visualizer.frame().gpu_models.len(), 1);
 }
 
 #[test]
@@ -395,8 +405,7 @@ fn blur_off_uses_gpu_projection_with_one_pose_at_every_shutter() {
         visualizer.set_model_motion(ModelMotion::Still);
         step(&mut visualizer, 0.02, 0.04, shutter, (1280.0, 720.0));
         let frame = visualizer.frame();
-        assert!(frame.gpu_active);
-        assert!(frame.model_lines.is_empty() && frame.ribbons.is_empty());
+        assert_eq!(frame.gpu_models.len(), 1);
         assert!(visualizer.gpu_ribbon_status().starts_with("GPU lines"));
         let first_generation = frame.gpu_models[0].reset;
         assert_ne!(first_generation, swept_generation);

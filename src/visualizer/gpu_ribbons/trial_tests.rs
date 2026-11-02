@@ -35,7 +35,6 @@ fn capture(
     renderer: &mut Renderer,
     models: &[GpuModelFrame],
     size: [u32; 2],
-    active: bool,
 ) -> anyhow::Result<Vec<u8>> {
     let [width, height] = size;
     let texture = |label, usage| {
@@ -88,11 +87,7 @@ fn capture(
         Size::new(f64::from(width), f64::from(height)),
         Frame {
             lines: &[],
-            model_lines: &[],
-            ribbons: &[],
-            gpu_active: active,
             gpu_models: models,
-            model_edge_capacity: 0,
             model_composite: ModelComposite::Additive,
         },
         None,
@@ -158,16 +153,10 @@ fn projected_history_survives_exchange_and_reseeds_without_stale_motion() -> any
         let mut a = model(&topology, [1.0, 0.0, 0.0], generation);
         let mut b = model(&topology, [0.0, 1.0, 0.0], generation + 1);
         pose(&mut a, 8.0, 1.0);
-        capture(
-            device,
-            &mut renderer,
-            std::slice::from_ref(&a),
-            [64, 64],
-            true,
-        )?;
+        capture(device, &mut renderer, std::slice::from_ref(&a), [64, 64])?;
         pose(&mut a, 40.0, 1.01);
         pose(&mut b, 56.0, 1.01);
-        capture(device, &mut renderer, &[a, b], [64, 64], true)?;
+        capture(device, &mut renderer, &[a, b], [64, 64])?;
         // Actual middle pose is x=40 even though f-2 and f0 both have x=8.
         let mut a = model(&topology, [1.0, 0.0, 0.0], generation);
         let mut b = model(&topology, [0.0, 1.0, 0.0], generation + 1);
@@ -175,7 +164,7 @@ fn projected_history_survives_exchange_and_reseeds_without_stale_motion() -> any
         a.durations = [0.01, 0.03];
         pose(&mut b, 56.0, 1.04);
         b.durations = [0.01, 0.03];
-        let pixels = capture(device, &mut renderer, &[b, a], [64, 64], true)?;
+        let pixels = capture(device, &mut renderer, &[b, a], [64, 64])?;
         assert!(
             red(&pixels, 64, 40, 32) > 10,
             "the actual middle pose must survive current/outgoing exchange"
@@ -197,28 +186,16 @@ fn projected_history_survives_exchange_and_reseeds_without_stale_motion() -> any
     let mut a = model(&topology, [1.0, 0.0, 0.0], 200);
     a.at = 1.06;
     a.projected = vec![[0.0; 4]; 2];
-    let pixels = capture(
-        device,
-        &mut renderer,
-        std::slice::from_ref(&a),
-        [64, 64],
-        true,
-    )?;
+    let pixels = capture(device, &mut renderer, std::slice::from_ref(&a), [64, 64])?;
     assert!(
         red(&pixels, 64, 25, 32) > 0,
         "historical visible motion survives near-plane rejection"
     );
     // Switching away and back uses a new generation from the application.
-    capture(device, &mut renderer, &[], [64, 64], false)?;
+    capture(device, &mut renderer, &[], [64, 64])?;
     a.reset = 300;
     pose(&mut a, 8.0, 1.08);
-    let pixels = capture(
-        device,
-        &mut renderer,
-        std::slice::from_ref(&a),
-        [64, 64],
-        true,
-    )?;
+    let pixels = capture(device, &mut renderer, std::slice::from_ref(&a), [64, 64])?;
     assert_eq!(
         red(&pixels, 64, 25, 32),
         0,
@@ -226,21 +203,9 @@ fn projected_history_survives_exchange_and_reseeds_without_stale_motion() -> any
     );
     assert!(red(&pixels, 64, 8, 32) > 100);
     pose(&mut a, 40.0, 1.10);
-    capture(
-        device,
-        &mut renderer,
-        std::slice::from_ref(&a),
-        [64, 64],
-        true,
-    )?;
+    capture(device, &mut renderer, std::slice::from_ref(&a), [64, 64])?;
     pose(&mut a, 8.0, 1.12);
-    let pixels = capture(
-        device,
-        &mut renderer,
-        std::slice::from_ref(&a),
-        [128, 64],
-        true,
-    )?;
+    let pixels = capture(device, &mut renderer, std::slice::from_ref(&a), [128, 64])?;
     assert_eq!(
         red(&pixels, 128, 25, 32),
         0,
@@ -250,21 +215,9 @@ fn projected_history_survives_exchange_and_reseeds_without_stale_motion() -> any
     // A backward timeline jump independently reseeds even without a generation
     // change, so the backend cannot connect distant animation moments.
     pose(&mut a, 40.0, 1.14);
-    capture(
-        device,
-        &mut renderer,
-        std::slice::from_ref(&a),
-        [128, 64],
-        true,
-    )?;
+    capture(device, &mut renderer, std::slice::from_ref(&a), [128, 64])?;
     pose(&mut a, 8.0, 0.5);
-    let pixels = capture(
-        device,
-        &mut renderer,
-        std::slice::from_ref(&a),
-        [128, 64],
-        true,
-    )?;
+    let pixels = capture(device, &mut renderer, std::slice::from_ref(&a), [128, 64])?;
     assert_eq!(
         red(&pixels, 128, 25, 32),
         0,
@@ -306,13 +259,7 @@ fn unequal_frame_durations_weight_the_two_actual_intervals() -> anyhow::Result<(
             a.projected = vec![[20.0, y, 1.0, 1.0], [20.0, y + 16.0, 1.0, 1.0]];
             a.at = at;
             a.durations = durations;
-            pixels = capture(
-                device,
-                &mut renderer,
-                std::slice::from_ref(&a),
-                [64, 64],
-                true,
-            )?;
+            pixels = capture(device, &mut renderer, std::slice::from_ref(&a), [64, 64])?;
         }
         captures.push(pixels);
     }
@@ -334,10 +281,19 @@ fn unequal_frame_durations_weight_the_two_actual_intervals() -> anyhow::Result<(
 
 /// Diagnostic float capture without the desktop surface conversion. Comparing
 /// the raw half-float attachment also catches changes that an 8-bit PNG hides.
-fn capture_parallel_float(
+pub(super) fn capture_parallel_float(
     device: &DeviceHandle,
     renderer: &mut GpuRibbonRenderer,
     frame: &GpuModelFrame,
+    composite: ModelComposite,
+) -> anyhow::Result<Vec<u8>> {
+    capture_models_float(device, renderer, std::slice::from_ref(frame), composite)
+}
+
+pub(super) fn capture_models_float(
+    device: &DeviceHandle,
+    renderer: &mut GpuRibbonRenderer,
+    frames: &[GpuModelFrame],
     composite: ModelComposite,
 ) -> anyhow::Result<Vec<u8>> {
     let size = [128_u32, 128_u32];
@@ -369,7 +325,7 @@ fn capture_parallel_float(
         &mut encoder,
         size,
         size,
-        std::slice::from_ref(frame),
+        frames,
     );
     {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

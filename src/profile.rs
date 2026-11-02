@@ -72,8 +72,8 @@ impl Options {
             })
             .transpose()?;
         let performance_overlay = match performance_overlay {
-            None | Some("1" | "true") => true,
-            Some("0" | "false") => false,
+            Some("1" | "true") => true,
+            None | Some("0" | "false") => false,
             _ => bail!("BENGA_PROFILE_PERFORMANCE_OVERLAY must be 0, 1, false, or true"),
         };
         let present_mode = match present_mode {
@@ -208,9 +208,7 @@ pub struct Run {
 
 impl Run {
     pub fn from_args() -> anyhow::Result<Option<Self>> {
-        let mut args = std::env::args_os()
-            .skip(1)
-            .filter(|arg| arg != "--experimental-gpu-ribbons" && arg != "--cpu-ribbons");
+        let mut args = std::env::args_os().skip(1);
         match (args.next(), args.next()) {
             (None, None) => Ok(None),
             (Some(arg), None) if arg == "--profile" => Ok(Some(Self {
@@ -229,7 +227,7 @@ impl Run {
                 gpu_model_samples: Vec::with_capacity(2400),
                 gpu_frame_samples: Vec::with_capacity(2400),
             })),
-            _ => bail!("Usage: benga [--cpu-ribbons | --experimental-gpu-ribbons] [--profile]"),
+            _ => bail!("Usage: benga [--profile]"),
         }
     }
 
@@ -582,7 +580,7 @@ mod tests {
         assert_eq!(defaults.limit, FrameRateLimit::Fps240);
         assert_eq!(defaults.extent, None);
         assert_eq!(defaults.downsize, None);
-        assert!(defaults.performance_overlay);
+        assert!(!defaults.performance_overlay);
         assert_eq!(defaults.present_mode, None);
         let selected =
             Options::parse(Some("60"), Some("5120x2880"), Some("5120"), Some("0"), None).unwrap();
@@ -590,6 +588,11 @@ mod tests {
         assert_eq!(selected.extent, Some([5120, 2880]));
         assert_eq!(selected.downsize, Some(5120.0));
         assert!(!selected.performance_overlay);
+        assert!(
+            Options::parse(None, None, None, Some("1"), None)
+                .unwrap()
+                .performance_overlay
+        );
         for (fps, extent, downsize) in [
             (Some("61"), None, None),
             (None, Some("0x2880"), None),

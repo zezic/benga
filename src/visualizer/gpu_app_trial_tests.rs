@@ -59,7 +59,7 @@ fn select_slide_model(visualizer: &mut Visualizer) {
 fn production_ui_gpu_trial_with_audio_focus_transitions_resize_and_switches() -> anyhow::Result<()>
 {
     let mut config = Config::default();
-    config.shutter_frames = ShutterFrames::try_from(2.0)?;
+    config.shutter_frames = ShutterFrames::try_from(4.0)?;
     config.model_motion = ModelMotion::Swept;
     config.model_rotation = ModelRotation::Locked;
     config.theme_preferences.auto_colors = false;
@@ -72,8 +72,6 @@ fn production_ui_gpu_trial_with_audio_focus_transitions_resize_and_switches() ->
     config.theme = dark;
     let mut ui = Ui::new(&config)?;
     ui.dismiss_startup();
-    ui.set_gpu_ribbons(true);
-    ui.set_gpu_ribbons_supported(true);
     ui.audio_event(AudioEvent::Config { samplerate: 48_000 });
     select_slide_model(ui.benchmark_visualizer_mut());
 
@@ -81,6 +79,7 @@ fn production_ui_gpu_trial_with_audio_focus_transitions_resize_and_switches() ->
     std::fs::create_dir_all(&output)?;
     let (mut width, mut height) = (640, 360);
     let mut renderer = OffscreenRenderer::new(width, height)?;
+    ui.validate_gpu_models(renderer.gpu_ribbon_edge_capacity())?;
     ui.set_plate_mask(Some(renderer.plate_mask_image()));
     let mut view = View::fit(Size::new(f64::from(width), f64::from(height)));
     let mut scene = VectorScene::new();
@@ -88,7 +87,8 @@ fn production_ui_gpu_trial_with_audio_focus_transitions_resize_and_switches() ->
     let mut seen_selector = false;
     let mut seen_focus = false;
     let mut seen_slide = false;
-    let mut seen_exchange = false;
+    let mut seen_instant_swap = false;
+    let mut last_topology = None;
     let mut seen_diagnosis = false;
     let mut seen_gpu_blur_off = false;
     let mut last_blur_off_generation = None;
@@ -137,23 +137,29 @@ fn production_ui_gpu_trial_with_audio_focus_transitions_resize_and_switches() ->
                 width = 800;
                 height = 450;
                 renderer = OffscreenRenderer::new(width, height)?;
+                ui.validate_gpu_models(renderer.gpu_ribbon_edge_capacity())?;
                 ui.set_plate_mask(Some(renderer.plate_mask_image()));
                 view = View::fit(Size::new(f64::from(width), f64::from(height)));
             }
             40 => ui.navigate_model(Adjustment::Increase),
-            43 | 46 => ui.toggle_gpu_ribbons(),
-            50 => ui.set_shutter(ShutterFrames::try_from(2.5)?),
-            53 => ui.set_shutter(ShutterFrames::try_from(2.0)?),
+            43 => ui.set_model_motion(ModelMotion::Still),
+            46 => ui.set_model_motion(ModelMotion::Swept),
+            50 => ui.navigate_model(Adjustment::Decrease),
+            53 => ui.navigate_model(Adjustment::Increase),
             57 => ui.set_theme(dark),
             60 => view.set_zoom(Zoom::try_from(1.4)?),
             64 => ui.set_model_motion(ModelMotion::Still),
-            65 => ui.set_shutter(ShutterFrames::try_from(16.0)?),
-            68 => {
-                ui.set_shutter(ShutterFrames::try_from(2.0)?);
-                ui.set_model_motion(ModelMotion::Swept);
-            }
+            68 => ui.set_model_motion(ModelMotion::Swept),
             _ => {}
         }
+        let expected_topology = Arc::clone(
+            &ui.benchmark_visualizer_mut()
+                .scene
+                .current
+                .as_ref()
+                .expect("the trial has a selected model")
+                .gpu_topology,
+        );
         scene.reset();
         let frame = ui.draw_at_audio_time(
             &mut scene,
@@ -164,20 +170,21 @@ fn production_ui_gpu_trial_with_audio_focus_transitions_resize_and_switches() ->
                 AudioTime::ZERO.shifted(end_seconds),
             ),
         );
-        let expected_gpu = !(43..46).contains(&index) && !(50..53).contains(&index);
-        assert_eq!(
-            frame.overlay.gpu_active, expected_gpu,
-            "trial frame {index}"
-        );
         seen_additive |= frame.overlay.model_composite == ModelComposite::Additive;
         seen_multiply |= frame.overlay.model_composite == ModelComposite::Multiplicative;
         seen_diagnosis |= !frame.overlay.lines.is_empty();
-        if expected_gpu {
-            assert!(
-                frame.overlay.model_lines.is_empty() && frame.overlay.ribbons.is_empty(),
-                "GPU frame {index} must skip CPU ribbon generation"
+        {
+            assert_eq!(
+                frame.overlay.gpu_models.len(),
+                1,
+                "an instant model swap submits only the current model"
             );
-            assert!(!frame.overlay.gpu_models.is_empty());
+            let topology = &frame.overlay.gpu_models[0].topology;
+            assert!(Arc::ptr_eq(topology, &expected_topology));
+            if let Some(previous) = &last_topology {
+                seen_instant_swap |= !Arc::ptr_eq(previous, topology);
+            }
+            last_topology = Some(Arc::clone(topology));
             if (64..68).contains(&index) {
                 seen_gpu_blur_off = true;
                 let generation = frame.overlay.gpu_models[0].reset;
@@ -189,7 +196,6 @@ fn production_ui_gpu_trial_with_audio_focus_transitions_resize_and_switches() ->
                 }
                 last_blur_off_generation = Some(generation);
             }
-            seen_exchange |= frame.overlay.gpu_models.len() == 2;
             let projection = frame.overlay.gpu_models[0].cpu_projected();
             assert!(!projection.is_empty());
             if let Some(first) = &first_projection {
@@ -197,12 +203,6 @@ fn production_ui_gpu_trial_with_audio_focus_transitions_resize_and_switches() ->
             } else {
                 first_projection = Some(projection.clone());
             }
-        } else {
-            assert!(frame.overlay.gpu_models.is_empty());
-            assert!(
-                !frame.overlay.model_lines.is_empty() || !frame.overlay.ribbons.is_empty(),
-                "fallback frame {index} must actually draw CPU geometry"
-            );
         }
         let pixels = renderer.render(&scene, frame)?;
         assert_eq!(pixels.len(), (width * height * 4) as usize);
@@ -213,14 +213,14 @@ fn production_ui_gpu_trial_with_audio_focus_transitions_resize_and_switches() ->
             "trial frame {index} must contain ink above its background"
         );
         let visualizer = ui.benchmark_visualizer_mut();
+        assert!(visualizer.scene.outgoing.is_none());
+        let current = visualizer.scene.current.as_ref().unwrap();
+        assert!((0..current.active_edges).all(|edge| current.edge_dissolve.alpha(edge) == 1.0));
         let showcase = visualizer.showcase.frame();
         seen_focus |= showcase.focus.blend > 0.05;
         seen_slide |= showcase.slide_offset.length() > 1e-5;
         if [9, 19, 27, 35, 42, 45, 49, 52, 56, 67, 79].contains(&index) {
-            let name = format!(
-                "frame-{index:02}-{}.png",
-                if expected_gpu { "gpu" } else { "cpu" }
-            );
+            let name = format!("frame-{index:02}-gpu.png");
             capture(&output.join(name), width, height, &pixels)?;
         }
     }
@@ -229,8 +229,8 @@ fn production_ui_gpu_trial_with_audio_focus_transitions_resize_and_switches() ->
         "selector, focus and slide must all be exercised"
     );
     assert!(
-        seen_exchange,
-        "outgoing and current models need separate live histories"
+        seen_instant_swap,
+        "the trial must replace the model immediately during playback"
     );
     assert!(
         seen_diagnosis,

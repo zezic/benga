@@ -8,7 +8,7 @@ use std::{
 };
 
 use vello::{
-    kurbo::{Affine, Point, Rect, Stroke},
+    kurbo::{Affine, Point, Rect, Stroke, Vec2},
     peniko::{Color, Fill, Gradient},
     Scene,
 };
@@ -41,7 +41,6 @@ pub enum Dial {
     Model,
     LineWidth,
     FrameRate,
-    Shutter,
     TextOpacity,
     Zoom,
 }
@@ -63,6 +62,7 @@ pub enum ControlAction {
     Manage,
     Restore(ThemeId),
     ToggleAnalyzers,
+    ToggleRendererStats,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,7 +80,6 @@ enum Control {
     SaveDefault,
     Boost,
     MotionBlur,
-    Shutter,
     LineWidth,
     FrameRate,
     Zoom,
@@ -101,7 +100,6 @@ impl Control {
             Self::Boost => "ANALYZER BOOST",
             Self::Fullscreen => "DISPLAY",
             Self::MotionBlur => "MOTION BLUR",
-            Self::Shutter => "SHUTTER",
             Self::LineWidth => "LINE WIDTH",
             Self::FrameRate => "FPS LIMIT",
             Self::Zoom => "ZOOM",
@@ -125,8 +123,6 @@ impl Control {
             Self::Boost => "Adjust analyzer sensitivity. This does not change playback volume.",
             Self::Fullscreen => "Toggle fullscreen here or double-click the background. Esc leaves fullscreen. The last state is remembered.",
             Self::MotionBlur => "Toggle motion blur on the model wireframe.",
-            Self::Shutter if config.model_motion == ModelMotion::Still => "Enable Motion Blur to use the model shutter.",
-            Self::Shutter => "Set the model's exposure length in frame intervals.",
             Self::LineWidth => "Adjust the thickness of model wireframe lines.",
             Self::FrameRate => "Limit drawing speed, or synchronize with the display using VSync.",
             Self::Zoom => "Adjust visualizer magnification.",
@@ -173,6 +169,10 @@ struct ControlColumn {
 }
 
 impl ControlColumn {
+    const fn single(top: Control) -> Self {
+        Self { top, bottom: None }
+    }
+
     const fn pair(top: Control, bottom: Control) -> Self {
         Self {
             top,
@@ -217,7 +217,7 @@ const GROUPS: [ControlGroup; 5] = [
     ControlGroup {
         domain: Domain::Rendering,
         columns: &[
-            ControlColumn::pair(Control::MotionBlur, Control::Shutter),
+            ControlColumn::single(Control::MotionBlur),
             ControlColumn::pair(Control::LineWidth, Control::Zoom),
             ControlColumn::pair(Control::FrameRate, Control::TextOpacity),
         ],
@@ -316,6 +316,7 @@ pub struct ControlState<'a> {
     pub model: &'a str,
     pub fullscreen: bool,
     pub analyzers_visible: bool,
+    pub renderer_stats_visible: bool,
     pub palette: ScenePalette,
     pub background: Color,
     pub history: &'a DebugHistory,
@@ -508,6 +509,25 @@ impl Controls {
     }
 
     pub fn modifiers(&mut self, held: bool, now: Instant) {
+        if self.modifiers && !held {
+            // A key-up can precede the next draw. Retire the secret controls'
+            // hit areas immediately so hidden buttons cannot intercept clicks.
+            let retired: Vec<_> = self
+                .targets
+                .iter()
+                .filter(|target| {
+                    matches!(
+                        target.action,
+                        ControlAction::ToggleAnalyzers | ControlAction::ToggleRendererStats
+                    )
+                })
+                .map(|target| target.rect)
+                .collect();
+            self.targets
+                .retain(|target| !retired.contains(&target.rect));
+            self.hovers.retain(|hover| !retired.contains(&hover.rect));
+            self.bounds.retain(|bounds| !retired.contains(bounds));
+        }
         self.modifiers = held;
         if held {
             self.last_activity = now;
@@ -555,7 +575,9 @@ impl Controls {
             .find(|target| {
                 target.rect.contains(point)
                     && match target.action {
-                        ControlAction::ToggleAnalyzers => self.modifiers && !over_manager,
+                        ControlAction::ToggleAnalyzers | ControlAction::ToggleRendererStats => {
+                            self.modifiers && !over_manager
+                        }
                         ControlAction::Restore(_) => self.manager_open,
                         _ => !over_manager,
                     }
@@ -700,10 +722,6 @@ impl Controls {
             }
             Control::FrameRate => dial(Dial::FrameRate, config.frame_rate_limit.to_string()),
             Control::Zoom => dial(Dial::Zoom, format!("{:.0}%", config.zoom.factor() * 100.0)),
-            Control::Shutter => dial(
-                Dial::Shutter,
-                format!("{:.1} frames", config.shutter_frames.frames()),
-            ),
             Control::TextOpacity => dial(
                 Dial::TextOpacity,
                 format!("{:.0}%", config.presentation_opacity.factor() * 100.0),
@@ -866,7 +884,6 @@ impl Controls {
             let rect = cell.rect;
             let enabled = match control {
                 Control::Contrast => config.theme_preferences.auto_colors,
-                Control::Shutter => config.model_motion == ModelMotion::Swept,
                 Control::Dislike => config.theme_preferences.can_dislike(state.theme),
                 _ => true,
             };
@@ -907,7 +924,6 @@ impl Controls {
                     | Control::Model
                     | Control::LineWidth
                     | Control::FrameRate
-                    | Control::Shutter
                     | Control::TextOpacity
                     | Control::Zoom
             );
@@ -1004,11 +1020,12 @@ impl Controls {
             self.draw_manager(&mut canvas, &layout, config, view);
         }
         if self.modifiers {
-            let width = 260.0_f64.min(logical_width - 24.0);
+            let width = 260.0_f64.min((logical_width - 32.0) * 0.5);
+            let combined_width = width * 2.0 + 8.0;
             let x = if manage_visible && !manage_beside {
                 layout.grid.x0
             } else {
-                logical_width * 0.5 - width * 0.5
+                logical_width * 0.5 - combined_width * 0.5
             };
             let y = layout.grid.y0 - 96.0;
             let rect = Rect::new(x, y, x + width, y + 34.0);
@@ -1030,6 +1047,26 @@ impl Controls {
             self.hovers.push(Hover {
                 rect: canvas.physical(rect),
                 hint: "Show or hide the audio analyzers and their tuning controls.",
+            });
+            let stats = rect + Vec2::new(width + 8.0, 0.0);
+            self.bounds.push(canvas.physical(stats));
+            self.button(
+                &mut canvas,
+                stats,
+                Choice::new(
+                    if state.renderer_stats_visible {
+                        "Developer: hide renderer stats"
+                    } else {
+                        "Developer: show renderer stats"
+                    },
+                    ControlAction::ToggleRendererStats,
+                    state.renderer_stats_visible,
+                ),
+                true,
+            );
+            self.hovers.push(Hover {
+                rect: canvas.physical(stats),
+                hint: "Show or hide renderer timing, frame-rate and resolution graphs.",
             });
         }
         let hint = self
@@ -1209,6 +1246,18 @@ mod tests {
         now: Instant,
         analyzers_visible: bool,
     ) -> bool {
+        draw_with_developer_overlays(controls, fonts, view, config, now, analyzers_visible, false)
+    }
+
+    fn draw_with_developer_overlays(
+        controls: &mut Controls,
+        fonts: &mut Fonts,
+        view: &View,
+        config: &Config,
+        now: Instant,
+        analyzers_visible: bool,
+        renderer_stats_visible: bool,
+    ) -> bool {
         let history = DebugHistory::default();
         controls.draw(
             fonts,
@@ -1220,6 +1269,7 @@ mod tests {
                 model: "Model",
                 fullscreen: false,
                 analyzers_visible,
+                renderer_stats_visible,
                 palette: ScenePalette::choose(
                     &super::super::Palette::from_theme(config.theme),
                     crate::theme::Theme::new(config.theme).colors,
@@ -1407,11 +1457,66 @@ mod tests {
     }
 
     #[test]
+    fn renderer_stats_button_requires_modifiers_and_keeps_analyzer_state_independent(
+    ) -> anyhow::Result<()> {
+        let now = Instant::now();
+        let mut fonts = Fonts::new()?;
+        let config = Config::default();
+        let view = View::fit(vello::kurbo::Size::new(1920.0, 1080.0));
+        let mut controls = Controls::new(now);
+        draw(&mut controls, &mut fonts, &view, &config, now);
+        assert!(!controls
+            .targets
+            .iter()
+            .any(|target| { matches!(target.action, ControlAction::ToggleRendererStats) }));
+        controls.modifiers(true, now);
+        draw_with_developer_overlays(&mut controls, &mut fonts, &view, &config, now, false, true);
+        let stats = target(&controls, |action| {
+            matches!(action, ControlAction::ToggleRendererStats)
+        });
+        let analyzers = target(&controls, |action| {
+            matches!(action, ControlAction::ToggleAnalyzers)
+        });
+        assert!(stats.x0 > analyzers.x1);
+        assert_eq!(stats.y0, analyzers.y0);
+        assert_eq!(stats.intersect(analyzers).area(), 0.0);
+        assert!(controls
+            .text
+            .keys()
+            .any(|(label, _)| label == "Developer: hide renderer stats"));
+        assert!(controls
+            .text
+            .keys()
+            .any(|(label, _)| label == "Developer: show analyzers"));
+        assert!(matches!(
+            controls.click(stats.center(), now),
+            Some(ControlAction::ToggleRendererStats)
+        ));
+        controls.modifiers(false, now);
+        assert!(!controls.contains(stats.center()));
+        assert!(!matches!(
+            controls.click(stats.center(), now),
+            Some(ControlAction::ToggleRendererStats)
+        ));
+        let help = target(&controls, |action| matches!(action, ControlAction::Help));
+        assert!(matches!(
+            controls.click(help.center(), now),
+            Some(ControlAction::Help)
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn releasing_modifiers_invalidates_the_analyzer_button_before_redraw() -> anyhow::Result<()> {
         let now = Instant::now();
         let mut fonts = Fonts::new()?;
         let config = config_with_disliked(20);
-        for (width, height, dpi) in [(1920.0, 1080.0, 1.0), (1280.0, 720.0, 2.0)] {
+        for (width, height, dpi) in [
+            (1920.0, 1080.0, 1.0),
+            (1280.0, 720.0, 2.0),
+            (800.0, 600.0, 1.0),
+            (360.0, 640.0, 1.0),
+        ] {
             let mut controls = Controls::new(now);
             let mut view = View::fit(vello::kurbo::Size::new(width, height));
             view.set_ui_scale(dpi);
@@ -1421,14 +1526,23 @@ mod tests {
             let developer = target(&controls, |action| {
                 matches!(action, ControlAction::ToggleAnalyzers)
             });
+            let stats = target(&controls, |action| {
+                matches!(action, ControlAction::ToggleRendererStats)
+            });
             let manage = target(&controls, |action| matches!(action, ControlAction::Manage));
             let manager = controls.manager_rect.expect("manager is visible");
             assert_eq!(developer.intersect(manager).area(), 0.0);
+            assert_eq!(stats.intersect(manager).area(), 0.0);
+            assert_eq!(stats.intersect(developer).area(), 0.0);
             assert_eq!(manage.intersect(manager).area(), 0.0);
             controls.modifiers(false, now);
             assert!(!matches!(
                 controls.click(developer.center(), now),
                 Some(ControlAction::ToggleAnalyzers)
+            ));
+            assert!(!matches!(
+                controls.click(stats.center(), now),
+                Some(ControlAction::ToggleRendererStats)
             ));
             assert!(matches!(
                 controls.click(manage.center(), now),

@@ -1,7 +1,7 @@
-//! Opt-in GPU projection and prepared-ribbon renderer.
+//! Production GPU projection and prepared-ribbon renderer.
 //!
 //! Topology is retained per prepared model revision. Only the two live animation
-//! slots own the large preparation buffers and the three-pose projection ring.
+//! slots retain reusable high-water preparation buffers and projection rings.
 use std::sync::Arc;
 
 use vello::wgpu::{self, util::DeviceExt};
@@ -67,6 +67,8 @@ struct StaticTopology {
 
 struct AnimationSlot {
     topology: Arc<GpuTopology>,
+    vertex_capacity: usize,
+    edge_capacity: usize,
     reset: u64,
     viewport: [u32; 2],
     at: f64,
@@ -127,6 +129,8 @@ impl AnimationSlot {
         let projection = projection_pipeline.bind(device, &topology.vertices, &history);
         Self {
             topology: Arc::clone(&topology.source),
+            vertex_capacity: topology.source.vertex_count,
+            edge_capacity: topology.source.edges.len(),
             reset,
             viewport: [0, 0],
             at: f64::NEG_INFINITY,
@@ -139,6 +143,62 @@ impl AnimationSlot {
         }
     }
 
+    /// A retired slot changes source bindings rather than reallocating its
+    /// large working set. Grow only when a model exceeds its high-water size.
+    fn rebind(
+        &mut self,
+        device: &wgpu::Device,
+        pipelines: Arc<RibbonPipelines>,
+        projection_pipeline: &ProjectionPipeline,
+        topology: &StaticTopology,
+    ) {
+        let source = &topology.source;
+        if source.vertex_count > self.vertex_capacity {
+            let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+            #[cfg(test)]
+            let usage = usage | wgpu::BufferUsages::COPY_SRC;
+            self.history = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Experimental three projected poses"),
+                size: source.vertex_count as u64 * 16 * 3,
+                usage,
+                mapped_at_creation: false,
+            });
+            self.vertex_capacity = source.vertex_count;
+        }
+        if source.edges.len() > self.edge_capacity {
+            self.styles = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Experimental production edge ink"),
+                size: source.edges.len() as u64 * 16,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.ribbons = PreparedRibbons::new(
+                device,
+                pipelines,
+                &self.uniforms,
+                &topology.edges,
+                &self.history,
+                &self.styles,
+                source.edges.len() as u32,
+            );
+            self.edge_capacity = source.edges.len();
+        } else {
+            self.ribbons.rebind(
+                device,
+                &self.uniforms,
+                &topology.edges,
+                &self.history,
+                &self.styles,
+                source.edges.len() as u32,
+            );
+        }
+        self.projection = projection_pipeline.bind(device, &topology.vertices, &self.history);
+        self.topology = Arc::clone(source);
+        // The history stride depends on the current vertex count. A source
+        // change must seed all three poses even if generation IDs coincide.
+        self.at = f64::NEG_INFINITY;
+    }
+
     fn update(
         &mut self,
         queue: &wgpu::Queue,
@@ -146,6 +206,7 @@ impl AnimationSlot {
         model_render_extent: [u32; 2],
         frame: &GpuModelFrame,
     ) {
+        #[cfg(test)]
         let stride = frame.topology.vertex_count as u64 * 16;
         let discontinuity = self.viewport != viewport
             || self.reset != frame.reset
@@ -169,14 +230,19 @@ impl AnimationSlot {
                 discontinuity,
             );
         } else {
-            // Frozen screen-space fixtures and benchmark controls only.
-            let bytes = bytemuck::cast_slice(&frame.projected);
-            if discontinuity {
-                for index in 0..3 {
-                    queue.write_buffer(&self.history, index * stride, bytes);
+            #[cfg(not(test))]
+            panic!("GPU model frames must provide projection parameters");
+            #[cfg(test)]
+            {
+                // Frozen screen-space fixtures and benchmark controls only.
+                let bytes = bytemuck::cast_slice(&frame.projected);
+                if discontinuity {
+                    for index in 0..3 {
+                        queue.write_buffer(&self.history, index * stride, bytes);
+                    }
+                } else {
+                    queue.write_buffer(&self.history, u64::from(self.newest) * stride, bytes);
                 }
-            } else {
-                queue.write_buffer(&self.history, u64::from(self.newest) * stride, bytes);
             }
         }
         queue.write_buffer(&self.styles, 0, bytemuck::cast_slice(&frame.styles));
@@ -259,6 +325,7 @@ impl GpuRibbonRenderer {
         // moving from current to outgoing preserves its own projection history.
         let mut previous = std::mem::take(&mut self.retired);
         std::mem::swap(&mut previous, &mut self.slots);
+        previous.append(&mut self.slots);
         for frame in models {
             if frame.topology.edges.is_empty() || frame.topology.vertex_count == 0 {
                 continue;
@@ -307,13 +374,32 @@ impl GpuRibbonRenderer {
                     });
                     self.topology.len() - 1
                 };
-                AnimationSlot::new(
-                    device,
-                    Arc::clone(&self.pipelines),
-                    &self.projection_pipeline,
-                    &self.topology[index],
-                    frame.reset,
-                )
+                // Reserve exact live identities before borrowing a retired
+                // slot. Incoming models are processed before their outgoing
+                // predecessor, whose history must survive an interrupted cut.
+                let available = previous.iter().position(|slot| {
+                    !models.iter().any(|other| {
+                        Arc::ptr_eq(&slot.topology, &other.topology) && slot.reset == other.reset
+                    })
+                });
+                if let Some(available) = available {
+                    let mut slot = previous.remove(available);
+                    slot.rebind(
+                        device,
+                        Arc::clone(&self.pipelines),
+                        &self.projection_pipeline,
+                        &self.topology[index],
+                    );
+                    slot
+                } else {
+                    AnimationSlot::new(
+                        device,
+                        Arc::clone(&self.pipelines),
+                        &self.projection_pipeline,
+                        &self.topology[index],
+                        frame.reset,
+                    )
+                }
             };
             slot.update(queue, viewport, model_render_extent, frame);
             if frame.projection.is_some() {
@@ -326,10 +412,11 @@ impl GpuRibbonRenderer {
             slot.ribbons.encode(encoder, None);
             self.slots.push(slot);
         }
-        previous.clear();
+        // The scene has at most two live animation slots. Keep spare capacity
+        // through the single-model interval and through temporary empty frames.
+        previous.truncate(2_usize.saturating_sub(self.slots.len()));
         self.retired = previous;
-        // Dropping retired slots releases their large working buffers. Keep
-        // static topology while its CPU prepared revision is still referenced.
+        // Keep static topology while its prepared revision or a slot refers to it.
         self.topology
             .retain(|entry| Arc::strong_count(&entry.source) > 1);
     }
@@ -350,6 +437,8 @@ impl GpuRibbonRenderer {
     }
 }
 
+#[cfg(test)]
+mod allocation_tests;
 #[cfg(test)]
 mod projection_tests;
 #[cfg(test)]

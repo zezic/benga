@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context};
 use vello::{
-    kurbo::{Affine, Size},
-    peniko::{Color, ImageData},
+    kurbo::{Affine, Rect, Size},
+    peniko::{Color, Fill, ImageData},
     util::{DeviceHandle, RenderContext, RenderSurface},
     wgpu, AaConfig, RenderParams, Renderer, RendererOptions, Scene,
 };
@@ -34,6 +34,8 @@ pub enum Stage {
 
 /// Identifies which retained scene layers need rasterization.
 pub enum Frame<'a> {
+    /// A uniform backdrop; renderers can clear it without vector rasterization.
+    Solid(Color),
     /// The background and foreground have changed.
     Rebuilt(&'a Scene),
     /// Only the foreground has changed.
@@ -329,6 +331,19 @@ impl BackgroundCache {
         background: Frame<'_>,
         params: &RenderParams,
     ) -> anyhow::Result<&Scene> {
+        // Preserve the public compose contract for callers that need a vector
+        // scene. Production renderers handle this case with SolidBackground.
+        if let Frame::Solid(color) = background {
+            self.composite.reset();
+            self.composite.fill(
+                Fill::NonZero,
+                Affine::IDENTITY,
+                color,
+                None,
+                &Rect::new(0.0, 0.0, f64::from(params.width), f64::from(params.height)),
+            );
+            return Ok(&self.composite);
+        }
         let rebuild = matches!(background, Frame::Rebuilt(_))
             || self
                 .image
@@ -337,6 +352,7 @@ impl BackgroundCache {
         if rebuild {
             let source = match background {
                 Frame::Rebuilt(scene) | Frame::Retained(scene) | Frame::Unchanged(scene) => scene,
+                Frame::Solid(_) => unreachable!("solid backgrounds returned above"),
             };
             let texture = raster_asset::rasterize_scene(renderer, device, source, params)?;
             self.invalidate(renderer);
@@ -357,6 +373,61 @@ impl BackgroundCache {
         if let Some(image) = self.image.take() {
             renderer.unregister_texture(image);
         }
+    }
+}
+
+/// Encode a uniform RGBA backdrop into a render-attachment texture.
+pub(crate) fn clear_background(
+    encoder: &mut wgpu::CommandEncoder,
+    target: &wgpu::TextureView,
+    color: Color,
+) {
+    // Match Vello's straight-alpha output in the same Rgba8Unorm color space.
+    let [r, g, b, a] = color.components.map(f64::from);
+    let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("Solid presentation background"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target,
+            resolve_target: None,
+            depth_slice: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a }),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        ..Default::default()
+    });
+}
+
+/// A solid backdrop needs a clear only when its color or drawable size changes.
+#[derive(Default)]
+pub(crate) struct SolidBackground {
+    layer: Option<SceneTexture>,
+    color: Option<Color>,
+}
+
+impl SolidBackground {
+    pub(crate) fn prepare(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        color: Color,
+        params: &RenderParams,
+    ) -> &wgpu::TextureView {
+        if !self
+            .layer
+            .as_ref()
+            .is_some_and(|layer| layer.matches(params.width, params.height))
+        {
+            self.layer = Some(SceneTexture::new(device, params.width, params.height));
+            self.color = None;
+        }
+        let layer = self.layer.as_ref().expect("solid background allocated");
+        if self.color != Some(color) {
+            clear_background(encoder, &layer.view, color);
+            self.color = Some(color);
+        }
+        &layer.view
     }
 }
 
@@ -427,6 +498,7 @@ pub struct RenderWindow {
     /// Normal-alpha UI drawn above every visualizer layer.
     pub overlay_scene: Scene,
     background: BackgroundCache,
+    solid_background: SolidBackground,
     raster_assets: RasterAssetCache,
     foreground: Option<SceneTexture>,
     overlay: Option<SceneTexture>,
@@ -538,6 +610,7 @@ impl RenderWindow {
             scene: Scene::new(),
             overlay_scene: Scene::new(),
             background: BackgroundCache::new(),
+            solid_background: SolidBackground::default(),
             raster_assets: RasterAssetCache::new(),
             foreground: None,
             overlay: None,
@@ -654,7 +727,12 @@ impl RenderWindow {
             height: self.surface.config.height,
             antialiasing_method: ANTIALIASING,
         };
-        if matches!(self.target, TargetState::Dirty) {
+        let solid_color = if let Frame::Solid(color) = background {
+            Some(color)
+        } else {
+            None
+        };
+        if solid_color.is_none() && matches!(self.target, TargetState::Dirty) {
             let scene = self
                 .background
                 .compose(&mut self.renderer, device, background, &params)?;
@@ -696,10 +774,16 @@ impl RenderWindow {
         let mut encoder = device
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        let background_view = if let Some(color) = solid_color {
+            self.solid_background
+                .prepare(&device.device, &mut encoder, color, &params)
+        } else {
+            &self.surface.target_view
+        };
         paint(
             device,
             &mut encoder,
-            &self.surface.target_view,
+            background_view,
             &view,
             overlay,
             top_overlay,

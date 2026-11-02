@@ -13,10 +13,12 @@ impl Vec2 {
         self.x.hypot(self.y)
     }
 
+    #[cfg(test)]
     pub fn dot(self, other: Self) -> f32 {
         self.x * other.x + self.y * other.y
     }
 
+    #[cfg(test)]
     pub fn lerp(self, other: Self, fraction: f32) -> Self {
         Self::new(
             self.x + (other.x - self.x) * fraction,
@@ -24,6 +26,7 @@ impl Vec2 {
         )
     }
 
+    #[cfg(test)]
     pub fn perpendicular(self) -> Self {
         Self::new(-self.y, self.x)
     }
@@ -361,6 +364,7 @@ pub struct Camera {
     /// Smaller viewport extent, used to convert between focal length and FOV.
     pub minimum: f32,
     /// Render target extent in physical pixels.
+    #[cfg(test)]
     pub viewport: Vec2,
 }
 
@@ -371,6 +375,7 @@ impl Camera {
             center: Vec2::new(width / 2.0, height / 2.0),
             focal: minimum * 1.28 * zoom.clamp(0.35, 3.0),
             minimum,
+            #[cfg(test)]
             viewport: Vec2::new(width, height),
         }
     }
@@ -389,12 +394,14 @@ impl Camera {
         2.0 * (self.minimum * 0.5 / self.focal).atan()
     }
 
+    #[cfg(test)]
     pub fn project(self, vertex: Vec3, pose: Pose) -> Projected {
         let rotated = pose.orient(vertex);
         self.project_oriented(rotated, pose.distance, pose.shake, self.focal, 0.4)
     }
 
     /// Prepares the shared rotations and focus target for all model vertices.
+    #[cfg(test)]
     pub fn focused_projector(
         self,
         pose: Pose,
@@ -411,6 +418,7 @@ impl Camera {
         }
     }
 
+    #[cfg(test)]
     fn project_oriented(
         self,
         vertex: Vec3,
@@ -465,8 +473,10 @@ pub struct FocusProjection {
 pub struct Projected {
     pub screen: Vec2,
     /// View-space distance from the camera before projection.
+    #[cfg(test)]
     pub depth: f32,
     /// Whether the vertex is in front of the near plane.
+    #[cfg(test)]
     pub visible: bool,
 }
 
@@ -504,6 +514,7 @@ impl DepthOpacity {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub fn factor(self, depth: f32) -> f32 {
         let span = self.farthest - self.closest;
         if span <= 1e-6 {

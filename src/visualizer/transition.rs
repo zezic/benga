@@ -60,9 +60,11 @@ impl EdgeOrder {
 
 enum InheritedCoverage {
     All,
+    #[cfg(test)]
     Selection(Selection),
     /// Supports repeated freezes of an already inherited transition. Normal
     /// model switches freeze a newly entering model only once.
+    #[cfg(test)]
     Combined(Vec<f32>),
 }
 
@@ -100,6 +102,7 @@ impl EdgeDissolve {
         self.selection = Selection::Outgoing { progress, slots };
     }
 
+    #[cfg(test)]
     pub fn freeze(&mut self) {
         if !matches!(self.selection, Selection::All) {
             self.inherited = match self.inherited {
@@ -117,7 +120,9 @@ impl EdgeDissolve {
     pub fn alpha(&self, index: usize) -> f32 {
         let inherited = match &self.inherited {
             InheritedCoverage::All => 1.0,
+            #[cfg(test)]
             InheritedCoverage::Selection(selection) => self.order.alpha(*selection, index),
+            #[cfg(test)]
             InheritedCoverage::Combined(coverage) => coverage[index],
         };
         if inherited == 0.0 {

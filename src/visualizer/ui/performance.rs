@@ -1,4 +1,4 @@
-//! Small, retained-text performance graphs for the opt-in renderer trial.
+//! Small, retained-text performance graphs for the developer renderer overlay.
 use std::time::{Duration, Instant};
 
 use vello::{
@@ -30,9 +30,7 @@ pub(super) struct PerformanceHud {
 
 struct Labels {
     status: Text,
-    switch: Text,
-    gpu: Text,
-    cpu: Text,
+    controls_hint: Text,
     fps: Text,
     frame: Text,
     p95: Text,
@@ -237,16 +235,14 @@ impl PerformanceHud {
             let status_size = 11.0 * ((width - 16.0) / 260.0).min(1.0);
             self.labels = Some(Labels {
                 status: fonts.layout(status, status_size as f32),
-                switch: fonts.layout(
+                controls_hint: fonts.layout(
                     if width >= 240.0 {
-                        "R: switch renderer"
+                        "Hold a modifier for developer controls"
                     } else {
-                        "R: switch"
+                        "Modifier: developer controls"
                     },
                     10.0,
                 ),
-                gpu: fonts.layout("GPU", 10.0),
-                cpu: fonts.layout("CPU", 10.0),
                 fps: fonts.layout(&fps, 13.0),
                 frame: fonts.layout(&frame, (12.0 * ((width - 16.0) / 190.0).min(1.0)) as f32),
                 p95: fonts.layout(&p95, 9.0),
@@ -314,7 +310,7 @@ impl PerformanceHud {
         labels
             .status
             .draw_left(scene, transform * Affine::translate((8.0, 15.0)), ink);
-        labels.switch.draw_left(
+        labels.controls_hint.draw_left(
             scene,
             transform * Affine::translate((8.0, 31.0)),
             ink.with_alpha(0.65),
@@ -322,18 +318,6 @@ impl PerformanceHud {
         let light = ink.to_rgba8().r < 128;
         let gpu_color = backend_color(true, light);
         let cpu_color = backend_color(false, light);
-        labels.gpu.draw_left(
-            scene,
-            transform * Affine::translate((width - 68.0, 31.0)),
-            gpu_color,
-        );
-        labels.cpu.draw_left(
-            scene,
-            transform * Affine::translate((width - 32.0, 31.0)),
-            cpu_color,
-        );
-        // The colored legend is independent of the current backend: earlier
-        // samples remain useful immediately after pressing R.
         labels
             .fps
             .draw_left(scene, transform * Affine::translate((8.0, 53.0)), ink);
@@ -476,8 +460,8 @@ impl PerformanceHud {
             false,
             true,
         );
-        // Switching backends and external idle breaks have a common vertical
-        // marker. Curve segments never interpolate through these boundaries.
+        // Renderer-status changes and idle breaks share a vertical marker.
+        // Curve segments never interpolate through these boundaries.
         for (column, _bucket) in self
             .buckets
             .iter()
@@ -593,7 +577,7 @@ mod tests {
     use super::*;
 
     const GPU: &str = "GPU ribbons: GPU projection / shutter 2";
-    const CPU: &str = "CPU ribbons";
+    const GPU_LINES: &str = "GPU lines: motion blur off";
 
     #[test]
     fn pixel_buckets_keep_hitches_and_text_refresh_is_bounded() -> anyhow::Result<()> {
@@ -659,8 +643,8 @@ mod tests {
         );
         draw(&mut hud, now + Duration::from_millis(250), GPU);
         assert_eq!(hud.refreshed, Some(now + Duration::from_millis(250)));
-        draw(&mut hud, now + Duration::from_millis(251), CPU);
-        assert_eq!(hud.status, CPU, "backend status refreshes immediately");
+        draw(&mut hud, now + Duration::from_millis(251), GPU_LINES);
+        assert_eq!(hud.status, GPU_LINES, "renderer mode refreshes immediately");
         Ok(())
     }
 
@@ -729,7 +713,7 @@ mod tests {
         let mut elapsed = Duration::ZERO;
         let mut metrics = FrameMetrics::default();
         for frame in 0..720 {
-            let gpu = frame >= 240;
+            let blur = frame >= 240;
             let downsize = match frame {
                 0..=239 => 1.0,
                 240..=359 => 1.0,
@@ -755,14 +739,12 @@ mod tests {
                 origin + elapsed,
                 interval,
                 interval.mul_f64(0.36),
-                if gpu { GPU } else { CPU },
+                if blur { GPU } else { GPU_LINES },
                 downsize,
-                gpu.then(|| {
-                    [
-                        (5120.0 / downsize).ceil() as u32,
-                        (2880.0 / downsize).ceil() as u32,
-                    ]
-                }),
+                Some([
+                    (5120.0 / downsize).ceil() as u32,
+                    (2880.0 / downsize).ceil() as u32,
+                ]),
             );
         }
         let now = origin + elapsed;

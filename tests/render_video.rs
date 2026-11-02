@@ -41,7 +41,9 @@ fn renders_fractional_fps_video_with_unscaled_audio_and_read_only_settings() -> 
     let config = directory.path().join("settings.ron");
     write_audio(&input, 12_001)?;
     let original_audio = fs::read(&input)?;
-    let settings = "(preamp_db: 6.0, onboarding_seen: false)";
+    // Older exposure preferences remain readable; the renderer uses its fixed
+    // two-frame GPU shutter without modifying the saved source settings.
+    let settings = "(preamp_db: 6.0, shutter_frames: 4.0, onboarding_seen: false)";
     fs::write(&config, settings)?;
 
     let result = Command::new(env!("CARGO_BIN_EXE_benga"))
@@ -60,6 +62,9 @@ fn renders_fractional_fps_video_with_unscaled_audio_and_read_only_settings() -> 
         "render failed: {}",
         String::from_utf8_lossy(&result.stderr)
     );
+    let diagnostics = String::from_utf8_lossy(&result.stderr);
+    assert!(diagnostics.contains("GPU ribbons"), "{diagnostics}");
+    assert!(diagnostics.contains("shutter 2"), "{diagnostics}");
     assert_eq!(fs::read_to_string(&config)?, settings);
     assert_eq!(fs::read(&input)?, original_audio);
 

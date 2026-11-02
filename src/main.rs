@@ -52,6 +52,11 @@ impl ActiveWindow {
             ..Default::default()
         };
         let render = RenderWindow::new(event_loop, preferences)?;
+        anyhow::ensure!(
+            visualizer::Renderer::gpu_ribbons_supported(&render.device().device)
+                && visualizer::Renderer::gpu_ribbons_adapter_supported(render.device().adapter()),
+            "Benga requires a GPU with compute, indirect drawing and float blending support"
+        );
         let chrome = Chrome::new(&render.window)?;
         let mut view = View::fit(render.viewport());
         view.set_ui_scale(render.window.scale_factor());
@@ -70,7 +75,6 @@ enum Setting {
     Theme,
     PresentationOpacity,
     FrameRate,
-    Shutter,
     LineWidth,
     Zoom,
 }
@@ -88,7 +92,6 @@ struct App {
     previous_frame: Instant,
     previous_presentation: Option<Instant>,
     profile: Option<profile::Run>,
-    session_ephemeral: bool,
     renderer_status: Option<String>,
     frame_trace: Option<frame_trace::FrameTrace>,
 }
@@ -104,10 +107,6 @@ impl App {
     fn adjust_setting(&mut self, setting: Setting, adjustment: Adjustment) {
         let settings = self.settings.edit();
         match setting {
-            Setting::Shutter => {
-                settings.shutter_frames = settings.shutter_frames.adjusted(adjustment);
-                self.ui.set_shutter(settings.shutter_frames);
-            }
             Setting::Theme => self.ui.navigate_theme(adjustment),
             Setting::PresentationOpacity => {
                 settings.presentation_opacity = settings.presentation_opacity.adjusted(adjustment);
@@ -171,7 +170,6 @@ impl App {
                     Dial::LineWidth => Setting::LineWidth,
                     Dial::Zoom => Setting::Zoom,
                     Dial::FrameRate => Setting::FrameRate,
-                    Dial::Shutter => Setting::Shutter,
                     Dial::TextOpacity => Setting::PresentationOpacity,
                 };
                 self.adjust_setting(setting, adjustment);
@@ -215,6 +213,7 @@ impl App {
                 self.ui.theme_preferences_mut().restore(theme);
             }
             ControlAction::ToggleAnalyzers => self.ui.toggle_analyzers(),
+            ControlAction::ToggleRendererStats => self.ui.toggle_renderer_stats(),
             ControlAction::Manage => {}
         }
         self.sync_theme_preferences();
@@ -237,13 +236,7 @@ impl App {
             view,
             visualizer_renderer,
         } = &mut **window;
-        let renderer_key = matches!(
-            &event,
-            WindowEvent::KeyboardInput { event, .. }
-                if event.physical_key == PhysicalKey::Code(KeyCode::KeyR)
-        );
         if self.profile.is_some()
-            && !renderer_key
             && !matches!(
                 event,
                 WindowEvent::Resized(_) | WindowEvent::Occluded(_) | WindowEvent::RedrawRequested
@@ -463,12 +456,6 @@ impl App {
             }
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
                 if let PhysicalKey::Code(key) = event.physical_key {
-                    if key == KeyCode::KeyR && !event.repeat {
-                        self.ui.toggle_gpu_ribbons();
-                        self.previous_presentation = None;
-                        visualizer_renderer.reset_frame_timing();
-                        return Ok(());
-                    }
                     if self.ui.startup_visible() {
                         return Ok(());
                     }
@@ -594,7 +581,7 @@ impl App {
                 let changed =
                     matches!(frame.background, render::Frame::Rebuilt(_)) || frame.foreground;
                 let viewport = render.viewport();
-                let gpu_timing = (frame.overlay.gpu_active).then(|| {
+                let gpu_timing = Some({
                     visualizer_renderer
                         .gpu_timing_tag([viewport.width as u32, viewport.height as u32])
                 });
@@ -750,7 +737,7 @@ impl App {
                         visualizer_renderer.reset_frame_timing();
                     }
                     let backend = self.ui.gpu_ribbon_status();
-                    let status = if backend.starts_with("GPU") {
+                    let status = if self.ui.renderer_stats_visible() {
                         match rendered_extent {
                             Some([width, height]) => format!(
                                 "{backend} / {:.2}x downsize ({width} × {height})",
@@ -759,16 +746,13 @@ impl App {
                             None => backend.to_string(),
                         }
                     } else {
-                        backend.to_string()
+                        String::new()
                     };
                     if self.renderer_status.as_deref() != Some(status.as_str()) {
-                        render
-                            .window
-                            .set_title(&format!("Benga — {status} — R: CPU/GPU"));
-                        if self.session_ephemeral {
-                            eprintln!("Renderer: {status} (R switches CPU/GPU; session settings are not saved)");
+                        if status.is_empty() {
+                            render.window.set_title("Benga");
                         } else {
-                            eprintln!("Renderer: {status} (R switches CPU/GPU)");
+                            render.window.set_title(&format!("Benga — {status}"));
                         }
                         self.renderer_status = Some(status);
                     }
@@ -807,6 +791,11 @@ impl ApplicationHandler for App {
             {
                 window.render.set_present_mode(mode)?;
             }
+            let limits = window.render.device().device.limits();
+            self.ui.validate_gpu_models(
+                (u64::from(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size)
+                    / (6 * 64)) as usize,
+            )?;
             Ok(window)
         });
         self.state = match window {
@@ -819,17 +808,6 @@ impl ApplicationHandler for App {
                         window.render.window.scale_factor(),
                     );
                 }
-                self.ui.set_gpu_ribbons_supported(
-                    visualizer::Renderer::gpu_ribbons_supported(&window.render.device().device)
-                        && visualizer::Renderer::gpu_ribbons_adapter_supported(
-                            window.render.device().adapter(),
-                        ),
-                );
-                let limits = window.render.device().device.limits();
-                self.ui.set_gpu_ribbon_edge_capacity(
-                    (u64::from(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size)
-                        / (6 * 64)) as usize,
-                );
                 self.renderer_status = None;
                 window
                     .visualizer_renderer
@@ -995,35 +973,23 @@ fn main() -> anyhow::Result<()> {
             };
             return benga::export::run(options, &settings);
         }
-        command @ (cli::Command::Desktop
-        | cli::Command::Profile
-        | cli::Command::Experimental { .. }
-        | cli::Command::Cpu { .. }) => command.playback().expect("desktop playback command"),
+        command @ (cli::Command::Desktop | cli::Command::Profile) => {
+            command.playback().expect("desktop playback command")
+        }
     };
     let profile = if playback.profile {
         profile::Run::from_args()?
     } else {
         None
     };
-    anyhow::ensure!(
-        playback.gpu_ribbons
-            || profile
-                .as_ref()
-                .is_none_or(|p| p.ribbon_downsize().is_none()),
-        "BENGA_PROFILE_RIBBON_DOWNSIZE requires GPU ribbons (omit --cpu-ribbons)"
-    );
     let mut settings =
         Saved::<Config>::load(config::config_file()?, Some(config::legacy_config_file()?))?;
-    if playback.ephemeral {
+    if playback.profile {
         settings.make_ephemeral();
     }
-    if playback.trial_shutter {
-        settings.edit().shutter_frames = config::ShutterFrames::try_from(2.0)?;
-    }
     let mut ui = Ui::new(&settings)?;
-    ui.set_gpu_ribbons(true);
-    if !playback.gpu_ribbons {
-        ui.toggle_gpu_ribbons();
+    if let Some(profile) = &profile {
+        ui.set_renderer_stats_visible(profile.performance_overlay());
     }
     if profile.is_some() {
         ui.dismiss_startup();
@@ -1060,7 +1026,6 @@ fn main() -> anyhow::Result<()> {
         previous_frame: Instant::now(),
         previous_presentation: None,
         profile,
-        session_ephemeral: playback.ephemeral,
         renderer_status: None,
         frame_trace: frame_trace::FrameTrace::from_env(true),
     };

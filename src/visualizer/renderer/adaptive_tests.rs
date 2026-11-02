@@ -128,11 +128,7 @@ fn reduced_ribbon_layer_retains_thin_ink_and_full_resolution_scene() -> anyhow::
                     Size::new(f64::from(width), f64::from(height)),
                     Frame {
                         lines: &[],
-                        model_lines: &[],
-                        ribbons: &[],
                         gpu_models: std::slice::from_ref(&model),
-                        gpu_active: true,
-                        model_edge_capacity: 1,
                         model_composite: composite,
                     },
                     None,

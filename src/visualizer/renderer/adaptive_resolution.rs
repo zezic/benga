@@ -1,4 +1,4 @@
-//! Per-frame host timing feedback for the experimental model layer. No GPU readback.
+//! Per-frame host timing feedback for the GPU model layer. No GPU readback.
 use std::time::Duration;
 
 pub(super) const BASE_DOWNSIZE: f32 = 1.0;

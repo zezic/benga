@@ -8,7 +8,6 @@ pub mod export;
 pub mod frame_schedule;
 mod logo;
 pub mod render;
-pub mod shutter;
 pub mod text;
 pub mod theme;
 pub mod visualizer;

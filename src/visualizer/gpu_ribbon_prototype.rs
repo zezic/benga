@@ -597,6 +597,8 @@ impl Offscreen {
                 ribbons: &[],
                 model_composite: composite,
                 model_edge_capacity: 0,
+                gpu_active: false,
+                gpu_models: &[],
             }
         } else {
             output.frame(composite)

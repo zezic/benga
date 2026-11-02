@@ -8,9 +8,16 @@ mod benchmark;
 mod computation;
 mod controls;
 mod detection;
+mod frame_metrics;
 mod geometry;
+#[cfg(test)]
+mod gpu_app_trial_tests;
+mod gpu_bridge;
+#[cfg(test)]
+mod gpu_bridge_tests;
 #[cfg(feature = "gpu-ribbon-prototype")]
 pub mod gpu_ribbon_prototype;
+mod gpu_ribbons;
 mod model;
 mod percussion;
 #[cfg(test)]
@@ -1511,6 +1518,9 @@ pub struct Frame<'a> {
     pub model_composite: ModelComposite,
     /// Largest prepared model, used to reserve GPU storage before animation.
     pub model_edge_capacity: usize,
+    /// True only after resolving the opt-in request and fallback conditions.
+    pub gpu_active: bool,
+    pub gpu_models: &'a [gpu_bridge::GpuModelFrame],
 }
 
 /// Monotonic detector hit counters. Presentation compares these across frames
@@ -1554,6 +1564,13 @@ pub struct Visualizer {
     model_composite: ModelComposite,
     model_lines: Vec<LineInstance>,
     model_ribbons: Vec<RibbonInstance>,
+    gpu_requested: bool,
+    gpu_supported: bool,
+    gpu_edge_capacity: usize,
+    gpu_active: bool,
+    gpu_status: &'static str,
+    gpu_models: Vec<gpu_bridge::GpuModelFrame>,
+    gpu_viewport: Option<(f32, f32)>,
     line_width: LineWidth,
     model_motion: ModelMotion,
     motion_opacity: MotionOpacity,
@@ -1631,6 +1648,13 @@ impl Visualizer {
             model_composite: ModelComposite::default(),
             model_lines: Vec::new(),
             model_ribbons: Vec::new(),
+            gpu_requested: false,
+            gpu_supported: true,
+            gpu_edge_capacity: usize::MAX,
+            gpu_active: false,
+            gpu_status: "CPU ribbons",
+            gpu_models: Vec::new(),
+            gpu_viewport: None,
             line_width: LineWidth::default(),
             model_motion: ModelMotion::default(),
             motion_opacity: MotionOpacity::default(),
@@ -2100,7 +2124,46 @@ impl Visualizer {
             ribbons: &self.model_ribbons,
             model_composite: self.model_composite,
             model_edge_capacity: self.model_lines.capacity(),
+            gpu_active: self.gpu_active,
+            gpu_models: if self.gpu_active {
+                &self.gpu_models
+            } else {
+                &[]
+            },
         }
+    }
+
+    /// Process-local renderer selection. Animation and audio keep advancing.
+    pub fn set_gpu_ribbons(&mut self, requested: bool) {
+        if self.gpu_requested != requested {
+            self.gpu_requested = requested;
+            self.scene.reset_temporal();
+        }
+    }
+
+    pub fn set_gpu_ribbons_supported(&mut self, supported: bool) {
+        self.gpu_supported = supported;
+    }
+
+    pub fn set_gpu_ribbon_edge_capacity(&mut self, capacity: usize) {
+        self.gpu_edge_capacity = capacity;
+    }
+
+    pub fn gpu_ribbon_status(&self) -> &'static str {
+        self.gpu_status
+    }
+
+    /// Conservative three-pose support for layout, independent of tessellation.
+    pub fn swept_model_bounds(&self) -> Option<vello::kurbo::Rect> {
+        if !self.gpu_active {
+            return None;
+        }
+        self.scene
+            .current
+            .iter()
+            .chain(self.scene.outgoing.iter())
+            .flat_map(|model| model.gpu_bounds.iter().filter_map(|(_, rect)| *rect))
+            .reduce(|a, b| a.union(b))
     }
 
     pub fn showcase_mode_name(&self) -> &'static str {
@@ -2207,12 +2270,12 @@ impl Visualizer {
 
     /// Screen position of a model vertex used as a POI callout anchor.
     pub fn vertex_screen(&self, vertex: u16) -> Option<[f32; 2]> {
-        let projected = self
-            .scene
-            .current
-            .as_ref()?
-            .vertices
-            .get(usize::from(vertex))?;
+        let model = self.scene.current.as_ref()?;
+        let index = usize::from(vertex);
+        if index >= model.projected_vertex_count() {
+            return None;
+        }
+        let projected = model.projected_vertex(index);
         Some([projected.screen.x, projected.screen.y])
     }
 
@@ -3423,6 +3486,35 @@ impl Visualizer {
         };
         let width =
             (viewport.0.min(viewport.1) / 440.0).clamp(0.62, 2.6) * 1.4 * self.line_width.factor();
+        let topology_supported = self
+            .scene
+            .current
+            .iter()
+            .chain(self.scene.outgoing.iter())
+            .all(|model| model.wireframe_edge_count() <= self.gpu_edge_capacity);
+        let gpu_status = if !self.gpu_requested {
+            "CPU ribbons"
+        } else if !self.gpu_supported {
+            "CPU fallback: GPU device limits"
+        } else if !topology_supported {
+            "CPU fallback: model exceeds GPU buffer limits"
+        } else if self.model_motion == ModelMotion::Still {
+            "GPU lines: GPU projection / motion blur off"
+        } else if shutter.frames() != 2.0 {
+            "CPU fallback: GPU requires shutter 2"
+        } else {
+            "GPU ribbons: GPU projection / shutter 2"
+        };
+        let gpu_active = self.gpu_requested
+            && self.gpu_supported
+            && topology_supported
+            && (self.model_motion == ModelMotion::Still || shutter.frames() == 2.0);
+        if self.gpu_active != gpu_active || self.gpu_viewport != Some(viewport) {
+            self.scene.reset_temporal();
+        }
+        self.gpu_active = gpu_active;
+        self.gpu_status = gpu_status;
+        self.gpu_viewport = Some(viewport);
         let quake_scale = (viewport.0.min(viewport.1) / 440.0).clamp(0.62, 2.6) * QUAKE_PIXELS;
         let shake = if self.showcase.mode() == showcase::ShowcaseMode::Normal
             && self.property_gates.plays(Property::Quake)
@@ -3438,6 +3530,7 @@ impl Visualizer {
         self.model_lines.clear();
         self.model_ribbons.clear();
         if self.scene.current.is_none() {
+            self.gpu_models.clear();
             self.diagnosis.vertex = None;
             self.diagnosis.readout = None;
             self.record_debug_sample();
@@ -3471,6 +3564,11 @@ impl Visualizer {
             self.time,
             &mut self.model_lines,
             &mut self.model_ribbons,
+            if gpu_active {
+                Some(&mut self.gpu_models)
+            } else {
+                None
+            },
         );
         self.record_debug_sample();
         let ui_scale = ui_scale.max(0.25);
@@ -3507,7 +3605,7 @@ impl Visualizer {
         let Some(current) = self.scene.current.as_ref() else {
             return;
         };
-        let count = current.vertices.len();
+        let count = current.projected_vertex_count();
         if count == 0 {
             return;
         }
@@ -3556,7 +3654,7 @@ impl Visualizer {
         if scene != self.diagnosis.scene {
             self.diagnosis.scene = scene.to_owned();
             self.diagnosis.vertex = Some(TrackedVertex::new(
-                self.rng.range(current.vertices.len()),
+                self.rng.range(current.projected_vertex_count()),
                 current,
                 slide_offset,
             ));
@@ -4062,6 +4160,7 @@ impl Scene {
         time: f32,
         out: &mut Vec<LineInstance>,
         out_ribbons: &mut Vec<RibbonInstance>,
+        mut out_gpu: Option<&mut Vec<gpu_bridge::GpuModelFrame>>,
     ) {
         let Some(current) = &self.current else {
             return;
@@ -4108,6 +4207,15 @@ impl Scene {
             current.edge_dissolve.incoming(progress, slots);
             outgoing.edge_dissolve.outgoing(progress, slots);
         }
+        if let Some(frames) = &mut out_gpu {
+            let count = 1 + usize::from(self.outgoing.is_some());
+            while frames.len() < count {
+                frames.push(gpu_bridge::GpuModelFrame::new(Arc::clone(
+                    &self.current.as_ref().expect("current model").gpu_topology,
+                )));
+            }
+            frames.truncate(count);
+        }
         if let Some(current) = &mut self.current {
             current.update(
                 dt,
@@ -4130,6 +4238,7 @@ impl Scene {
                 time,
                 out,
                 out_ribbons,
+                out_gpu.as_deref_mut().map(|frames| &mut frames[0]),
             );
         }
         if let Some(outgoing) = &mut self.outgoing {
@@ -4154,6 +4263,7 @@ impl Scene {
                 time,
                 out,
                 out_ribbons,
+                out_gpu.as_deref_mut().map(|frames| &mut frames[1]),
             );
         }
     }
@@ -4162,6 +4272,9 @@ impl Scene {
 struct ModelRuntime {
     name: Arc<str>,
     wireframe: Arc<Wireframe>,
+    gpu_topology: Arc<gpu_bridge::GpuTopology>,
+    gpu_generation: u64,
+    gpu_bounds: VecDeque<(f64, Option<vello::kurbo::Rect>)>,
     pose: Pose,
     pitch: Smoother,
     roll: Smoother,
@@ -4204,6 +4317,8 @@ struct ModelRuntime {
     /// Recycled pose storage; clearing history never frees its edge buffers.
     history_buffers: Vec<Vec<LineGeometry>>,
     vertices: Vec<Projected>,
+    /// Latest GPU view; only UI anchor/diagnosis vertices are projected on CPU.
+    gpu_projection: Option<gpu_bridge::GpuProjection>,
     current: Vec<LineGeometry>,
 }
 
@@ -4251,7 +4366,7 @@ impl TrackedVertex {
         Self {
             index,
             data: VertexDiagnosis {
-                screen: model.vertices[index].screen,
+                screen: model.projected_vertex(index).screen,
                 world: model.world_vertex(index, slide_offset),
                 velocity: Vec2::default(),
                 acceleration: Vec2::default(),
@@ -4261,7 +4376,7 @@ impl TrackedVertex {
 
     fn advance(&mut self, model: &ModelRuntime, slide_offset: Vec3, dt: f32) {
         self.sample(
-            model.vertices[self.index].screen,
+            model.projected_vertex(self.index).screen,
             model.world_vertex(self.index, slide_offset),
             dt,
         );
@@ -4336,6 +4451,9 @@ impl ModelRuntime {
         Self {
             name: Arc::clone(&model.name),
             wireframe: Arc::clone(&model.wireframe),
+            gpu_topology: Arc::clone(&model.gpu_topology),
+            gpu_generation: gpu_bridge::generation(),
+            gpu_bounds: VecDeque::with_capacity(3),
             pose,
             pitch: Smoother::new(pose.pitch),
             roll: Smoother::new(pose.roll),
@@ -4368,6 +4486,7 @@ impl ModelRuntime {
             history: VecDeque::new(),
             history_buffers: Vec::new(),
             vertices: Vec::new(),
+            gpu_projection: None,
             current: Vec::new(),
         }
     }
@@ -4394,6 +4513,8 @@ impl ModelRuntime {
     }
 
     fn clear_history(&mut self) {
+        self.gpu_generation = gpu_bridge::generation();
+        self.gpu_bounds.clear();
         while let Some(snapshot) = self.history.pop_front() {
             self.history_buffers.push(snapshot.lines);
         }
@@ -4420,6 +4541,10 @@ impl ModelRuntime {
 
     fn set_prepared(&mut self, model: &PreparedModel) {
         self.wireframe = Arc::clone(&model.wireframe);
+        self.gpu_topology = Arc::clone(&model.gpu_topology);
+        self.gpu_generation = gpu_bridge::generation();
+        self.gpu_bounds.clear();
+        self.gpu_projection = None;
         self.slide_vertices = Arc::clone(&model.slide_vertices);
         self.edge_dissolve = transition::EdgeDissolve::from_order(model.edge_order.clone());
         self.active_edges = self.wireframe.edges().len();
@@ -4437,8 +4562,8 @@ impl ModelRuntime {
     }
 
     fn set_motion_blur(&mut self, enabled: bool) {
-        self.motion_blur = enabled;
-        if !enabled {
+        if self.motion_blur != enabled {
+            self.motion_blur = enabled;
             self.clear_history();
         }
     }
@@ -4451,6 +4576,8 @@ impl ModelRuntime {
         self.clear_history();
         self.vertices.clear();
         self.current.clear();
+        self.gpu_topology = gpu_bridge::GpuTopology::new(&wireframe);
+        self.gpu_projection = None;
         self.wireframe = Arc::new(wireframe);
         self.reserve(self.wireframe.vertex_count(), self.active_edges);
     }
@@ -4482,6 +4609,7 @@ impl ModelRuntime {
         time: f32,
         out: &mut Vec<LineInstance>,
         out_ribbons: &mut Vec<RibbonInstance>,
+        gpu: Option<&mut gpu_bridge::GpuModelFrame>,
     ) {
         let context = music.context(
             self.style,
@@ -4639,17 +4767,50 @@ impl ModelRuntime {
             near: view_near,
             blend,
         };
-        if blend != 0.0 {
-            self.project_vertices(showcase.slide_offset, camera.focused_projector(pose, focus));
-        } else {
-            self.project_vertices(showcase.slide_offset, |world| camera.project(world, pose));
-        }
         // Models are fitted to a unit radius, so `pose.scale` is the model
         // radius in view space. Keep the depth planes on that fitted sphere
         // instead of following the silhouette of the current pose.
         let depth_center = view_distance;
         let depth_radius = focus_depth_radius(self.pose.scale, focus_radius, blend);
         let depth_opacity = DepthOpacity::centered(depth_center, depth_radius, depth_fade);
+        let base_opacity = if near_opacity < computation::LINE_ENERGY_BASE {
+            self.line_energy * near_opacity / computation::LINE_ENERGY_BASE
+        } else {
+            self.line_energy.max(near_opacity)
+        };
+        let alpha = base_opacity.clamp(0.0, 1.0);
+        let width = base_width * (1.0 + music.kick * 0.25);
+        if let Some(gpu) = gpu {
+            let projection = gpu_bridge::GpuProjection::new(
+                camera,
+                pose,
+                focus,
+                depth_opacity,
+                showcase.slide_offset,
+            );
+            self.gpu_projection = Some(projection);
+            self.project_gpu_frame(
+                gpu,
+                frame_end,
+                dt,
+                projection,
+                palette,
+                showcase,
+                alpha,
+                width,
+                motion_fade,
+            );
+            // UI anchors and diagnosis project only their requested vertices.
+            // Model vertices, edge history and ribbon expansion stay on GPU.
+            self.current.clear();
+            return;
+        }
+        self.gpu_projection = None;
+        if blend != 0.0 {
+            self.project_vertices(showcase.slide_offset, camera.focused_projector(pose, focus));
+        } else {
+            self.project_vertices(showcase.slide_offset, |world| camera.project(world, pose));
+        }
         self.current.clear();
         self.current
             .extend(self.wireframe.edges().iter().map(|edge| {
@@ -4697,13 +4858,6 @@ impl ModelRuntime {
         } else {
             None
         };
-        let base_opacity = if near_opacity < computation::LINE_ENERGY_BASE {
-            self.line_energy * near_opacity / computation::LINE_ENERGY_BASE
-        } else {
-            self.line_energy.max(near_opacity)
-        };
-        let alpha = base_opacity.clamp(0.0, 1.0);
-        let width = base_width * (1.0 + music.kick * 0.25);
         // Cull only the emitted instances; the temporal history keeps every
         // edge so a sweep stays correct when the edge re-enters the viewport.
         let screen = ScreenBounds::new(camera.viewport);
@@ -4717,27 +4871,9 @@ impl ModelRuntime {
             if !current.visible {
                 continue;
             }
-            let part = self.wireframe.edge_part(index);
-            let alternate = showcase.highlight_part == Some(part)
-                || (showcase.selector.alternate_color && showcase.selector.selected == Some(part));
-            let rgb = if alternate {
-                self.tint.alternate_edge_rgb(palette)
-            } else {
-                self.tint.edge_rgb(palette)
-            };
-            let selector_alpha = if showcase.selector.selected == Some(part) {
-                1.0
-            } else {
-                showcase.selector.attenuation
-            };
-            let focus_alpha = if showcase.highlight_part.is_some_and(|poi| poi != part)
-                && showcase.focus_child != Some(part)
-            {
-                showcase.mesh_attenuation
-            } else {
-                1.0
-            };
-            let edge_alpha = alpha * transition_alpha * selector_alpha * focus_alpha;
+            let ink = self.edge_ink(index, palette, showcase, alpha);
+            let rgb = [ink[0], ink[1], ink[2]];
+            let edge_alpha = ink[3];
 
             let Some(exposure) = &exposure else {
                 let start_color = [
@@ -4777,6 +4913,123 @@ impl ModelRuntime {
             );
         }
         self.active_edges = active_edges;
+    }
+
+    fn edge_ink(
+        &self,
+        index: usize,
+        palette: &Palette,
+        showcase: &ShowcaseFrame,
+        alpha: f32,
+    ) -> [f32; 4] {
+        let part = self.wireframe.edge_part(index);
+        let alternate = showcase.highlight_part == Some(part)
+            || (showcase.selector.alternate_color && showcase.selector.selected == Some(part));
+        let rgb = if alternate {
+            self.tint.alternate_edge_rgb(palette)
+        } else {
+            self.tint.edge_rgb(palette)
+        };
+        let selector_alpha = if showcase.selector.selected == Some(part) {
+            1.0
+        } else {
+            showcase.selector.attenuation
+        };
+        let focus_alpha = if showcase.highlight_part.is_some_and(|poi| poi != part)
+            && showcase.focus_child != Some(part)
+        {
+            showcase.mesh_attenuation
+        } else {
+            1.0
+        };
+        [
+            rgb[0],
+            rgb[1],
+            rgb[2],
+            alpha * self.edge_dissolve.alpha(index) * selector_alpha * focus_alpha,
+        ]
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn project_gpu_frame(
+        &mut self,
+        gpu: &mut gpu_bridge::GpuModelFrame,
+        at: AudioTime,
+        dt: f32,
+        projection: gpu_bridge::GpuProjection,
+        palette: &Palette,
+        showcase: &ShowcaseFrame,
+        alpha: f32,
+        width: f32,
+        motion: MotionFade,
+    ) {
+        let now = at.seconds_since(AudioTime::ZERO);
+        if !self.motion_blur {
+            // The GPU slot reseeds all three poses when its generation changes.
+            // Blur-off frames therefore use only this pose while retaining the
+            // cached source and preparation allocations on the device.
+            self.gpu_bounds.clear();
+            self.gpu_generation = gpu_bridge::generation();
+        }
+        if self
+            .gpu_bounds
+            .back()
+            .is_some_and(|(last, _)| now <= *last || now - *last > 0.25)
+        {
+            self.gpu_bounds.clear();
+            self.gpu_generation = gpu_bridge::generation();
+        }
+        gpu.topology = Arc::clone(&self.gpu_topology);
+        gpu.projected.clear();
+        gpu.projection = Some(projection);
+        let bounds = projection.bounds(&self.gpu_topology);
+        gpu.styles.clear();
+        self.active_edges = 0;
+        for index in 0..self.wireframe_edge_count() {
+            if self.edge_dissolve.alpha(index) > 0.0 {
+                self.active_edges += 1;
+            }
+            gpu.styles
+                .push(self.edge_ink(index, palette, showcase, alpha));
+        }
+        let padding = f64::from(width.max(1.0)) * 0.5 + 2.0;
+        self.gpu_bounds
+            .push_back((now, bounds.map(|r| r.inflate(padding, padding))));
+        while self.gpu_bounds.len() > 3 {
+            self.gpu_bounds.pop_front();
+        }
+        let count = self.gpu_bounds.len();
+        let latest = if count >= 2 {
+            (now - self.gpu_bounds[count - 2].0) as f32
+        } else {
+            dt.max(1e-6)
+        };
+        let previous = if count >= 3 {
+            (self.gpu_bounds[1].0 - self.gpu_bounds[0].0) as f32
+        } else {
+            latest
+        };
+        gpu.width = width;
+        gpu.motion_fade_power = motion.power.power();
+        gpu.motion_opacity = motion.opacity.value();
+        gpu.at = now;
+        gpu.reset = self.gpu_generation;
+        gpu.durations = [previous, latest];
+    }
+
+    fn projected_vertex_count(&self) -> usize {
+        if self.gpu_projection.is_some() {
+            self.wireframe.vertex_count()
+        } else {
+            self.vertices.len()
+        }
+    }
+
+    fn projected_vertex(&self, index: usize) -> Projected {
+        self.gpu_projection.map_or_else(
+            || self.vertices[index],
+            |projection| projection.projected(self.gpu_topology.vertices[index]),
+        )
     }
 
     fn project_vertices(&mut self, slide_offset: Vec3, project: impl Fn(Vec3) -> Projected) {
@@ -6542,6 +6795,7 @@ mod tests {
                 transition::model_seed("test"),
             ),
             slide_vertices: vec![false; wireframe.vertex_count()].into(),
+            gpu_topology: gpu_bridge::GpuTopology::new(&wireframe),
             wireframe: Arc::new(wireframe),
             pois: Arc::from([]),
             poi_vertices: BTreeMap::new(),
@@ -6665,6 +6919,7 @@ mod tests {
             0.0,
             &mut lines,
             &mut ribbons,
+            None,
         );
         (lines, ribbons)
     }

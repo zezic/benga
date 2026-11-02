@@ -1,7 +1,8 @@
+mod performance;
 mod pointer_click;
 
 use pointer_click::{ClickKind, ClickSequence};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use vello::{
     kurbo::{Affine, Point, Rect, Size},
     peniko::{Color, Fill, Mix},
@@ -79,6 +80,9 @@ struct FaceSettings {
 
 /// The presentation, its optional analyzers, and the audio cursor.
 pub struct Ui {
+    gpu_experiment: bool,
+    frame_metrics: super::frame_metrics::FrameMetrics,
+    performance: performance::PerformanceHud,
     startup: Splash,
     pointer: Option<Point>,
     presentation_click: ClickSequence,
@@ -143,6 +147,9 @@ impl Ui {
         let presentation = Presentation::new(&Palette::from_theme(selected), theme.colors);
         let startup = Splash::new(&mut fonts)?;
         Ok(Self {
+            gpu_experiment: false,
+            frame_metrics: super::frame_metrics::FrameMetrics::default(),
+            performance: performance::PerformanceHud::default(),
             startup,
             pointer: None,
             presentation_click: ClickSequence::default(),
@@ -283,6 +290,76 @@ impl Ui {
 
     pub fn set_shutter(&mut self, shutter: ShutterFrames) {
         self.shutter_frames = shutter;
+    }
+
+    pub fn set_gpu_ribbons(&mut self, enabled: bool) {
+        self.gpu_experiment |= enabled;
+        self.visualizer.set_gpu_ribbons(enabled);
+    }
+
+    pub fn toggle_gpu_ribbons(&mut self) {
+        self.visualizer
+            .set_gpu_ribbons(!self.visualizer.gpu_requested);
+    }
+
+    pub fn set_gpu_ribbons_supported(&mut self, supported: bool) {
+        self.visualizer.set_gpu_ribbons_supported(supported);
+    }
+
+    pub fn set_gpu_ribbon_edge_capacity(&mut self, capacity: usize) {
+        self.visualizer.set_gpu_ribbon_edge_capacity(capacity);
+    }
+
+    pub fn gpu_ribbon_status(&self) -> &'static str {
+        self.visualizer.gpu_ribbon_status()
+    }
+
+    pub fn scene_name(&self) -> &str {
+        self.visualizer.scene_name()
+    }
+
+    /// Host wall-clock work and completed present-call cadence; no GPU readback.
+    pub fn record_frame_performance(
+        &mut self,
+        at: Instant,
+        interval: Duration,
+        cpu_work: Duration,
+        downsize: f32,
+        model_extent: Option<[u32; 2]>,
+    ) {
+        if self.gpu_experiment {
+            self.frame_metrics.record_rendered(
+                at,
+                interval,
+                cpu_work,
+                self.gpu_ribbon_status(),
+                downsize,
+                model_extent,
+            );
+        }
+    }
+
+    /// Preserve the history while breaking the plot across hidden/unavailable frames.
+    pub fn pause_frame_performance(&mut self) {
+        self.frame_metrics.mark_break();
+    }
+
+    pub fn draw_performance(&mut self, scene: &mut Scene, view: &View, now: Instant) -> bool {
+        if !self.gpu_experiment {
+            return false;
+        }
+        self.performance.draw(
+            scene,
+            &mut self.fonts,
+            &self.frame_metrics,
+            view.viewport,
+            view.ui_scale(),
+            self.theme.colors.background,
+            self.presentation.colors().ink,
+            self.visualizer.gpu_ribbon_status(),
+            now,
+        );
+        true
     }
 
     pub fn set_preamp(&mut self, preamp: PreampDb) {
@@ -470,7 +547,8 @@ impl Ui {
         } else {
             None
         });
-        diagnostics_visible || toolbar_visible
+        let performance_visible = self.draw_performance(scene, view, now);
+        diagnostics_visible || toolbar_visible || performance_visible
     }
 
     fn draw_analysis_controls(&self, scene: &mut Scene) -> bool {
@@ -642,6 +720,91 @@ mod tests {
     use crate::render::RasterAssetCache;
     use crate::visualizer::{ArrangementSetting, Detector, PercussionSetting};
     use std::time::Duration;
+
+    #[test]
+    fn performance_history_is_opt_in_and_survives_renderer_switches() -> anyhow::Result<()> {
+        let mut ui = Ui::new(&Config::default())?;
+        let now = Instant::now();
+        let view = View::fit(Size::new(1280.0, 720.0));
+        let mut scene = Scene::new();
+        ui.record_frame_performance(
+            now,
+            Duration::from_millis(16),
+            Duration::from_millis(4),
+            2.0,
+            Some([640, 360]),
+        );
+        assert_eq!(ui.frame_metrics.samples().count(), 0);
+        assert!(!ui.draw_performance(&mut scene, &view, now));
+
+        ui.set_gpu_ribbons(true);
+        ui.visualizer.gpu_status = "GPU ribbons: GPU projection / shutter 2";
+        ui.record_frame_performance(
+            now,
+            Duration::from_millis(16),
+            Duration::from_millis(4),
+            2.0,
+            Some([640, 360]),
+        );
+        ui.toggle_gpu_ribbons();
+        ui.visualizer.gpu_status = "CPU ribbons";
+        let next = now + Duration::from_millis(32);
+        ui.record_frame_performance(
+            next,
+            Duration::from_millis(32),
+            Duration::from_millis(12),
+            1.0,
+            None,
+        );
+        let samples: Vec<_> = ui.frame_metrics.samples().collect();
+        assert_eq!(samples.len(), 2);
+        assert!(samples[0].backend.starts_with("GPU"));
+        assert_eq!(samples[1].backend, "CPU ribbons");
+        assert!(samples[1].break_before);
+        assert_eq!(samples[0].downsize, 2.0);
+        assert_eq!(samples[0].model_extent, Some([640, 360]));
+        assert_eq!(samples[1].downsize, 1.0);
+        assert_eq!(samples[1].model_extent, None);
+        assert!(ui.draw_performance(&mut scene, &view, next));
+        // The experimental graphs remain visible after the normal controls fade.
+        assert!(ui.draw_controls(
+            &mut scene,
+            &view,
+            &Config::default(),
+            false,
+            next + Duration::from_secs(15)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn performance_pause_keeps_the_old_trace_and_breaks_the_new_segment() -> anyhow::Result<()> {
+        let mut ui = Ui::new(&Config::default())?;
+        ui.set_gpu_ribbons(true);
+        let now = Instant::now();
+        ui.record_frame_performance(
+            now,
+            Duration::from_millis(16),
+            Duration::from_millis(4),
+            2.0,
+            Some([640, 360]),
+        );
+        ui.pause_frame_performance();
+        assert!(ui.frame_metrics.snapshot(now).is_none());
+        assert_eq!(ui.frame_metrics.samples().count(), 1);
+        let resumed = now + Duration::from_secs(2);
+        ui.record_frame_performance(
+            resumed,
+            Duration::from_millis(20),
+            Duration::from_millis(5),
+            4.0,
+            Some([320, 180]),
+        );
+        assert_eq!(ui.frame_metrics.samples().count(), 2);
+        assert!(ui.frame_metrics.samples().last().unwrap().break_before);
+        assert_eq!(ui.frame_metrics.snapshot(resumed).unwrap().fps, 50.0);
+        Ok(())
+    }
 
     fn drawn_presentation_ui() -> (Ui, View) {
         let mut ui = Ui::new(&Config::default()).expect("the bundled fonts and models load");

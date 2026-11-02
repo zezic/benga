@@ -1,6 +1,9 @@
+mod gpu_timing;
 mod offscreen;
 mod raster_asset;
 
+use gpu_timing::GpuFrameTimer;
+pub use gpu_timing::{GpuFrameTag, GpuFrameTiming};
 pub use offscreen::OffscreenRenderer;
 pub use raster_asset::{RasterAsset, RasterAssetCache};
 
@@ -47,6 +50,7 @@ pub struct FrameContent<'a> {
     pub raster_assets: &'a [RasterAsset],
     pub plates: &'a [PlateInstance],
     pub plate_ink: Color,
+    pub gpu_timing: Option<GpuFrameTag>,
 }
 
 /// Most plate edges the coverage shader clips against.
@@ -428,6 +432,8 @@ pub struct RenderWindow {
     overlay: Option<SceneTexture>,
     plate_mask: PlateMask,
     target: TargetState,
+    gpu_timing: Option<GpuFrameTimer>,
+    completed_gpu_timing: Option<GpuFrameTiming>,
 }
 
 pub fn renderer(device: &wgpu::Device) -> anyhow::Result<Renderer> {
@@ -447,6 +453,36 @@ impl RenderWindow {
 
     pub fn format(&self) -> wgpu::TextureFormat {
         self.surface.format
+    }
+
+    pub fn gpu_timing_supported(&self) -> bool {
+        self.gpu_timing.is_some()
+    }
+
+    pub fn take_gpu_frame_timing(&mut self) -> Option<GpuFrameTiming> {
+        self.completed_gpu_timing.take()
+    }
+
+    pub fn surface_configuration(&self) -> &wgpu::SurfaceConfiguration {
+        &self.surface.config
+    }
+
+    pub fn supported_present_modes(&self) -> Vec<wgpu::PresentMode> {
+        self.surface
+            .surface
+            .get_capabilities(self.device().adapter())
+            .present_modes
+    }
+
+    /// Explicit profiling control; ordinary playback retains AutoVsync.
+    pub fn set_present_mode(&mut self, mode: wgpu::PresentMode) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            mode == wgpu::PresentMode::AutoVsync || self.supported_present_modes().contains(&mode),
+            "unsupported presentation mode {mode:?}"
+        );
+        self.surface.config.present_mode = mode;
+        self.context.configure_surface(&self.surface);
+        Ok(())
     }
 
     /// The current drawable extent, retaining the last size while minimized.
@@ -484,6 +520,10 @@ impl RenderWindow {
         .context("Failed to create the Vello window surface")?;
         let device_id = surface.dev_id;
         let mut renderer = renderer(&context.devices[device_id].device)?;
+        let gpu_timing = GpuFrameTimer::new(
+            &context.devices[device_id].device,
+            &context.devices[device_id].queue,
+        );
         let plate_mask = PlateMask::new(
             &context.devices[device_id].device,
             &mut renderer,
@@ -503,6 +543,8 @@ impl RenderWindow {
             overlay: None,
             plate_mask,
             target: TargetState::Dirty,
+            gpu_timing,
+            completed_gpu_timing: None,
         })
     }
 
@@ -552,6 +594,7 @@ impl RenderWindow {
             &wgpu::TextureView,
             Option<&wgpu::TextureView>,
             Option<&wgpu::TextureView>,
+            Option<&wgpu::QuerySet>,
         ),
     ) -> anyhow::Result<Presentation> {
         use wgpu::CurrentSurfaceTexture;
@@ -562,6 +605,7 @@ impl RenderWindow {
             raster_assets,
             plates,
             plate_ink,
+            gpu_timing,
         } = content;
         if matches!(background, Frame::Rebuilt(_)) {
             self.target = TargetState::Dirty;
@@ -590,6 +634,16 @@ impl RenderWindow {
             }
         };
         completed(Stage::Acquire);
+        self.completed_gpu_timing = None;
+        let timing_slot = {
+            let device = &self.context.devices[self.surface.dev_id];
+            if let (Some(tag), Some(timer)) = (gpu_timing, &mut self.gpu_timing) {
+                self.completed_gpu_timing = timer.poll(&device.device);
+                timer.begin(&device.device, &device.queue, tag)
+            } else {
+                None
+            }
+        };
         self.update_plate_mask(plates, plate_ink);
         let device = &self.context.devices[self.surface.dev_id];
         self.raster_assets
@@ -649,8 +703,15 @@ impl RenderWindow {
             &view,
             overlay,
             top_overlay,
+            timing_slot.and_then(|slot| self.gpu_timing.as_ref()?.query_set(slot)),
         );
+        if let (Some(slot), Some(timer)) = (timing_slot, &mut self.gpu_timing) {
+            timer.finish(&mut encoder, slot);
+        }
         device.queue.submit([encoder.finish()]);
+        if let (Some(slot), Some(timer)) = (timing_slot, &mut self.gpu_timing) {
+            timer.submitted(slot);
+        }
         self.window.pre_present_notify();
         device.queue.present(texture);
         if reconfigure {

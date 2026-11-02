@@ -14,6 +14,19 @@ Vello/wgpu renderer. Run from the project root so Benga can find `assets/models/
 cargo run --release
 ```
 
+Desktop playback uses GPU model projection, ribbon preparation and rasterization
+by default. Adaptive quality starts at **1× native resolution**, lowers the model
+layer when needed and restores detail toward 1× as headroom returns. Background,
+infographics and controls retain native resolution. Press **R** to compare GPU
+and CPU rendering, or start with `cargo run --release -- --cpu-ribbons`.
+
+GPU motion blur supports shutter 2; GPU lines with motion blur off support all
+shutter values. Saved preferences stay intact, and unsupported swept shutters or
+GPU capabilities use the CPU fallback shown in the window title. The older
+`--experimental-gpu-ribbons` flag remains an unsaved shutter-2 trial mode.
+See the [GPU integration notes](docs/gpu-ribbon-integration.md) for quality logic,
+profiling controls and earlier measurements.
+
 Audio capture:
 
 - **macOS 14.6+:** allow system audio recording when prompted.
@@ -50,7 +63,9 @@ The result is an H.264 MP4 with the source audio encoded as AAC.
 timeline at the requested FPS and runs as fast as the GPU and encoder allow.
 It streams audio and frames rather than loading the whole track into memory.
 The presentation includes models, motion blur, and infographics, with controls
-and startup screens hidden. Saved settings remain unchanged. The last frame
+and startup screens hidden. Supported model modes use GPU rendering at fixed 1×
+output resolution; the same capability and shutter fallbacks apply. Saved
+settings remain unchanged. The last frame
 can extend past the audio by less than one frame interval. Visual choices
 remain randomized between runs, as in the desktop app.
 
@@ -61,6 +76,7 @@ any control for a hint. They fade after 5 seconds of inactivity.
 
 - Browse models and themes, lock the current model, or enable automatic colors.
 - Adjust motion blur, shutter exposure, line width, zoom, and the FPS limit.
+- Press **R** to switch the GPU and CPU model renderer for comparison.
 - Adjust analyzer boost and text opacity, or manage disliked themes.
 - Double-click the background to toggle fullscreen; `Esc` leaves fullscreen.
 - Use **Save as Default** to set the startup theme.
@@ -252,9 +268,13 @@ cargo run --release -- --profile
 ```
 
 The profiler uses synthetic audio, warms up for one second, measures for ten
-seconds at a 240 FPS limit, then exits. Keep its window visible. It reports FPS,
-CPU usage, and frame-stage wall-clock timings; these include display waits and
-are not GPU execution timings. Profiling leaves saved settings untouched.
+seconds at a 240 FPS limit, then exits. Keep its window visible. It defaults to
+the GPU renderer; `--cpu-ribbons --profile` provides a CPU comparison. It reports
+FPS, CPU usage, host frame-stage timings and asynchronous GPU model/queue spans.
+Host timings include display waits; GPU queue spans can include CPU submission
+gaps and are not busy-GPU utilization counters. Profiling leaves saved settings
+untouched. The [integration notes](docs/gpu-ribbon-integration.md) describe target
+FPS, native dimensions, fixed downsize and trace controls.
 
 For a headless wireframe and motion-blur preview:
 

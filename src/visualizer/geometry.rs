@@ -474,9 +474,9 @@ pub struct Projected {
 /// is always fully opaque; `fade` is how much opacity the farthest vertex loses.
 #[derive(Clone, Copy, Debug)]
 pub struct DepthOpacity {
-    closest: f32,
-    farthest: f32,
-    fade: f32,
+    pub(super) closest: f32,
+    pub(super) farthest: f32,
+    pub(super) fade: f32,
 }
 
 impl DepthOpacity {

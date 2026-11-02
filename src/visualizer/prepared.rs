@@ -14,6 +14,7 @@ use super::{
 pub(super) struct PreparedModel {
     pub name: Arc<str>,
     pub wireframe: Arc<Wireframe>,
+    pub gpu_topology: Arc<super::gpu_bridge::GpuTopology>,
     pub edge_order: EdgeOrder,
     pub slide_vertices: Arc<[bool]>,
     pub pois: Arc<[FocusPoi]>,
@@ -31,10 +32,12 @@ impl PreparedModel {
         let edge_order =
             EdgeOrder::new(wireframe.edges().len(), transition::model_seed(&model.name));
         let slide_parts = model.node_parts(SLIDE_NODE);
-        let slide_vertices = (0..wireframe.vertex_count())
+        let slide_vertices: Arc<[bool]> = (0..wireframe.vertex_count())
             .map(|index| slide_parts.contains(&wireframe.vertex_part(index)))
             .collect::<Vec<_>>()
             .into();
+        let gpu_topology =
+            super::gpu_bridge::GpuTopology::with_slide_vertices(&wireframe, &slide_vertices);
         let mut pois = Vec::new();
         let mut poi_vertices = BTreeMap::new();
         if let Some(weapon) = catalog.and_then(|catalog| catalog.weapons.get(&model.id)) {
@@ -67,6 +70,7 @@ impl PreparedModel {
         Self {
             name: Arc::from(model.name.as_str()),
             wireframe,
+            gpu_topology,
             edge_order,
             slide_vertices,
             pois: pois.into(),

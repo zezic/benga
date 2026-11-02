@@ -8,11 +8,15 @@
 //! JSON retains every sample; CSV gives summaries. PNG readbacks are untimed.
 
 mod fixture;
+mod fullscreen_capacity;
+mod fullscreen_fixtures;
 mod gpu;
 mod pipeline;
 mod poi_workload;
 mod transition;
 mod transparent_pixels;
+mod zoom_coverage;
+mod zoom_workload;
 
 use std::{
     fs::{self, File},
@@ -149,6 +153,8 @@ fn measures_frozen_motion() -> anyhow::Result<()> {
             ribbons: &[],
             model_composite: ModelComposite::Additive,
             model_edge_capacity: 0,
+            gpu_active: false,
+            gpu_models: &[],
         };
         baselines.push(json!({"width":width,"height":height,"timing":timing_json(&gpu.measure(empty, samples)?)}));
         for &motion in &motions {

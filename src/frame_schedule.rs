@@ -102,6 +102,28 @@ impl FrameRateLimit {
     }
 }
 
+/// One interval shared by redraw pacing and its render-budget feedback.
+/// Synchronized presentation cannot outrun the current display mode; matching
+/// its cadence keeps intentional FIFO waiting out of measured redraw work.
+/// Unsynchronized presentation retains the requested limit (or no limit).
+pub fn presentation_interval(
+    limit: FrameRateLimit,
+    reported_refresh_millihertz: Option<u32>,
+    vsync: bool,
+) -> Option<Duration> {
+    let requested = limit.interval();
+    if !vsync {
+        return requested;
+    }
+    let refresh = u64::from(
+        reported_refresh_millihertz
+            .filter(|rate| *rate > 0)
+            .unwrap_or(60_000),
+    );
+    let display = Duration::from_nanos(1_000_000_000_000_u64.div_ceil(refresh));
+    Some(requested.map_or(display, |interval| interval.max(display)))
+}
+
 impl fmt::Display for FrameRateLimit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.fps() {
@@ -204,6 +226,16 @@ impl FrameSchedule {
     }
 
     pub fn request_visible_frame(&mut self, now: Instant, limit: FrameRateLimit) {
+        self.request_visible_frame_with_interval(now, limit.interval());
+    }
+
+    /// Schedule the exact effective interval, including display rates which
+    /// have no corresponding settings choice, such as 144 Hz.
+    pub fn request_visible_frame_with_interval(
+        &mut self,
+        now: Instant,
+        interval: Option<Duration>,
+    ) {
         assert!(
             self.kind(now) == FrameKind::Visible,
             "only drawable windows request visible frames"
@@ -212,8 +244,12 @@ impl FrameSchedule {
             self.is_due(now),
             "timer frame requested before its deadline"
         );
+        assert!(
+            interval.is_none_or(|value| !value.is_zero()),
+            "visible frame interval must be positive"
+        );
         self.retry_at = None;
-        self.next_due = limit.interval().map_or(now, |interval| {
+        self.next_due = interval.map_or(now, |interval| {
             let remainder = now.duration_since(self.next_due).as_nanos() % interval.as_nanos();
             now + interval - Duration::from_nanos(remainder as u64)
         });
@@ -252,6 +288,81 @@ impl FrameSchedule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn synchronized_pacing_and_budget_share_the_display_limited_interval() {
+        let display = FrameRateLimit::Fps120.interval();
+        for limit in [
+            FrameRateLimit::Fps120,
+            FrameRateLimit::Fps180,
+            FrameRateLimit::Fps240,
+            FrameRateLimit::VSync,
+        ] {
+            assert_eq!(presentation_interval(limit, Some(120_000), true), display);
+        }
+        assert_eq!(
+            presentation_interval(FrameRateLimit::Fps60, Some(120_000), true),
+            FrameRateLimit::Fps60.interval()
+        );
+    }
+
+    #[test]
+    fn effective_presentation_interval_preserves_arbitrary_refresh_and_fallback() {
+        let display = Some(Duration::from_nanos(6_944_445));
+        assert_eq!(
+            presentation_interval(FrameRateLimit::Fps240, Some(144_000), true),
+            display
+        );
+        assert_eq!(
+            presentation_interval(FrameRateLimit::VSync, Some(144_000), true),
+            display
+        );
+        assert_eq!(
+            presentation_interval(FrameRateLimit::Fps120, Some(144_000), true),
+            FrameRateLimit::Fps120.interval()
+        );
+        for reported in [None, Some(0)] {
+            assert_eq!(
+                presentation_interval(FrameRateLimit::Fps240, reported, true),
+                FrameRateLimit::Fps60.interval()
+            );
+        }
+    }
+
+    #[test]
+    fn unsynchronized_pacing_keeps_the_requested_rate() {
+        assert_eq!(
+            presentation_interval(FrameRateLimit::Fps240, Some(120_000), false),
+            FrameRateLimit::Fps240.interval()
+        );
+        assert_eq!(
+            presentation_interval(FrameRateLimit::Fps180, None, false),
+            FrameRateLimit::Fps180.interval()
+        );
+        assert_eq!(
+            presentation_interval(FrameRateLimit::VSync, Some(120_000), false),
+            None
+        );
+    }
+
+    #[test]
+    fn arbitrary_effective_interval_preserves_phase_after_late_wakes() {
+        let interval = presentation_interval(FrameRateLimit::Fps240, Some(144_000), true).unwrap();
+        let start = Instant::now();
+        let mut schedule = FrameSchedule::new(start);
+        schedule.resized(SurfaceArea::NonEmpty, start);
+        schedule.request_visible_frame_with_interval(start, Some(interval));
+        assert_eq!(schedule.take_redraw_permit(), RedrawPermit::Requested);
+        for frame in 1..1000 {
+            let wake = start + interval * frame + Duration::from_micros(300);
+            schedule.request_visible_frame_with_interval(wake, Some(interval));
+            assert_eq!(schedule.take_redraw_permit(), RedrawPermit::Requested);
+            assert_eq!(schedule.deadline(wake), start + interval * (frame + 1));
+        }
+        let late = start + interval * 1004 + Duration::from_micros(300);
+        schedule.request_visible_frame_with_interval(late, Some(interval));
+        assert_eq!(schedule.deadline(late), start + interval * 1005);
+    }
 
     #[test]
     fn choices_cycle_in_both_directions_and_leave_vsync_unlimited() {

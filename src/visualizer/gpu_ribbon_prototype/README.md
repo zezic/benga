@@ -1,5 +1,10 @@
 # Throwaway GPU ribbon prototype
 
+The default production GPU renderer is separate from this frozen comparison
+harness. See [the integration guide](../../../docs/gpu-ribbon-integration.md)
+for normal launching, the R toggle, live FPS/frame-time/downsize graphs,
+compatibility fallbacks and validation.
+
 Question: can static GPU geometry and three projected frame samples replace
 CPU-expanded ribbons at full resolution, while following the actual middle pose?
 

@@ -1,12 +1,16 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-use std::{sync::mpsc::Receiver, time::Instant};
+use std::{
+    sync::mpsc::Receiver,
+    time::{Duration, Instant},
+};
 
 use anyhow::Context;
 use audio::capture_stream;
 use config::{Config, CursorVisibility, PreampDb};
 use frame_schedule::{
-    Adjustment, FrameKind, FrameSchedule, FrameTime, Occlusion, RedrawPermit, SurfaceArea,
+    presentation_interval, Adjustment, FrameKind, FrameSchedule, FrameTime, Occlusion,
+    RedrawPermit, SurfaceArea,
 };
 use render::RenderWindow;
 use saved::Saved;
@@ -24,6 +28,7 @@ use benga::{audio, config, frame_schedule, profile, render, visualizer, AudioEve
 use visualizer::{ControlAction, Dial, Ui, View};
 mod cli;
 mod desktop;
+mod frame_trace;
 mod saved;
 mod updater;
 
@@ -42,7 +47,11 @@ struct ActiveWindow {
 
 impl ActiveWindow {
     fn new(event_loop: &ActiveEventLoop) -> anyhow::Result<Self> {
-        let render = RenderWindow::new(event_loop, wgpu::DeviceDescriptor::default())?;
+        let preferences = wgpu::DeviceDescriptor {
+            required_features: wgpu::Features::TIMESTAMP_QUERY,
+            ..Default::default()
+        };
+        let render = RenderWindow::new(event_loop, preferences)?;
         let chrome = Chrome::new(&render.window)?;
         let mut view = View::fit(render.viewport());
         view.set_ui_scale(render.window.scale_factor());
@@ -77,16 +86,19 @@ struct App {
     modifiers: ModifiersState,
     frames: FrameSchedule,
     previous_frame: Instant,
+    previous_presentation: Option<Instant>,
     profile: Option<profile::Run>,
+    session_ephemeral: bool,
+    renderer_status: Option<String>,
+    frame_trace: Option<frame_trace::FrameTrace>,
 }
 
 impl App {
     fn frame_rate_limit(&self) -> frame_schedule::FrameRateLimit {
-        self.profile
-            .as_ref()
-            .map_or(self.settings.frame_rate_limit, |_| {
-                frame_schedule::FrameRateLimit::Fps240
-            })
+        self.profile.as_ref().map_or(
+            self.settings.frame_rate_limit,
+            profile::Run::target_frame_rate,
+        )
     }
 
     fn adjust_setting(&mut self, setting: Setting, adjustment: Adjustment) {
@@ -105,6 +117,9 @@ impl App {
             Setting::FrameRate => {
                 settings.frame_rate_limit = settings.frame_rate_limit.adjusted(adjustment);
                 self.frames.limit_changed(Instant::now());
+                if let WindowState::Active(window) = &mut self.state {
+                    window.visualizer_renderer.reset_frame_timing();
+                }
             }
             Setting::Zoom => {
                 settings.zoom = settings.zoom.adjusted(adjustment);
@@ -222,7 +237,13 @@ impl App {
             view,
             visualizer_renderer,
         } = &mut **window;
+        let renderer_key = matches!(
+            &event,
+            WindowEvent::KeyboardInput { event, .. }
+                if event.physical_key == PhysicalKey::Code(KeyCode::KeyR)
+        );
         if self.profile.is_some()
+            && !renderer_key
             && !matches!(
                 event,
                 WindowEvent::Resized(_) | WindowEvent::Occluded(_) | WindowEvent::RedrawRequested
@@ -232,11 +253,25 @@ impl App {
         }
         match event {
             WindowEvent::Resized(size) => {
+                if let Some(profile) = &mut self.profile {
+                    profile.pause_timing();
+                }
+                self.previous_presentation = None;
+                self.ui.pause_frame_performance();
+                visualizer_renderer.reset_frame_timing();
                 let fullscreen = render.window.fullscreen().is_some();
                 if self.settings.fullscreen != fullscreen {
                     self.settings.edit().fullscreen = fullscreen;
                 }
                 render.resize(size);
+                if let Some(trace) = &mut self.frame_trace {
+                    let extent = render.viewport();
+                    trace.extent(
+                        extent.width as u32,
+                        extent.height as u32,
+                        render.window.scale_factor(),
+                    );
+                }
                 chrome.refresh_native_metrics(&render.window);
                 *view = View::fit(render.viewport());
                 view.set_zoom(self.settings.zoom);
@@ -246,9 +281,19 @@ impl App {
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 view.set_ui_scale(scale_factor);
+                if let Some(trace) = &mut self.frame_trace {
+                    let extent = render.viewport();
+                    trace.extent(extent.width as u32, extent.height as u32, scale_factor);
+                }
                 chrome.refresh_native_metrics(&render.window);
             }
             WindowEvent::Occluded(occluded) => {
+                if let Some(profile) = &mut self.profile {
+                    profile.pause_timing();
+                }
+                self.previous_presentation = None;
+                self.ui.pause_frame_performance();
+                visualizer_renderer.reset_frame_timing();
                 let occlusion = if occluded {
                     Occlusion::Occluded
                 } else {
@@ -418,6 +463,12 @@ impl App {
             }
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
                 if let PhysicalKey::Code(key) = event.physical_key {
+                    if key == KeyCode::KeyR && !event.repeat {
+                        self.ui.toggle_gpu_ribbons();
+                        self.previous_presentation = None;
+                        visualizer_renderer.reset_frame_timing();
+                        return Ok(());
+                    }
                     if self.ui.startup_visible() {
                         return Ok(());
                     }
@@ -437,6 +488,11 @@ impl App {
                 }
             }
             WindowEvent::RedrawRequested => {
+                let frame_started = Instant::now();
+                let mut frame_capture = self
+                    .frame_trace
+                    .as_ref()
+                    .map(|_| frame_trace::Capture::new(frame_started));
                 while let Ok(event) = self.rx.try_recv() {
                     self.ui.audio_event(event);
                 }
@@ -470,6 +526,18 @@ impl App {
                         render.window.fullscreen().is_some(),
                         now,
                     );
+                if self.profile.is_some() {
+                    render.overlay_scene.reset();
+                    if self
+                        .profile
+                        .as_ref()
+                        .is_some_and(profile::Run::performance_overlay)
+                    {
+                        top_overlay =
+                            self.ui
+                                .draw_performance(&mut render.overlay_scene, view, now);
+                    }
+                }
                 if self.profile.is_none() {
                     if self.ui.draw_startup(&mut render.overlay_scene, view, now) {
                         top_overlay = true;
@@ -520,9 +588,16 @@ impl App {
                 render.scene.reset();
                 let frame = self.ui.draw(&mut render.scene, view, limit, frame_time);
                 let after_draw = Instant::now();
+                if let Some(capture) = &mut frame_capture {
+                    capture.ui_draw(before_draw, after_draw);
+                }
                 let changed =
                     matches!(frame.background, render::Frame::Rebuilt(_)) || frame.foreground;
                 let viewport = render.viewport();
+                let gpu_timing = (frame.overlay.gpu_active).then(|| {
+                    visualizer_renderer
+                        .gpu_timing_tag([viewport.width as u32, viewport.height as u32])
+                });
                 let content = render::FrameContent {
                     background: frame.background,
                     foreground: frame.foreground,
@@ -530,6 +605,7 @@ impl App {
                     raster_assets: &frame.raster_assets,
                     plates: frame.plate_instances,
                     plate_ink: frame.plate_ink,
+                    gpu_timing,
                 };
                 let overlay =
                     |device: &vello::util::DeviceHandle,
@@ -537,7 +613,9 @@ impl App {
                      background: &vello::wgpu::TextureView,
                      target: &vello::wgpu::TextureView,
                      foreground: Option<&vello::wgpu::TextureView>,
-                     top: Option<&vello::wgpu::TextureView>| {
+                     top: Option<&vello::wgpu::TextureView>,
+                     frame_timestamps: Option<&wgpu::QuerySet>| {
+                        visualizer_renderer.set_frame_end_timestamp(frame_timestamps);
                         visualizer_renderer.draw(
                             device,
                             encoder,
@@ -551,13 +629,150 @@ impl App {
                             top,
                         );
                     };
-                let presentation = if let Some(profile) = &mut self.profile {
-                    profile.present(before_draw, after_draw, changed, |completed| {
-                        render.present(content, completed, overlay)
-                    })?
-                } else {
-                    render.present(content, |_| {}, overlay)?
+                if let Some(capture) = &mut frame_capture {
+                    capture.begin_present();
+                }
+                let mut capture_stage = |stage: &render::Stage| {
+                    if let Some(capture) = &mut frame_capture {
+                        capture.stage(stage);
+                    }
                 };
+                let mut acquisition_wait = Duration::ZERO;
+                let presentation = if let Some(profile) = &mut self.profile {
+                    profile.present(
+                        frame_started,
+                        before_draw,
+                        after_draw,
+                        changed,
+                        |completed| {
+                            let acquire_started = Instant::now();
+                            render.present(
+                                content,
+                                |stage| {
+                                    if matches!(stage, render::Stage::Acquire) {
+                                        acquisition_wait = acquire_started.elapsed();
+                                    }
+                                    capture_stage(&stage);
+                                    completed(stage);
+                                },
+                                overlay,
+                            )
+                        },
+                    )?
+                } else {
+                    let acquire_started = Instant::now();
+                    render.present(
+                        content,
+                        |stage| {
+                            if matches!(stage, render::Stage::Acquire) {
+                                acquisition_wait = acquire_started.elapsed();
+                            }
+                            capture_stage(&stage);
+                        },
+                        overlay,
+                    )?
+                };
+                {
+                    let rendered_downsize = visualizer_renderer.ribbon_downsize();
+                    let rendered_extent = visualizer_renderer.ribbon_render_extent();
+                    let completed = Instant::now();
+                    if let (Some(trace), Some(capture)) = (&mut self.frame_trace, frame_capture) {
+                        trace.record(
+                            capture,
+                            completed,
+                            self.previous_presentation,
+                            matches!(presentation, render::Presentation::Presented),
+                            self.ui.gpu_ribbon_status(),
+                            self.ui.scene_name(),
+                        );
+                    }
+                    if matches!(presentation, render::Presentation::Presented) {
+                        if let Some(previous) = self.previous_presentation {
+                            let interval = completed.duration_since(previous);
+                            let work = completed.duration_since(frame_started);
+                            self.ui.record_frame_performance(
+                                completed,
+                                interval,
+                                work,
+                                rendered_extent.map_or(1.0, |_| rendered_downsize),
+                                rendered_extent,
+                            );
+                            let monitor = render.window.current_monitor();
+                            let reported_refresh_millihertz = monitor
+                                .as_ref()
+                                .and_then(|monitor| monitor.refresh_rate_millihertz())
+                                .filter(|rate| *rate > 0);
+                            let synchronized = matches!(
+                                render.surface_configuration().present_mode,
+                                wgpu::PresentMode::AutoVsync
+                                    | wgpu::PresentMode::Fifo
+                                    | wgpu::PresentMode::FifoRelaxed
+                            );
+                            let target = presentation_interval(
+                                limit,
+                                reported_refresh_millihertz,
+                                synchronized,
+                            )
+                            .unwrap_or_else(|| Duration::from_secs_f64(1.0 / 60.0));
+                            if let Some(profile) = &mut self.profile {
+                                profile.record_gpu_timing_support(render.gpu_timing_supported());
+                                profile.record_pacing_metadata(
+                                    monitor,
+                                    reported_refresh_millihertz,
+                                    target,
+                                    render.surface_configuration(),
+                                    || render.supported_present_modes(),
+                                );
+                            }
+                            if render.gpu_timing_supported() {
+                                // Results arrive asynchronously. Until a fresh
+                                // result is ready, keep the current quality;
+                                // never substitute a surface/VSync wait here.
+                                if let Some(timing) = render.take_gpu_frame_timing() {
+                                    if let Some(profile) = &mut self.profile {
+                                        profile.record_gpu_frame_timing(&timing);
+                                    }
+                                    visualizer_renderer.record_gpu_frame_timing(&timing, target);
+                                }
+                            } else {
+                                visualizer_renderer.record_frame_timing_with_acquisition(
+                                    interval,
+                                    work,
+                                    acquisition_wait,
+                                    target,
+                                );
+                            }
+                        }
+                        self.previous_presentation = Some(completed);
+                    } else {
+                        self.previous_presentation = None;
+                        self.ui.pause_frame_performance();
+                        visualizer_renderer.reset_frame_timing();
+                    }
+                    let backend = self.ui.gpu_ribbon_status();
+                    let status = if backend.starts_with("GPU") {
+                        match rendered_extent {
+                            Some([width, height]) => format!(
+                                "{backend} / {:.2}x downsize ({width} × {height})",
+                                rendered_downsize,
+                            ),
+                            None => backend.to_string(),
+                        }
+                    } else {
+                        backend.to_string()
+                    };
+                    if self.renderer_status.as_deref() != Some(status.as_str()) {
+                        render
+                            .window
+                            .set_title(&format!("Benga — {status} — R: CPU/GPU"));
+                        if self.session_ephemeral {
+                            eprintln!("Renderer: {status} (R switches CPU/GPU; session settings are not saved)");
+                        } else {
+                            eprintln!("Renderer: {status} (R switches CPU/GPU)");
+                        }
+                        self.renderer_status = Some(status);
+                    }
+                }
                 if matches!(presentation, render::Presentation::Unavailable) {
                     self.frames.surface_unavailable(Instant::now());
                 }
@@ -570,6 +785,9 @@ impl App {
 
 impl ApplicationHandler for App {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(trace) = &mut self.frame_trace {
+            trace.flush();
+        }
         self.sync_theme_preferences();
         if let Err(error) = self.settings.flush() {
             log::error!("{error:#}");
@@ -581,15 +799,66 @@ impl ApplicationHandler for App {
         if !matches!(self.state, WindowState::Suspended) {
             return;
         }
-        self.state = match ActiveWindow::new(event_loop) {
+        let window = ActiveWindow::new(event_loop).and_then(|mut window| {
+            if let Some(mode) = self
+                .profile
+                .as_ref()
+                .and_then(profile::Run::requested_present_mode)
+            {
+                window.render.set_present_mode(mode)?;
+            }
+            Ok(window)
+        });
+        self.state = match window {
             Ok(mut window) => {
+                if let Some(trace) = &mut self.frame_trace {
+                    let extent = window.render.viewport();
+                    trace.extent(
+                        extent.width as u32,
+                        extent.height as u32,
+                        window.render.window.scale_factor(),
+                    );
+                }
+                self.ui.set_gpu_ribbons_supported(
+                    visualizer::Renderer::gpu_ribbons_supported(&window.render.device().device)
+                        && visualizer::Renderer::gpu_ribbons_adapter_supported(
+                            window.render.device().adapter(),
+                        ),
+                );
+                let limits = window.render.device().device.limits();
+                self.ui.set_gpu_ribbon_edge_capacity(
+                    (u64::from(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size)
+                        / (6 * 64)) as usize,
+                );
+                self.renderer_status = None;
+                window
+                    .visualizer_renderer
+                    .set_adaptive_ribbon_resolution(true);
+                if let Some(profile) = &self.profile {
+                    window
+                        .visualizer_renderer
+                        .set_fixed_ribbon_downsize(profile.ribbon_downsize());
+                }
                 std::thread::spawn(updater::cleanup_after_start);
                 window.view.set_zoom(self.settings.zoom);
                 window.render.window.set_fullscreen(
-                    self.settings
-                        .fullscreen
-                        .then_some(Fullscreen::Borderless(None)),
+                    (self.settings.fullscreen
+                        && self
+                            .profile
+                            .as_ref()
+                            .is_none_or(|p| p.requested_extent().is_none()))
+                    .then_some(Fullscreen::Borderless(None)),
                 );
+                if let Some([width, height]) = self
+                    .profile
+                    .as_ref()
+                    .and_then(profile::Run::requested_extent)
+                {
+                    let _ = window
+                        .render
+                        .window
+                        .request_inner_size(winit::dpi::PhysicalSize::new(width, height));
+                }
                 let now = Instant::now();
                 self.frames
                     .resized(window.render.window.inner_size().into(), now);
@@ -604,9 +873,13 @@ impl ApplicationHandler for App {
             }
         };
         self.previous_frame = Instant::now();
+        self.previous_presentation = None;
+        self.ui.pause_frame_performance();
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        self.previous_presentation = None;
+        self.ui.pause_frame_performance();
         self.desktop.set_pointer(None);
         self.modifiers = ModifiersState::empty();
         if matches!(self.state, WindowState::Active(_)) {
@@ -661,11 +934,24 @@ impl ApplicationHandler for App {
         if self.frames.is_due(now) {
             match self.frames.kind(now) {
                 FrameKind::Visible => {
-                    self.frames
-                        .request_visible_frame(now, self.frame_rate_limit());
                     let WindowState::Active(window) = &self.state else {
                         unreachable!("a drawable surface owns its window")
                     };
+                    let refresh = window
+                        .render
+                        .window
+                        .current_monitor()
+                        .and_then(|monitor| monitor.refresh_rate_millihertz());
+                    let synchronized = matches!(
+                        window.render.surface_configuration().present_mode,
+                        wgpu::PresentMode::AutoVsync
+                            | wgpu::PresentMode::Fifo
+                            | wgpu::PresentMode::FifoRelaxed
+                    );
+                    let interval =
+                        presentation_interval(self.frame_rate_limit(), refresh, synchronized);
+                    self.frames
+                        .request_visible_frame_with_interval(now, interval);
                     window.render.window.request_redraw();
                 }
                 FrameKind::Background => self.frames.background_tick_finished(now),
@@ -685,7 +971,7 @@ fn main() -> anyhow::Result<()> {
     if updater::run_helper()? {
         return Ok(());
     }
-    match cli::parse(std::env::args_os().skip(1))? {
+    let playback = match cli::parse(std::env::args_os().skip(1))? {
         cli::Command::Help => {
             cli::help();
             return Ok(());
@@ -709,12 +995,36 @@ fn main() -> anyhow::Result<()> {
             };
             return benga::export::run(options, &settings);
         }
-        cli::Command::Desktop | cli::Command::Profile => {}
-    }
-    let profile = profile::Run::from_args()?;
-    let settings =
+        command @ (cli::Command::Desktop
+        | cli::Command::Profile
+        | cli::Command::Experimental { .. }
+        | cli::Command::Cpu { .. }) => command.playback().expect("desktop playback command"),
+    };
+    let profile = if playback.profile {
+        profile::Run::from_args()?
+    } else {
+        None
+    };
+    anyhow::ensure!(
+        playback.gpu_ribbons
+            || profile
+                .as_ref()
+                .is_none_or(|p| p.ribbon_downsize().is_none()),
+        "BENGA_PROFILE_RIBBON_DOWNSIZE requires GPU ribbons (omit --cpu-ribbons)"
+    );
+    let mut settings =
         Saved::<Config>::load(config::config_file()?, Some(config::legacy_config_file()?))?;
+    if playback.ephemeral {
+        settings.make_ephemeral();
+    }
+    if playback.trial_shutter {
+        settings.edit().shutter_frames = config::ShutterFrames::try_from(2.0)?;
+    }
     let mut ui = Ui::new(&settings)?;
+    ui.set_gpu_ribbons(true);
+    if !playback.gpu_ribbons {
+        ui.toggle_gpu_ribbons();
+    }
     if profile.is_some() {
         ui.dismiss_startup();
     }
@@ -748,7 +1058,11 @@ fn main() -> anyhow::Result<()> {
         modifiers: ModifiersState::empty(),
         frames: FrameSchedule::new(Instant::now()),
         previous_frame: Instant::now(),
+        previous_presentation: None,
         profile,
+        session_ephemeral: playback.ephemeral,
+        renderer_status: None,
+        frame_trace: frame_trace::FrameTrace::from_env(true),
     };
     let result = event_loop.run_app(&mut app);
     app.settings.flush()?;
@@ -766,6 +1080,13 @@ fn main() -> anyhow::Result<()> {
             );
         }
         profile.report()?;
+        if let (Some(requested), WindowState::Active(window)) =
+            (profile.requested_extent(), &app.state)
+        {
+            let size = window.render.viewport();
+            let actual = [size.width as u32, size.height as u32];
+            anyhow::ensure!(actual == requested, "Requested profile extent {requested:?} differs from actual {actual:?}; reported timings cover the actual extent");
+        }
     }
     Ok(())
 }

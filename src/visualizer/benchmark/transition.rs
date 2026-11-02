@@ -38,6 +38,8 @@ impl Output {
             ribbons: &self.ribbons,
             model_composite: ModelComposite::Additive,
             model_edge_capacity: 0,
+            gpu_active: false,
+            gpu_models: &[],
         }
     }
 
@@ -183,6 +185,7 @@ fn step_scene(scene: &mut Scene, width: u32, height: u32, end: AudioTime, shake:
         0.0,
         &mut output.lines,
         &mut output.ribbons,
+        None,
     );
     output.active_edges = scene.current.as_ref().map_or(0, |model| model.active_edges)
         + scene
@@ -228,6 +231,7 @@ fn step_baseline(
             0.0,
             &mut output.lines,
             &mut output.ribbons,
+            None,
         );
         output.active_edges += runtime.active_edges;
         output.scale_since(line_start, ribbon_start, alpha);

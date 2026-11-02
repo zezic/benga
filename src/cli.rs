@@ -6,9 +6,37 @@ use benga::{config::PreampDb, export::Options};
 pub enum Command {
     Desktop,
     Profile,
+    Experimental { profile: bool },
+    Cpu { profile: bool },
     Render(Options),
     Help,
     Version,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Playback {
+    pub gpu_ribbons: bool,
+    pub profile: bool,
+    pub ephemeral: bool,
+    pub trial_shutter: bool,
+}
+
+impl Command {
+    pub fn playback(&self) -> Option<Playback> {
+        let (gpu_ribbons, profile, trial_shutter) = match self {
+            Self::Desktop => (true, false, false),
+            Self::Profile => (true, true, false),
+            Self::Experimental { profile } => (true, *profile, true),
+            Self::Cpu { profile } => (false, *profile, false),
+            _ => return None,
+        };
+        Some(Playback {
+            gpu_ribbons,
+            profile,
+            ephemeral: profile || trial_shutter,
+            trial_shutter,
+        })
+    }
 }
 
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> anyhow::Result<Command> {
@@ -23,6 +51,29 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> anyhow::Result<Command
             Some("--profile") => return Ok(Command::Profile),
             _ => {}
         }
+    }
+    if args
+        .iter()
+        .any(|arg| arg == "--experimental-gpu-ribbons" || arg == "--cpu-ribbons")
+    {
+        let mut renderer = None;
+        let mut profile = false;
+        for arg in args {
+            match arg.to_str() {
+                Some("--experimental-gpu-ribbons") if renderer.is_none() => renderer = Some(true),
+                Some("--cpu-ribbons") if renderer.is_none() => renderer = Some(false),
+                Some("--profile") if !profile => profile = true,
+                _ => bail!(
+                    "Unknown or conflicting playback argument: {}. Run benga --help for usage.",
+                    arg.to_string_lossy()
+                ),
+            }
+        }
+        return Ok(if renderer == Some(true) {
+            Command::Experimental { profile }
+        } else {
+            Command::Cpu { profile }
+        });
     }
     let mut input = None;
     let mut output = None;
@@ -122,7 +173,15 @@ pub fn help() {
     println!(
         "Benga {} — desktop audio visualizer
 Usage: benga [--version | --help | --profile]
+       benga --cpu-ribbons [--profile]
+       benga --experimental-gpu-ribbons [--profile]
        benga --render AUDIO --output VIDEO.mp4 [OPTIONS]
+
+Playback uses GPU projection and ribbons by default. R switches GPU/CPU renderer.
+The active backend and any CPU fallback appear in the window title.
+  --cpu-ribbons              Start with CPU ribbons for comparison.
+  --experimental-gpu-ribbons  Compatibility trial mode; GPU projection and ribbons.
+                             Starts at shutter 2; session settings are not saved.
 
 Render options:
   --fps NUMBER       Frames per second, 10–240; decimals accepted (default: 60)
@@ -157,6 +216,101 @@ mod tests {
         assert!(matches!(parse_text(&["--help"])?, Command::Help));
         assert!(matches!(parse_text(&["-h"])?, Command::Help));
         assert!(matches!(parse_text(&["--version"])?, Command::Version));
+        Ok(())
+    }
+
+    #[test]
+    fn default_playback_and_profile_select_gpu_without_a_trial_flag() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_text(&[])?.playback(),
+            Some(Playback {
+                gpu_ribbons: true,
+                profile: false,
+                ephemeral: false,
+                trial_shutter: false
+            })
+        );
+        assert_eq!(
+            parse_text(&["--profile"])?.playback(),
+            Some(Playback {
+                gpu_ribbons: true,
+                profile: true,
+                ephemeral: true,
+                trial_shutter: false
+            })
+        );
+        assert_eq!(
+            parse_text(&["--experimental-gpu-ribbons"])?.playback(),
+            Some(Playback {
+                gpu_ribbons: true,
+                profile: false,
+                ephemeral: true,
+                trial_shutter: true
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cpu_comparison_is_explicit_and_can_be_profiled() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_text(&["--cpu-ribbons"])?.playback(),
+            Some(Playback {
+                gpu_ribbons: false,
+                profile: false,
+                ephemeral: false,
+                trial_shutter: false
+            })
+        );
+        for args in [
+            ["--cpu-ribbons", "--profile"],
+            ["--profile", "--cpu-ribbons"],
+        ] {
+            assert_eq!(
+                parse_text(&args)?.playback(),
+                Some(Playback {
+                    gpu_ribbons: false,
+                    profile: true,
+                    ephemeral: true,
+                    trial_shutter: false
+                })
+            );
+        }
+        for args in [
+            vec!["--cpu-ribbons", "--cpu-ribbons"],
+            vec!["--cpu-ribbons", "--experimental-gpu-ribbons"],
+            vec!["--cpu-ribbons", "--profile", "--profile"],
+            vec!["--cpu-ribbons", "--render", "song.wav"],
+            vec!["--cpu-ribbons", "--help"],
+        ] {
+            assert!(parse_text(&args).is_err(), "{args:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn experimental_playback_is_explicit_and_can_be_profiled() -> anyhow::Result<()> {
+        assert!(matches!(
+            parse_text(&["--experimental-gpu-ribbons"])?,
+            Command::Experimental { profile: false }
+        ));
+        for args in [
+            ["--experimental-gpu-ribbons", "--profile"],
+            ["--profile", "--experimental-gpu-ribbons"],
+        ] {
+            assert!(matches!(
+                parse_text(&args)?,
+                Command::Experimental { profile: true }
+            ));
+        }
+        for args in [
+            vec!["--experimental-gpu-ribbons", "--experimental-gpu-ribbons"],
+            vec!["--experimental-gpu-ribbons", "--profile", "--profile"],
+            vec!["--experimental-gpu-ribbons", "--render", "song.wav"],
+            vec!["--experimental-gpu-ribbons", "--help"],
+        ] {
+            assert!(parse_text(&args).is_err(), "{args:?}");
+        }
         Ok(())
     }
 

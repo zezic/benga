@@ -5,12 +5,31 @@
 //! BENGA_PIPELINE_EXTENTS / BENGA_PIPELINE_FPS customize the bounded workload. Each extent is physical
 //! pixels. Default 5120x2880 represents the measured backing extent of the user's
 //! 3840x2160 display in its scaled mode; it is not inferred from UI scale.
-//! BENGA_PIPELINE_WORKLOAD selects normal/poi_static/poi_flight;
-//! BENGA_PIPELINE_COMPONENTS selects full/no_model/no_foreground;
+//! BENGA_PIPELINE_WORKLOAD selects normal/poi_static/poi_flight/zoom_stress;
+//! zoom_stress uses BENGA_PIPELINE_ZOOM_NEAR/FAR/MIN/MAX/HZ camera inputs.
+//! BENGA_PIPELINE_MAX_FRAME_MS / MIN_PEAK_MS enforce a red-capable timing verdict
+//! after results are saved (full frame completion, excluding query readback).
+//! BENGA_PIPELINE_COMPONENTS selects full/no_model/no_foreground/no_gpu_prepare/
+//! no_model_no_foreground. no_gpu_prepare retains ribbons prepared by the first
+//! three GPU frames while CPU animation/UI continue; it requires GPU ribbons,
+//! at least three warmup frames and a fixed resolution policy.
 //! BENGA_PIPELINE_CONFIG_PATH reads a Config without modifying it. Optional
 //! BENGA_PIPELINE_CPU_WARMUP advances complete UI state before GPU warmup.
 //! BENGA_PIPELINE_PREVIEW_FRAMES captures comma-separated, zero-based measured
 //! frame indices as PNGs after rendering, outside every reported frame cost.
+//! BENGA_PIPELINE_GPU_RIBBONS=1 enables production GPU projection and ribbons;
+//! it requires shutter 2 and swept motion in the selected config. Use separate
+//! result directories with the same config/workload for CPU/GPU comparisons.
+//! GPU runs retain full resolution by default. BENGA_PIPELINE_ADAPTIVE_RIBBONS=1
+//! replays isolated completion costs into the live resolution controller, using
+//! BENGA_PIPELINE_FPS as its target. BENGA_PIPELINE_RIBBON_DOWNSIZE fixes a linear
+//! downsize factor for matched image/performance comparisons instead.
+//! BENGA_PIPELINE_RIBBON_DOWNSIZES sweeps comma-separated fixed factors with
+//! fresh, identical workload setup per case; it excludes the singular/adaptive knobs.
+//! BENGA_PIPELINE_COVERAGE=1 reads the last frame's prepared raster support
+//! outside timing, for asset budgeting; no playback readback is introduced.
+//! BENGA_PIPELINE_MODEL selects an asset ID for normal/zoom runs; the default
+//! selects the most detailed loaded model.
 
 use std::{
     fs,
@@ -41,6 +60,8 @@ use super::super::{
 };
 use super::{poi_workload, summary};
 
+use super::zoom_workload;
+
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy)]
@@ -48,6 +69,7 @@ enum WorkloadMode {
     Normal,
     PoiStatic,
     PoiFlight,
+    ZoomStress,
 }
 
 impl WorkloadMode {
@@ -59,6 +81,7 @@ impl WorkloadMode {
             "normal" => Ok(Self::Normal),
             "poi_static" => Ok(Self::PoiStatic),
             "poi_flight" => Ok(Self::PoiFlight),
+            "zoom_stress" => Ok(Self::ZoomStress),
             other => anyhow::bail!("unknown pipeline workload {other}"),
         }
     }
@@ -68,12 +91,13 @@ impl WorkloadMode {
             Self::Normal => "normal",
             Self::PoiStatic => "poi_static",
             Self::PoiFlight => "poi_flight",
+            Self::ZoomStress => "zoom_stress",
         }
     }
 
     fn poi(self) -> Option<poi_workload::Mode> {
         match self {
-            Self::Normal => None,
+            Self::Normal | Self::ZoomStress => None,
             Self::PoiStatic => Some(poi_workload::Mode::Static),
             Self::PoiFlight => Some(poi_workload::Mode::Flight),
         }
@@ -85,6 +109,8 @@ enum Components {
     Full,
     NoModel,
     NoForeground,
+    NoGpuPrepare,
+    NoModelNoForeground,
 }
 
 impl Components {
@@ -93,7 +119,21 @@ impl Components {
             Self::Full => "full",
             Self::NoModel => "no_model",
             Self::NoForeground => "no_foreground",
+            Self::NoGpuPrepare => "no_gpu_prepare",
+            Self::NoModelNoForeground => "no_model_no_foreground",
         }
+    }
+
+    fn omits_model(self) -> bool {
+        matches!(self, Self::NoModel | Self::NoModelNoForeground)
+    }
+
+    fn omits_foreground(self) -> bool {
+        matches!(self, Self::NoForeground | Self::NoModelNoForeground)
+    }
+
+    fn freezes_gpu_preparation(self) -> bool {
+        matches!(self, Self::NoGpuPrepare)
     }
 }
 
@@ -105,6 +145,8 @@ fn components() -> anyhow::Result<Vec<Components>> {
             "full" => Ok(Components::Full),
             "no_model" => Ok(Components::NoModel),
             "no_foreground" => Ok(Components::NoForeground),
+            "no_gpu_prepare" => Ok(Components::NoGpuPrepare),
+            "no_model_no_foreground" => Ok(Components::NoModelNoForeground),
             other => anyhow::bail!("unknown pipeline component policy {other}"),
         })
         .collect()
@@ -366,7 +408,7 @@ impl Pipeline {
             self.background_cache
                 .benchmark_invalidate(&mut self.renderer);
         }
-        let foreground_enabled = !matches!(components, Components::NoForeground);
+        let foreground_enabled = !components.omits_foreground();
         if foreground_enabled && !frame.plate_instances.is_empty() {
             self.plate_mask.render(
                 &handle.device,
@@ -418,13 +460,17 @@ impl Pipeline {
         let mut encoder = handle.device.create_command_encoder(&Default::default());
         self.model_renderer
             .benchmark_timestamps(&self.queries, 0, 1);
-        let model_overlay = if matches!(components, Components::NoModel) {
+        let model_overlay = if components.omits_model() {
             super::super::Frame {
                 lines: frame.overlay.lines,
                 model_lines: &[],
                 ribbons: &[],
                 model_composite: frame.overlay.model_composite,
                 model_edge_capacity: 0,
+                // Omit geometry while preserving the selected backend's full
+                // resolution float composition and resolve costs.
+                gpu_active: frame.overlay.gpu_active,
+                gpu_models: &[],
             }
         } else {
             frame.overlay
@@ -482,21 +528,30 @@ impl Pipeline {
     }
 }
 
-fn select_heaviest(ui: &mut Ui) -> anyhow::Result<(String, usize)> {
+fn select_benchmark_model(ui: &mut Ui) -> anyhow::Result<(String, usize)> {
     let visualizer = ui.benchmark_visualizer_mut();
     visualizer.load_models();
     let Models::Ready(models) = &mut visualizer.models else {
         anyhow::bail!("models did not load")
     };
     let mut largest = (String::new(), 0);
+    let requested = std::env::var("BENGA_PIPELINE_MODEL").ok();
     for _ in 0..models.position().1 {
         let model = models.current();
         let count = model.wireframe(visualizer.crease_threshold).edges().len();
-        if count > largest.1 {
+        if requested
+            .as_ref()
+            .map_or(count > largest.1, |id| *id == model.id)
+        {
             largest = (model.id.clone(), count);
         }
         models.navigate(Adjustment::Increase);
     }
+    ensure!(
+        !largest.0.is_empty(),
+        "requested benchmark model was not found: {:?}",
+        requested
+    );
     for _ in 0..models.position().1 {
         if models.current().id == largest.0 {
             break;
@@ -571,9 +626,107 @@ fn measures_full_presentation_pipeline() -> anyhow::Result<()> {
         "frame counts exceed bounded benchmark limits"
     );
     let force_background = std::env::var_os("BENGA_PIPELINE_FORCE_BACKGROUND").is_some();
+    let capture_coverage = std::env::var("BENGA_PIPELINE_COVERAGE").as_deref() == Ok("1");
+    let gpu_ribbons = match std::env::var("BENGA_PIPELINE_GPU_RIBBONS").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("0" | "false") => false,
+        Ok("1" | "true") => true,
+        _ => anyhow::bail!("BENGA_PIPELINE_GPU_RIBBONS must be 0, 1, false, or true"),
+    };
+    let adaptive_ribbons = match std::env::var("BENGA_PIPELINE_ADAPTIVE_RIBBONS").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("0" | "false") => false,
+        Ok("1" | "true") => true,
+        _ => anyhow::bail!("BENGA_PIPELINE_ADAPTIVE_RIBBONS must be 0, 1, false, or true"),
+    };
+    let fixed_downsize = std::env::var("BENGA_PIPELINE_RIBBON_DOWNSIZE")
+        .ok()
+        .map(|value| -> anyhow::Result<f32> {
+            let factor: f32 = value
+                .parse()
+                .context("invalid BENGA_PIPELINE_RIBBON_DOWNSIZE")?;
+            ensure!(
+                factor.is_finite() && factor >= 1.0,
+                "BENGA_PIPELINE_RIBBON_DOWNSIZE must be finite and at least 1"
+            );
+            Ok(factor)
+        })
+        .transpose()?;
+    let fixed_downsizes = std::env::var("BENGA_PIPELINE_RIBBON_DOWNSIZES")
+        .ok()
+        .map(|value| -> anyhow::Result<Vec<f32>> {
+            let factors = value
+                .split(',')
+                .map(|value| {
+                    let factor: f32 = value
+                        .trim()
+                        .parse()
+                        .context("invalid BENGA_PIPELINE_RIBBON_DOWNSIZES")?;
+                    ensure!(
+                        factor.is_finite() && factor >= 1.0,
+                        "BENGA_PIPELINE_RIBBON_DOWNSIZES factors must be finite and at least 1"
+                    );
+                    Ok(factor)
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            ensure!(
+                !factors.is_empty() && factors.len() <= 32,
+                "BENGA_PIPELINE_RIBBON_DOWNSIZES requires 1..=32 factors"
+            );
+            Ok(factors)
+        })
+        .transpose()?;
+    ensure!(
+        gpu_ribbons || (!adaptive_ribbons && fixed_downsize.is_none() && fixed_downsizes.is_none()),
+        "ribbon resolution controls require BENGA_PIPELINE_GPU_RIBBONS=1"
+    );
+    ensure!(
+        !adaptive_ribbons || fixed_downsize.is_none(),
+        "choose either adaptive ribbon resolution or a fixed downsize"
+    );
+    ensure!(
+        fixed_downsizes.is_none() || (!adaptive_ribbons && fixed_downsize.is_none()),
+        "BENGA_PIPELINE_RIBBON_DOWNSIZES excludes the singular downsize and adaptive resolution options"
+    );
+    let quality_cases: Vec<Option<f32>> = fixed_downsizes.as_ref().map_or_else(
+        || vec![fixed_downsize],
+        |factors| factors.iter().copied().map(Some).collect(),
+    );
     let workload_mode = WorkloadMode::from_env()?;
+    let zoom_workload = matches!(workload_mode, WorkloadMode::ZoomStress)
+        .then(zoom_workload::ZoomWorkload::from_env)
+        .transpose()?;
+    let timing_limit = |name: &str| -> anyhow::Result<Option<f64>> {
+        std::env::var(name)
+            .ok()
+            .map(|value| {
+                let value: f64 = value.parse().with_context(|| format!("invalid {name}"))?;
+                ensure!(
+                    value.is_finite() && value > 0.0,
+                    "{name} must be positive and finite"
+                );
+                Ok(value)
+            })
+            .transpose()
+    };
+    let max_frame_ms = timing_limit("BENGA_PIPELINE_MAX_FRAME_MS")?;
+    let min_peak_ms = timing_limit("BENGA_PIPELINE_MIN_PEAK_MS")?;
     let components = components()?;
+    if components
+        .iter()
+        .any(|policy| policy.freezes_gpu_preparation())
+    {
+        ensure!(
+            gpu_ribbons && !adaptive_ribbons && warmup >= 3,
+            "no_gpu_prepare requires GPU ribbons, a fixed resolution policy and at least three GPU warmup frames"
+        );
+    }
     let base_config = base_config()?;
+    if gpu_ribbons {
+        ensure!(
+            base_config.shutter_frames.frames() == 2.0
+                && base_config.model_motion == super::super::ModelMotion::Swept,
+            "GPU pipeline benchmark requires shutter 2 and swept model motion"
+        );
+    }
     let preview_frames: Vec<usize> = std::env::var("BENGA_PIPELINE_PREVIEW_FRAMES")
         .unwrap_or_default()
         .split(',')
@@ -581,7 +734,12 @@ fn measures_full_presentation_pipeline() -> anyhow::Result<()> {
         .map(|value| value.trim().parse())
         .collect::<Result<_, _>>()?;
     let mut cases = Vec::new();
-    for (width, height) in extents()? {
+    for ((width, height), fixed_downsize) in extents()?.into_iter().flat_map(|extent| {
+        quality_cases
+            .iter()
+            .copied()
+            .map(move |downsize| (extent, downsize))
+    }) {
         for &components in &components {
             let mut config = base_config.clone();
             config.model_rotation = super::super::ModelRotation::Locked;
@@ -604,13 +762,29 @@ fn measures_full_presentation_pipeline() -> anyhow::Result<()> {
             view.set_ui_scale(2.0);
             view.set_zoom(config.zoom);
             let mut pipeline = Pipeline::new(width, height)?;
+            pipeline
+                .model_renderer
+                .set_adaptive_ribbon_resolution(adaptive_ribbons);
+            pipeline
+                .model_renderer
+                .benchmark_ribbon_downsize(fixed_downsize);
+            if gpu_ribbons {
+                ensure!(
+                    Renderer::gpu_ribbons_supported(&pipeline.handle().device)
+                        && Renderer::gpu_ribbons_adapter_supported(pipeline.handle().adapter()),
+                    "integrated GPU ribbons unsupported on the benchmark adapter"
+                );
+                // Toggle the model directly so neither path adds an experiment
+                // badge to the otherwise identical retained-UI workload.
+                ui.benchmark_visualizer_mut().set_gpu_ribbons(true);
+            }
             ui.set_plate_mask(Some(pipeline.plate_mask.image()));
             ui.audio_event(AudioEvent::Config { samplerate: 48_000 });
             let workload_metadata = if let Some(mode) = workload_mode.poi() {
                 poi_workload::configure(&mut ui, mode)?
             } else {
-                let (model, raw_edges) = select_heaviest(&mut ui)?;
-                json!({"model_id":model,"raw_edges":raw_edges})
+                let (model, raw_edges) = select_benchmark_model(&mut ui)?;
+                json!({"model_id":model,"raw_edges":raw_edges,"zoom_script":zoom_workload.as_ref().map(|script| script.metadata())})
             };
             let origin = Instant::now() + Duration::from_secs(12);
             let mut foreground = Scene::new();
@@ -633,7 +807,16 @@ fn measures_full_presentation_pipeline() -> anyhow::Result<()> {
             let mut asset_counts = Vec::new();
             let mut poi_events = Vec::new();
             let mut poi_frames = Vec::new();
+            let mut zoom_frames = Vec::new();
             let mut previews = Vec::new();
+            let mut raster_coverage = json!(null);
+            let mut projected_pose_bytes = Vec::new();
+            let mut projection_parameter_bytes = Vec::new();
+            let mut edge_style_bytes = Vec::new();
+            let mut cpu_geometry_bytes = Vec::new();
+            let mut gpu_model_counts = Vec::new();
+            let mut ribbon_downsizes = Vec::new();
+            let mut ribbon_render_extents = Vec::new();
             for index in 0..cpu_warmup + warmup + measured {
                 let start = origin + Duration::from_secs_f64(index as f64 / f64::from(fps));
                 let end = origin + Duration::from_secs_f64((index + 1) as f64 / f64::from(fps));
@@ -647,6 +830,8 @@ fn measures_full_presentation_pipeline() -> anyhow::Result<()> {
                 });
                 let event = if let Some(mode) = workload_mode.poi() {
                     poi_workload::drive(&mut ui, index, fps, mode)
+                } else if let Some(script) = &zoom_workload {
+                    script.drive(&mut ui, &mut view, (index + 1) as f64 / f64::from(fps))
                 } else {
                     controlled_motion(&mut ui, (index + 1) as f32 / fps as f32);
                     json!(null)
@@ -665,6 +850,46 @@ fn measures_full_presentation_pipeline() -> anyhow::Result<()> {
                 );
                 let draw_duration = draw_start.elapsed().as_secs_f64() * 1000.0;
                 let rebuilt = matches!(frame.background, RetainedFrame::Rebuilt(_));
+                ensure!(
+                    frame.overlay.gpu_active == gpu_ribbons,
+                    "requested pipeline renderer fell back unexpectedly"
+                );
+                if gpu_ribbons {
+                    ensure!(
+                        frame.overlay.model_lines.is_empty() && frame.overlay.ribbons.is_empty(),
+                        "GPU path generated CPU model lines/ribbons"
+                    );
+                    ensure!(
+                        frame
+                            .overlay
+                            .gpu_models
+                            .iter()
+                            .all(|model| model.projection.is_some() && model.projected.is_empty()),
+                        "production GPU path generated a CPU-projected model pose"
+                    );
+                }
+                let projected_bytes = frame
+                    .overlay
+                    .gpu_models
+                    .iter()
+                    .map(|model| model.projected.len() * std::mem::size_of::<[f32; 4]>())
+                    .sum::<usize>();
+                let style_bytes = frame
+                    .overlay
+                    .gpu_models
+                    .iter()
+                    .map(|model| model.styles.len() * std::mem::size_of::<[f32; 4]>())
+                    .sum::<usize>();
+                let projection_bytes = frame
+                    .overlay
+                    .gpu_models
+                    .iter()
+                    .filter_map(|model| model.projection.as_ref())
+                    .map(std::mem::size_of_val)
+                    .sum::<usize>();
+                let geometry_bytes = std::mem::size_of_val(frame.overlay.model_lines)
+                    + std::mem::size_of_val(frame.overlay.ribbons);
+                let gpu_models = frame.overlay.gpu_models.len();
                 let count = frame.overlay.ribbons.len() + frame.overlay.model_lines.len() * 2;
                 // Diagnostic only: scan outside Ui.draw and the explicitly
                 // summed frame cost. Exactly zero vertex alphas cannot tint
@@ -698,6 +923,12 @@ fn measures_full_presentation_pipeline() -> anyhow::Result<()> {
                     // The first GPU frame realizes the current retained face.
                     continue;
                 }
+                // Keep a real three-pose ribbon history, then omit projection,
+                // projection/style uploads and preparation while UI/audio move.
+                // This attributes fixed render work; it is not a matched image.
+                pipeline.model_renderer.benchmark_freeze_gpu(
+                    components.freezes_gpu_preparation() && index - cpu_warmup >= 3,
+                );
                 let rendered = pipeline.render(
                     frame,
                     &foreground,
@@ -713,6 +944,86 @@ fn measures_full_presentation_pipeline() -> anyhow::Result<()> {
                     + draw_duration
                     + rendered.cpu_encode_ms
                     + rendered.completion_wait_ms;
+                // Capture the quality actually used before feedback chooses
+                // the next frame. This is isolated completion feedback, not
+                // native presentation cadence or GPU execution time.
+                let ribbon_downsize = pipeline.model_renderer.ribbon_downsize();
+                let ribbon_render_extent = pipeline.model_renderer.ribbon_render_extent();
+                if adaptive_ribbons {
+                    let completion = Duration::from_secs_f64(total / 1000.0);
+                    pipeline.model_renderer.record_frame_timing(
+                        completion,
+                        completion,
+                        Duration::from_secs_f64(1.0 / f64::from(fps)),
+                    );
+                }
+                if capture_coverage && gpu_ribbons && index + 1 == cpu_warmup + warmup + measured {
+                    raster_coverage = pipeline
+                        .model_renderer
+                        .benchmark_coverage(pipeline.handle())?;
+                    let prepared_frame = if components.freezes_gpu_preparation() {
+                        cpu_warmup + 2
+                    } else {
+                        index
+                    };
+                    raster_coverage["animation_frame"] = json!(prepared_frame);
+                    raster_coverage["animation_time_seconds"] =
+                        json!((prepared_frame + 1) as f64 / f64::from(fps));
+                    let visualizer = ui.benchmark_visualizer_mut();
+                    raster_coverage["model_names"] = json!(visualizer
+                        .scene
+                        .current
+                        .iter()
+                        .chain(visualizer.scene.outgoing.iter())
+                        .map(|model| model.name())
+                        .collect::<Vec<_>>());
+                    if let Some(slots) = raster_coverage["models"].as_array_mut() {
+                        for slot in slots {
+                            let generation = slot["animation_generation"].as_u64();
+                            let Some(model) = visualizer
+                                .scene
+                                .current
+                                .iter()
+                                .chain(visualizer.scene.outgoing.iter())
+                                .find(|model| Some(model.gpu_generation) == generation)
+                            else {
+                                continue;
+                            };
+                            slot["model_name"] = json!(model.name());
+                            let asset = match &visualizer.models {
+                                Models::Ready(models) if models.current().name == model.name() => {
+                                    Some(models.current())
+                                }
+                                _ => None,
+                            };
+                            if let Some(asset) = asset {
+                                slot["asset_id"] = json!(asset.id);
+                            }
+                            if let Some(edges) = slot["top_source_edges"].as_array_mut() {
+                                for entry in edges {
+                                    let Some(index) =
+                                        entry["source_edge"].as_u64().map(|n| n as usize)
+                                    else {
+                                        continue;
+                                    };
+                                    let Some(edge) = model.wireframe.edges().get(index) else {
+                                        continue;
+                                    };
+                                    let part = model.wireframe.edge_part(index);
+                                    entry["part_id"] = json!(part);
+                                    if let Some(asset) = asset {
+                                        entry["part_name"] = json!(asset.part_name(part));
+                                    }
+                                    entry["source_model_space_endpoints"] =
+                                        json!(edge.map(|vertex| {
+                                            let p = model.wireframe.vertex(vertex as usize);
+                                            [p.x, p.y, p.z]
+                                        }));
+                                }
+                            }
+                        }
+                    }
+                }
                 if index >= cpu_warmup + warmup {
                     audio_ms.push(audio_duration);
                     controls_ms.push(controls_duration);
@@ -730,16 +1041,33 @@ fn measures_full_presentation_pipeline() -> anyhow::Result<()> {
                     plate_counts.push(plate_count);
                     plate_unclipped_area.push(plate_area);
                     asset_counts.push(assets);
+                    projected_pose_bytes.push(projected_bytes);
+                    projection_parameter_bytes.push(projection_bytes);
+                    edge_style_bytes.push(style_bytes);
+                    cpu_geometry_bytes.push(geometry_bytes);
+                    gpu_model_counts.push(gpu_models);
+                    ribbon_downsizes.push(ribbon_downsize);
+                    ribbon_render_extents.push(ribbon_render_extent);
                     poi_events.push(event);
                     poi_frames.push(if workload_mode.poi().is_some() {
                         poi_workload::snapshot(&mut ui)
                     } else {
                         json!(null)
                     });
+                    zoom_frames.push(if zoom_workload.is_some() {
+                        zoom_workload::snapshot(&mut ui, &view)
+                    } else {
+                        json!(null)
+                    });
                     let measured_index = index - cpu_warmup - warmup;
                     if preview_frames.contains(&measured_index) {
+                        let quality_suffix = if fixed_downsizes.is_some() {
+                            format!("-downsize{}", fixed_downsize.expect("fixed sweep factor"))
+                        } else {
+                            String::new()
+                        };
                         let filename = format!(
-                            "{width}x{height}-{}-{}-frame{measured_index:04}.png",
+                            "{width}x{height}-{}-{}{quality_suffix}-frame{measured_index:04}.png",
                             workload_mode.name(),
                             components.name()
                         );
@@ -748,45 +1076,115 @@ fn measures_full_presentation_pipeline() -> anyhow::Result<()> {
                     }
                 }
             }
-            eprintln!("{width}x{height} {} {}: full completion {:.3}/{:.3}ms median/p95; Ui.draw {:.3}ms; encode {:.3}ms; modelGPU {:.3}ms; background {rasterized}/{measured}",
+            let (peak_index, peak_ms) = full_ms
+                .iter()
+                .copied()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+                .expect("measured frames");
+            eprintln!(
+                "Peak frame {peak_index}: {peak_ms:.3} ms; animation time {:.6}s",
+                (cpu_warmup + warmup + peak_index + 1) as f64 / f64::from(fps)
+            );
+            eprintln!("{width}x{height} {} {} fixed_downsize={fixed_downsize:?}: full completion {:.3}/{:.3}ms median/p95; Ui.draw {:.3}ms; encode {:.3}ms; modelGPU {:.3}ms; background {rasterized}/{measured}",
                     workload_mode.name(),components.name(),summary(&full_ms)["median"].as_f64().unwrap(),summary(&full_ms)["p95"].as_f64().unwrap(),summary(&draw_ms)["median"].as_f64().unwrap(),summary(&encode_ms)["median"].as_f64().unwrap(),summary(&model_gpu_ms)["median"].as_f64().unwrap());
-            cases.push(json!({
-                    "width":width,"height":height,"ui_scale":2.0,"fps":fps,"interval_seconds":1.0/f64::from(fps),
-                    "workload":workload_mode.name(),"workload_metadata":workload_metadata,"components":components.name(),
-                    "render_settings":{
-                        "model_motion":config.model_motion,"shutter_frames":config.shutter_frames,
-                        "line_width":config.line_width,"zoom":config.zoom,"motion_opacity":config.motion_opacity,
-                        "motion_fade_power":config.motion_fade_power,"depth_fade":config.depth_fade,
-                        "near_opacity":config.near_opacity,"crease_threshold":config.crease_threshold,
-                        "presentation_opacity":config.presentation_opacity,"text_scale":config.visualizer_text_scale,
-                        "selected_theme":ui.selected_theme(),"requested_frame_limit":base_config.frame_rate_limit,
-                        "showcase":config.tuning.showcase,
-                    },
-                    "adapter":pipeline.adapter(),
-                    "warmup_frames":warmup,"measured_frames":measured,"background_rasterized_frames":rasterized,
-                    "cpu_warmup_frames":cpu_warmup,"measurement_start_seconds":(cpu_warmup+warmup) as f64/f64::from(fps),
-                    "ui_face_rebuilt_frames":ui_rebuilt,"controls_visible_frames":controls_frames,
-                    "cpu_audio_ms":summary(&audio_ms),"cpu_ui_draw_ms":summary(&draw_ms),"cpu_controls_ms":summary(&controls_ms),
-                    "cpu_raster_encode_submit_ms":summary(&encode_ms),"completion_wait_ms":summary(&completion_ms),
-                    "full_completion_ms":summary(&full_ms),"model_gpu_ms":summary(&model_gpu_ms),
-                    "full_completion_samples_ms":full_ms,"draw_samples_ms":draw_ms,"encode_samples_ms":encode_ms,
-                    "model_gpu_samples_ms":model_gpu_ms,"active_edges":active,"triangles":triangles,
-                    "transparent_ribbons":transparent_ribbons,
-                    "plate_instances":plate_counts,"plate_unclipped_bounds_area_px2":plate_unclipped_area,
-                    "retained_assets":asset_counts,"poi_events":poi_events,"poi_frames":poi_frames,
-                    "previews":previews,
-                }));
+            let peak_frame = json!({"measured_index":peak_index,"animation_frame":cpu_warmup+warmup+peak_index,
+                "animation_time_seconds":(cpu_warmup+warmup+peak_index+1) as f64/f64::from(fps),
+                "full_completion_ms":peak_ms,"cpu_audio_ms":audio_ms[peak_index],"cpu_controls_ms":controls_ms[peak_index],
+                "cpu_ui_draw_ms":draw_ms[peak_index],"cpu_raster_encode_submit_ms":encode_ms[peak_index],
+                "completion_wait_ms":completion_ms[peak_index],"model_gpu_ms":model_gpu_ms[peak_index],
+                "zoom":zoom_frames[peak_index]});
+            let mut case = json!({
+                "width":width,"height":height,"ui_scale":2.0,"fps":fps,"interval_seconds":1.0/f64::from(fps),
+                "workload":workload_mode.name(),"workload_metadata":workload_metadata,"components":components.name(),
+                "active_backend":if components.omits_model() {"model_omitted"} else if components.freezes_gpu_preparation() {"gpu_ribbons_frozen_projection_and_preparation"} else if gpu_ribbons {"gpu_ribbons_gpu_projection"} else {"cpu_ribbons"},
+                "accumulation_format":if gpu_ribbons {"Rgba16Float"} else {"Bgra8Unorm"},
+                "model_gpu_timestamp_scope":if gpu_ribbons {"model rasterization and float layer composition; excludes GPU projection, edge preparation and final resolve"} else {"final layer composition pass"},
+                "model_payload_bytes":{
+                    "projected_pose":projected_pose_bytes,"edge_style":edge_style_bytes,
+                    "cpu_expanded_geometry":cpu_geometry_bytes,"active_gpu_models":gpu_model_counts,
+                    "scope":"Selected per-frame CPU-built model payload. Production uploads projection parameters and edge styles; projected_pose is zero. Excludes 16-byte projection ring metadata, ribbon frame uniforms, diagnostic lines and immutable source topology/positions. no_model policies still build these CPU payloads but omit their GPU upload. no_gpu_prepare omits GPU model uploads and preparation after its first three GPU frames.",
+                },
+                "render_settings":{
+                    "model_motion":config.model_motion,"shutter_frames":config.shutter_frames,
+                    "line_width":config.line_width,"zoom":config.zoom,"motion_opacity":config.motion_opacity,
+                    "motion_fade_power":config.motion_fade_power,"depth_fade":config.depth_fade,
+                    "near_opacity":config.near_opacity,"crease_threshold":config.crease_threshold,
+                    "presentation_opacity":config.presentation_opacity,"text_scale":config.visualizer_text_scale,
+                    "selected_theme":ui.selected_theme(),"requested_frame_limit":base_config.frame_rate_limit,
+                    "showcase":config.tuning.showcase,
+                },
+                "adapter":pipeline.adapter(),
+                "warmup_frames":warmup,"measured_frames":measured,"background_rasterized_frames":rasterized,
+                "cpu_warmup_frames":cpu_warmup,"measurement_start_seconds":(cpu_warmup+warmup) as f64/f64::from(fps),
+                "ui_face_rebuilt_frames":ui_rebuilt,"controls_visible_frames":controls_frames,
+                "cpu_audio_ms":summary(&audio_ms),"cpu_ui_draw_ms":summary(&draw_ms),"cpu_controls_ms":summary(&controls_ms),
+                "cpu_raster_encode_submit_ms":summary(&encode_ms),"completion_wait_ms":summary(&completion_ms),
+                "full_completion_ms":summary(&full_ms),"model_gpu_ms":summary(&model_gpu_ms),
+                "full_completion_samples_ms":full_ms,"draw_samples_ms":draw_ms,"encode_samples_ms":encode_ms,
+                "model_gpu_samples_ms":model_gpu_ms,"active_edges":active,"triangles":triangles,
+                "transparent_ribbons":transparent_ribbons,
+                "plate_instances":plate_counts,"plate_unclipped_bounds_area_px2":plate_unclipped_area,
+                "retained_assets":asset_counts,"poi_events":poi_events,"poi_frames":poi_frames,
+                "previews":previews,
+            });
+            case["ribbon_resolution"] = json!({
+                "adaptive":adaptive_ribbons,"fixed_downsize":fixed_downsize,
+                "target_fps":fps,"linear_downsize_samples":ribbon_downsizes,
+                "render_extent_samples":ribbon_render_extents,
+                "feedback_scope":"Adaptive replay uses isolated full-frame completion as both interval and work; it does not measure native presentation FPS. Background, foreground, diagnostics and controls retain the physical output extent.",
+            });
+            case["model_payload_bytes"]["projection_parameters"] =
+                json!(projection_parameter_bytes);
+            case["gpu_preparation_control"] = json!({
+                "frozen":components.freezes_gpu_preparation(),
+                "seed_gpu_frames":if components.freezes_gpu_preparation() {Some(3)} else {None},
+                "last_prepared_animation_frame":if components.freezes_gpu_preparation() {Some(cpu_warmup+2)} else {None},
+                "scope":"no_gpu_prepare seeds three actual GPU poses, then draws retained ribbon records while audio, CPU Ui.draw and foreground/control rendering continue. Projection, edge preparation and model uploads are omitted after seeding; frozen geometry/ink is not image-equivalent to the animated full control.",
+            });
+            case["zoom_frames"] = json!(zoom_frames);
+            case["peak_frame"] = peak_frame;
+            case["raster_coverage"] = raster_coverage;
+            cases.push(case);
         }
     }
     fs::write(
         directory.join("results.json"),
         serde_json::to_vec_pretty(&json!({
         "cases":cases,"force_background_rebuild":force_background,"fps":fps,"workload":workload_mode.name(),
+        "gpu_ribbons_requested":gpu_ribbons,
+        "adaptive_ribbons":adaptive_ribbons,"fixed_ribbon_downsize":fixed_downsize,
+        "fixed_ribbon_downsizes":fixed_downsizes,
+        "parallel_support":std::env::var("BENGA_GPU_RIBBON_PARALLEL_BOUNDS").unwrap_or_else(|_| "original".into()),
+        "maximum_frame_budget_ms":max_frame_ms,"minimum_reproduction_peak_ms":min_peak_ms,
         "read_saved_config":std::env::var_os("BENGA_PIPELINE_CONFIG_PATH").is_some(),
             "method":"Actual Ui.draw and synthetic stereo capture with controlled normal motion or actual Showcase POI scripts. Retained background/raster-asset caches, Vello animated foreground/control passes, plate masks, themed line renderer, and final composition. Physical extents and UI scale are explicit. One frame completes before the next; no surface acquisition, display wait, native window chrome, OS compositor or VSync.",
-            "component_controls":"no_model omits only model lines/ribbons at GPU composition. no_foreground omits GPU plate rendering, retained foreground asset preparation, foreground rasterization and composition. Both controls still build the complete Ui.draw CPU scene/model, isolating render contributions.",
+            "component_controls":"no_model omits model geometry at GPU composition, preserving the selected backend's composition format and final resolve; edge preparation has no model work. no_foreground omits GPU plate rendering, retained foreground asset preparation, foreground rasterization and composition. no_model_no_foreground combines both omissions. no_gpu_prepare retains real ribbons after three GPU seed frames, omitting subsequent GPU projection, edge preparation and model uploads while still drawing the frozen ribbons; its images/history differ from animated controls. All policies still build the complete Ui.draw CPU scene/model.",
             "timing_scope":"full_completion_ms adds audio/script, controls, Ui.draw, render encoding/submission and GPU completion wait. It is isolated completion, not achieved application FPS. Model timestamps cover final composition, potentially including dependencies on prior Vello writes. Query readback is excluded. Model setup occurs before timing.",
         }))?,
     )?;
+    // Save raw samples and exact peak-frame state before returning a failing
+    // verdict, so this command can serve as a performance regression loop.
+    for case in &cases {
+        let peak = case["full_completion_ms"]["max"]
+            .as_f64()
+            .expect("measured maximum");
+        if let Some(limit) = max_frame_ms {
+            ensure!(
+                peak <= limit,
+                "{}x{} {} {} exceeded frame budget: peak {peak:.3} ms > {limit:.3} ms; see {}",
+                case["width"],
+                case["height"],
+                case["workload"],
+                case["active_backend"],
+                directory.display()
+            );
+        }
+        if let Some(minimum) = min_peak_ms {
+            ensure!(peak >= minimum,
+                "{}x{} {} did not reproduce requested slow frame: peak {peak:.3} ms < {minimum:.3} ms; see {}",
+                case["width"],case["height"],case["workload"],directory.display());
+        }
+    }
     Ok(())
 }

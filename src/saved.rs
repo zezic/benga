@@ -22,6 +22,7 @@ pub struct Saved<T> {
     path: PathBuf,
     on_disk: OnDisk,
     last_write: Instant,
+    ephemeral: bool,
 }
 
 impl<T: Default + DeserializeOwned> Saved<T> {
@@ -40,6 +41,7 @@ impl<T: Default + DeserializeOwned> Saved<T> {
             path,
             on_disk,
             last_write: Instant::now(),
+            ephemeral: false,
         })
     }
 
@@ -55,6 +57,11 @@ impl<T: Default + DeserializeOwned> Saved<T> {
 }
 
 impl<T> Saved<T> {
+    /// Keep this session's edits in memory, including pending legacy imports.
+    pub fn make_ephemeral(&mut self) {
+        self.ephemeral = true;
+    }
+
     pub fn edit(&mut self) -> &mut T {
         self.on_disk = OnDisk::Behind;
         &mut self.value
@@ -73,7 +80,7 @@ impl<T: Serialize> Saved<T> {
 
     /// The rename replaces the whole file; a failed write remains pending for retry.
     pub fn flush(&mut self) -> anyhow::Result<()> {
-        if matches!(self.on_disk, OnDisk::Current) {
+        if self.ephemeral || matches!(self.on_disk, OnDisk::Current) {
             return Ok(());
         }
         self.last_write = Instant::now();
@@ -107,6 +114,31 @@ mod tests {
         config::{Config, PreampDb},
         frame_schedule::FrameRateLimit,
     };
+
+    #[test]
+    fn ephemeral_sessions_neither_save_edits_nor_migrate_legacy_settings() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("benga-config.ron");
+        let legacy = directory.path().join("vu-config.ron");
+        let original = "(preamp_db: -12.0)";
+        fs::write(&legacy, original)?;
+        let mut settings = Saved::<Config>::load(path.clone(), Some(legacy.clone()))?;
+        settings.make_ephemeral();
+        settings.edit().preamp_db = PreampDb::try_from(24.0)?;
+        settings.flush_if_due(settings.last_write + SAVE_INTERVAL)?;
+        settings.flush()?;
+        assert!(!path.exists());
+        assert_eq!(fs::read_to_string(&legacy)?, original);
+
+        fs::write(&path, original)?;
+        let mut settings = Saved::<Config>::load(path.clone(), None)?;
+        settings.make_ephemeral();
+        settings.edit().preamp_db = PreampDb::try_from(24.0)?;
+        settings.flush()?;
+        assert_eq!(fs::read_to_string(&path)?, original);
+        assert!(!path.with_extension("tmp").exists());
+        Ok(())
+    }
 
     #[test]
     fn imports_legacy_settings_without_changing_the_original_file() -> anyhow::Result<()> {

@@ -109,6 +109,18 @@ impl OffscreenRenderer {
         self.plate_mask.image()
     }
 
+    pub fn gpu_ribbons_supported(&self) -> bool {
+        let handle = &self.context.devices[self.device_id];
+        VisualizerRenderer::gpu_ribbons_supported(&handle.device)
+            && VisualizerRenderer::gpu_ribbons_adapter_supported(handle.adapter())
+    }
+
+    pub fn gpu_ribbon_edge_capacity(&self) -> usize {
+        let limits = self.context.devices[self.device_id].device.limits();
+        (u64::from(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size) / (6 * 64))
+            as usize
+    }
+
     /// Rasterizes one presentation frame and returns tightly packed, top-to-bottom RGBA8.
     pub fn render(&mut self, scene: &Scene, frame: UiFrame<'_>) -> anyhow::Result<Vec<u8>> {
         let handle = &self.context.devices[self.device_id];
@@ -257,6 +269,8 @@ mod tests {
                     ribbons: &[],
                     model_composite: ModelComposite::Additive,
                     model_edge_capacity: 0,
+                    gpu_active: false,
+                    gpu_models: &[],
                 },
                 foreground: true,
                 overlay_composite: None,

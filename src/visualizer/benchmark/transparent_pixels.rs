@@ -148,6 +148,8 @@ fn transparent_model_geometry_can_be_omitted_without_changing_pixels() -> anyhow
                 ribbons: &ribbons,
                 model_composite: composite,
                 model_edge_capacity: 0,
+                gpu_active: false,
+                gpu_models: &[],
             },
             &before,
         )?;
@@ -158,6 +160,8 @@ fn transparent_model_geometry_can_be_omitted_without_changing_pixels() -> anyhow
                 ribbons: &selected_ribbons,
                 model_composite: composite,
                 model_edge_capacity: 0,
+                gpu_active: false,
+                gpu_models: &[],
             },
             &after,
         )?;

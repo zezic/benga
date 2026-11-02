@@ -1266,6 +1266,11 @@ fn horizontal_lanes(visualizer: &Visualizer, stage: &Stage) -> Vec<Rect> {
 
 fn model_bounds(visualizer: &Visualizer, stage: &Stage) -> Option<Rect> {
     let frame = visualizer.frame();
+    if frame.gpu_active {
+        return visualizer
+            .swept_model_bounds()
+            .map(|rect| rect.inflate(stage.px(24.0), stage.px(24.0)));
+    }
     let mut bounds: Option<Rect> = None;
     let mut include = |x: f32, y: f32, padding: f64| {
         if x.is_finite() && y.is_finite() {
@@ -2767,6 +2772,39 @@ mod tests {
                 .all(|other| !overlaps(card.rect, other.rect, resized.px(6.0))));
         }
         Ok(())
+    }
+
+    #[test]
+    fn gpu_model_support_reserves_graph_space_without_cpu_ribbons() {
+        use crate::{
+            audio::timeline::{AudioInterval, AudioTime},
+            config::ShutterFrames,
+        };
+        let stage = Stage::new(Size::new(1920.0, 1080.0));
+        let mut visualizer = Visualizer::new();
+        visualizer.set_gpu_ribbons(true);
+        let palette = crate::visualizer::Palette::from_theme(crate::theme::ThemeId::default());
+        for index in 0..3 {
+            let start = AudioTime::ZERO.shifted(index as f64 / 60.0);
+            visualizer.update(
+                AudioInterval::new(start, start.shifted(1.0 / 60.0)),
+                ShutterFrames::default(),
+                1.0 / 60.0,
+                &palette,
+                (1920.0, 1080.0),
+                1.0,
+                1.0,
+            );
+        }
+        assert!(visualizer.frame().gpu_active);
+        assert!(visualizer.frame().ribbons.is_empty());
+        assert!(visualizer.frame().model_lines.is_empty());
+        let support = visualizer.swept_model_bounds().expect("projected support");
+        let model = model_bounds(&visualizer, &stage).expect("graph exclusion");
+        assert_eq!(model, support.inflate(stage.px(24.0), stage.px(24.0)));
+        assert!(horizontal_lanes(&visualizer, &stage)
+            .iter()
+            .all(|lane| !overlaps(*lane, model, 0.0)));
     }
 
     #[test]

@@ -8,7 +8,8 @@ desktop, with motion blur, color themes, and animated infographics.
 ## Run
 
 Requires [Rust](https://rustup.rs/) and a GPU with compute support for the
-Vello/wgpu renderer. Run from the project root so Benga can find `assets/models/`:
+Vello/wgpu renderer. Models, their catalogue, fonts and themes are embedded in
+the executable:
 
 ```sh
 cargo run --release
@@ -312,7 +313,8 @@ stay separate through attack movement and background subtraction; their positive
 changes combine afterward, preserving attacks hidden by opposite-side decay. The [detector evaluation guide](docs/detector-evaluation.md) documents
 the streaming music-library probe, resolution/gain comparisons, and validation.
 
-Models live in [`assets/models/`](assets/models/). Before the first animation
+Model sources live in [`assets/models/`](assets/models/) and are embedded at
+build time. No external model files are needed to run Benga. Before the first animation
 update, the loader welds vertices, extracts boundary and crease edges, and prepares
 every model's wireframe, slide mask, POI bindings, and magazine preview.
 Switching reuses this shared data, two animation-state slots, reserved edge-color
@@ -322,4 +324,6 @@ refreshes all models immediately; animated projection, randomized captions, and
 viewport-dependent text layout still run during playback. Model metadata and POI
 authoring are described in the [model specification](assets/models-spec/weapon_visualizer_spec.md).
 
-Licensed under [GPL-2.0-only](LICENSE).
+Project code is licensed under [GPL-2.0-only](LICENSE). See
+[third-party notices](THIRD_PARTY_NOTICES.md) for bundled asset terms and
+outstanding provenance records.

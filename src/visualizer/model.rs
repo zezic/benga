@@ -17,10 +17,6 @@ use super::{
     CreaseThreshold, Rng,
 };
 
-/// Directory scanned for the models. Binary glTF keeps the geometry
-/// and any external resources out of the crate's compiled assets.
-const MODEL_DIRECTORY: &str = "assets/models";
-
 mod body;
 pub use body::BodyMesh;
 
@@ -43,9 +39,17 @@ pub struct Model {
 }
 
 impl Model {
+    /// Explicit file loading for model authoring tools and regression fixtures.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn load_file(path: &Path) -> anyhow::Result<Self> {
-        let gltf = gltf::Gltf::open(path)
-            .with_context(|| format!("could not open the model at {}", path.display()))?;
+        let bytes = fs::read(path)
+            .with_context(|| format!("could not read the model at {}", path.display()))?;
+        Self::load_bytes(path, &bytes)
+    }
+
+    fn load_bytes(path: &Path, bytes: &[u8]) -> anyhow::Result<Self> {
+        let gltf = gltf::Gltf::from_slice(bytes)
+            .with_context(|| format!("invalid model {}", path.display()))?;
         let blob = gltf
             .blob
             .as_deref()
@@ -120,7 +124,7 @@ impl Model {
         );
         let (model_center, model_scale) = fit_to_unit_radius(&mut vertices)?;
         let body_started = std::time::Instant::now();
-        let body = BodyMesh::prepare_cached(path, &vertices, &triangles, &vertex_parts);
+        let body = BodyMesh::prepare_cached(bytes, &vertices, &triangles, &vertex_parts);
         log::debug!(
             "Prepared body for {}: {} -> {} triangles, {} vertices in {:?}",
             path.display(),
@@ -309,20 +313,15 @@ pub struct ModelSet {
 
 impl ModelSet {
     pub fn load(rng: &mut Rng) -> anyhow::Result<Self> {
-        let paths = model_paths()?;
-        ensure!(
-            !paths.is_empty(),
-            "no binary glTF models in {MODEL_DIRECTORY}; add a .glb file there"
-        );
-        let models = paths
+        let models = crate::assets::MODELS
             .iter()
-            .map(|path| {
-                Model::load_file(path).with_context(|| format!("could not load {}", path.display()))
-            })
+            .map(|source| Model::load_bytes(Path::new(source.file_name), source.bytes))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let mut bag: VecDeque<usize> = (0..models.len()).collect();
         shuffle(&mut bag, rng);
-        let current = bag.pop_front().expect("the model directory is not empty");
+        let current = bag
+            .pop_front()
+            .expect("the embedded model table is not empty");
         Ok(Self {
             models,
             prepared: Vec::new(),
@@ -425,12 +424,13 @@ fn shuffle(bag: &mut VecDeque<usize>, rng: &mut Rng) {
     }
 }
 
+#[cfg(test)]
 fn model_paths() -> anyhow::Result<Vec<std::path::PathBuf>> {
-    let directory = fs::read_dir(crate::assets::path("models"))
-        .with_context(|| format!("could not read the model directory {MODEL_DIRECTORY}"))?;
+    let directory = fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/models"))
+        .context("could not read the source model directory")?;
     let mut paths = Vec::new();
     for entry in directory {
-        let entry = entry.with_context(|| format!("could not read {MODEL_DIRECTORY}"))?;
+        let entry = entry.context("could not read the source model entry")?;
         let path = entry.path();
         if path.is_file()
             && path
@@ -842,6 +842,68 @@ fn triangle_normal(a: Vec3, b: Vec3, c: Vec3) -> Option<Vec3> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_model_table_matches_source_files() -> anyhow::Result<()> {
+        let paths = model_paths()?;
+        assert_eq!(crate::assets::MODELS.len(), paths.len());
+        for (source, path) in crate::assets::MODELS.iter().zip(&paths) {
+            assert_eq!(
+                source.file_name,
+                path.file_name().unwrap().to_str().unwrap()
+            );
+            assert_eq!(source.bytes, fs::read(path)?);
+        }
+
+        let source = &crate::assets::MODELS[0];
+        let embedded = Model::load_bytes(Path::new(source.file_name), source.bytes)?;
+        let file = Model::load_file(&paths[0])?;
+        assert_eq!(embedded.id, file.id);
+        assert_eq!(
+            embedded.wireframe(CreaseThreshold::MIN).edges(),
+            file.wireframe(CreaseThreshold::MIN).edges()
+        );
+        assert!(Arc::ptr_eq(&embedded.body, &file.body));
+        Ok(())
+    }
+
+    #[test]
+    fn embedded_models_load_from_a_standalone_executable() -> anyhow::Result<()> {
+        const PROBE: &str = "BENGA_TEST_EMBEDDED_MODELS_PROBE";
+        if std::env::var_os(PROBE).is_some() {
+            let models = ModelSet::load(&mut Rng::new(5))?;
+            assert_eq!(models.models.len(), crate::assets::MODELS.len());
+            assert!(models.models.iter().all(|model| !model.edges.is_empty()));
+            // The standalone process must load the authored captions and every
+            // POI too, rather than silently falling back to a generic wireframe.
+            every_catalog_poi_resolves_to_a_bundled_model_anchor()?;
+            return Ok(());
+        }
+
+        let directory = tempfile::tempdir()?;
+        let executable = directory
+            .path()
+            .join(format!("model-probe{}", std::env::consts::EXE_SUFFIX));
+        fs::copy(std::env::current_exe()?, &executable)?;
+        let result = std::process::Command::new(executable)
+            .current_dir(directory.path())
+            .env(PROBE, "1")
+            .args([
+                "--exact",
+                "visualizer::model::tests::embedded_models_load_from_a_standalone_executable",
+                "--nocapture",
+            ])
+            .output()?;
+        ensure!(
+            result.status.success(),
+            "standalone model loading failed:\n{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+        assert!(!directory.path().join("assets").exists());
+        Ok(())
+    }
 
     #[test]
     fn bundled_bodies_reduce_geometry_and_preserve_valid_part_surfaces() -> anyhow::Result<()> {

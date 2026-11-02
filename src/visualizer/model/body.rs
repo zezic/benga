@@ -5,10 +5,10 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
-    time::SystemTime,
 };
+
+use sha2::{Digest, Sha256};
 
 use super::{triangle_normal, Vec3};
 
@@ -28,23 +28,20 @@ const SURFACE_ERROR: f64 = 0.006;
 const MERGE_DISTANCE: f32 = 0.05;
 const COLLAPSE_PASSES: usize = 4;
 
-type CacheKey = (PathBuf, u64, Option<SystemTime>);
+type CacheKey = [u8; 32];
 type CacheEntry = Arc<OnceLock<Arc<BodyMesh>>>;
 
 impl BodyMesh {
     /// Share immutable preparation across model sets and crease refreshes. A
-    /// changed file gets a fresh entry; concurrent loads prepare it only once.
+    /// changed source gets a fresh entry; concurrent loads prepare it only once.
     pub(super) fn prepare_cached(
-        path: &Path,
+        source: &[u8],
         vertices: &[Vec3],
         triangles: &[[u16; 3]],
         vertex_parts: &[u16],
     ) -> Arc<Self> {
         static CACHE: OnceLock<Mutex<BTreeMap<CacheKey, CacheEntry>>> = OnceLock::new();
-        let Ok(metadata) = std::fs::metadata(path) else {
-            return Arc::new(Self::prepare(vertices, triangles, vertex_parts));
-        };
-        let key = (path.to_path_buf(), metadata.len(), metadata.modified().ok());
+        let key = Sha256::digest(source).into();
         let entry = CACHE
             .get_or_init(Mutex::default)
             .lock()

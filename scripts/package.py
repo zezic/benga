@@ -32,17 +32,18 @@ def run(*args, **kwargs):
 
 def copy_resources(destination):
     destination.mkdir(parents=True)
-    for name in ("models", "models-spec"):
-        shutil.copytree(ROOT / "assets" / name, destination / name)
     for name in ("Gogh-LICENSE", "benga-logo.svg", "themes.json"):
         shutil.copy2(ROOT / "assets" / name, destination / name)
     licenses = destination / "licenses"
     licenses.mkdir()
     shutil.copy2(ROOT / "assets/fonts/Iosevka/OFL.txt", licenses / "Iosevka-OFL.txt")
+    shutil.copy2(ROOT / "assets/fonts/philly_sans/non_commercial_license.txt", licenses / "Philly-Sans.txt")
+    shutil.copy2(ROOT / "assets/models/NOTICE.txt", licenses / "Models.txt")
 
 
 def write_readme(directory):
     shutil.copy2(ROOT / "LICENSE", directory / "LICENSE")
+    shutil.copy2(ROOT / "THIRD_PARTY_NOTICES.md", directory / "THIRD_PARTY_NOTICES.md")
     shutil.copy2(ROOT / "packaging" / "FIRST-RUN.txt", directory / "FIRST-RUN.txt")
 
 

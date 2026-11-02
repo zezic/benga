@@ -10,10 +10,10 @@ Let's Encrypt certificate and renewal hook. HTTP/HTTPS return **503**; the
 mirror is disabled and its public key is unset. Other hosted sites were checked
 unchanged; configuration inventories are in `/var/lib/benga-bootstrap/`.
 
-**Path migration is pending.** The deployed setup and `deploy/` templates still
-use `/srv/benga/site`. Update the bootstrap's website directory and the public
-Nginx root to `/home/benga/web` before activation. This documentation change
-has not moved server files or changed Nginx.
+**Host migration is pending.** Local bootstrap/public-vhost templates now use
+`/home/benga/web`; the deployed setup still uses `/srv/benga/site`. Apply the
+updated paths on the host before activation. No server files have been moved
+and Nginx has not been changed during the current downtime.
 
 | Purpose | Path |
 | --- | --- |
@@ -35,7 +35,7 @@ and every archive's size/SHA-256, then atomically switches `downloads/current`.
 It rejects unsafe origins, incomplete releases and downgrades; older versions
 remain available. No GitHub token or private signing key belongs on this host.
 
-Install the base64 raw 32-byte public key at `/etc/benga/update-public-key`
+Install `deploy/update-public-key` (base64 raw 32-byte public key) at `/etc/benga/update-public-key`
 (root-owned, mode `0644`). It must match the key compiled into the app; see
 [releases.md](releases.md). Preserve signed JSON bytes and GitHub URLs.
 
@@ -45,8 +45,8 @@ portable ZIP/tar.gz archives are mirrored; DMG/EXE/DEB stay on GitHub Releases.
 
 ## Activate after approval
 
-1. Complete the website-path migration in the local bootstrap/public-vhost
-   templates and on the host. Allow Nginx to traverse `/home/benga`.
+1. Apply the website-path migration on the host using the updated local
+   bootstrap/public-vhost templates. Allow Nginx to traverse `/home/benga`.
 2. Copy only approved website files to `/home/benga/web`; use the allowlist in
    [web/README.md](../web/README.md). Preserve the separate release cache.
 3. Install the public key. After the first signed release, start

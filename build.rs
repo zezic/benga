@@ -1,4 +1,40 @@
-use std::{env, fs, path::PathBuf, process::Command};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+fn embed_models(manifest_dir: &Path, output_dir: &Path) {
+    let directory = manifest_dir.join("assets/models");
+    println!("cargo:rerun-if-changed={}", directory.display());
+    let mut paths: Vec<_> = fs::read_dir(&directory)
+        .expect("read bundled models")
+        .map(|entry| entry.expect("read bundled model entry").path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("glb"))
+        })
+        .collect();
+    paths.sort();
+    assert!(!paths.is_empty(), "at least one bundled model is required");
+    let mut source = String::from("pub(crate) const MODELS: &[EmbeddedModel] = &[\n");
+    for path in paths {
+        println!("cargo:rerun-if-changed={}", path.display());
+        let file_name = path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .expect("UTF-8 model name");
+        source.push_str(&format!(
+            "    EmbeddedModel {{ file_name: {file_name:?}, bytes: include_bytes!({path:?}) }},\n",
+            path = path.to_str().expect("UTF-8 model path"),
+        ));
+    }
+    source.push_str("];\n");
+    fs::write(output_dir.join("embedded_models.rs"), source).expect("write bundled model table");
+}
 
 fn main() {
     println!("cargo:rerun-if-env-changed=BENGA_UPDATE_PUBLIC_KEY");
@@ -6,6 +42,7 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/icons/benga.ico");
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let output_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    embed_models(&manifest_dir, &output_dir);
     let version = env::var("CARGO_PKG_VERSION").unwrap();
     let version_core = version.split(['-', '+']).next().unwrap();
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {

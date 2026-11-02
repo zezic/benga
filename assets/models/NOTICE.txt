@@ -1,0 +1,9 @@
+Benga weapon models
+
+These models were prepared from Source-format weapon assets using
+tools/prepare_weapon_models.py. Upstream authorship, source URL and
+redistribution permission have not yet been documented in this repository.
+
+Benga's GPL-2.0-only project license does not grant rights to third-party
+model geometry. Record the upstream license or permission before publishing
+desktop releases. Bundling or embedding a model does not change its license.

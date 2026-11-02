@@ -12,7 +12,7 @@ optional installer removes quarantine only from the Benga app it installs.
 
 Windows
 Run the setup installer, or extract the whole portable ZIP before running
-benga.exe. Do not move benga.exe away from its assets directory. Benga listens
+benga.exe. Models and their catalogue are embedded in the executable. Benga listens
 to the default output device. Relaunch after changing audio output or sample
 rate. Unsigned builds may display a Windows SmartScreen warning.
 
@@ -24,4 +24,4 @@ source to the monitor of the output playing music (for example in pavucontrol).
 Settings save automatically. Find platform requirements, controls, and support:
 https://github.com/zezic/benga
 
-License: GPL-2.0-only; see LICENSE and the included asset license notices.
+Project code: GPL-2.0-only; see LICENSE and THIRD_PARTY_NOTICES.md for asset terms.

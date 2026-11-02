@@ -14,6 +14,8 @@ use std::{
 };
 
 const FEED: &str = "https://benga.zezic.ru/downloads/latest.json";
+const GITHUB_FEED: &str = "https://github.com/zezic/benga/releases/latest/download/latest.json";
+const MAX_MANIFEST: u64 = 128 * 1024;
 const MAX_ARCHIVE: u64 = 512 * 1024 * 1024;
 const MAX_UNPACKED: u64 = 2 * 1024 * 1024 * 1024;
 
@@ -59,6 +61,11 @@ fn get(url: &str, limit: u64) -> anyhow::Result<Vec<u8>> {
     ensure!(url.starts_with("https://"), "Updates require HTTPS");
     Ok(agent()
         .get(url)
+        // Feed outages should quickly fall through to the other source. Archives
+        // retain the agent's longer timeout because their downloads are much larger.
+        .config()
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
         .call()?
         .body_mut()
         .with_config()
@@ -84,10 +91,14 @@ fn verify_manifest(
     let manifest: Manifest = serde_json::from_slice(bytes)?;
     let version = semver::Version::parse(&manifest.version)?;
     ensure!(
+        version.pre.is_empty() && version.build.is_empty(),
+        "Updates require a stable release version"
+    );
+    ensure!(
         manifest.tag == format!("v{version}"),
         "Update tag and version disagree"
     );
-    if version <= semver::Version::parse(current)? || !version.pre.is_empty() {
+    if version <= semver::Version::parse(current)? {
         return Ok(None);
     }
     let artifact = manifest
@@ -114,33 +125,56 @@ fn verify_manifest(
     }))
 }
 
+fn check_source(
+    feed: &str,
+    key: &str,
+    current: &str,
+    target: &str,
+    fetch: &mut impl FnMut(&str, u64) -> anyhow::Result<Vec<u8>>,
+) -> anyhow::Result<Option<Release>> {
+    let bytes = fetch(feed, MAX_MANIFEST)?;
+    let signature = String::from_utf8(fetch(&format!("{feed}.sig"), 1024)?)?;
+    match verify_manifest(&bytes, &signature, key, current, target) {
+        Ok(result) => Ok(result),
+        // A source may switch releases between the manifest and signature requests.
+        Err(_) => {
+            let bytes = fetch(feed, MAX_MANIFEST)?;
+            let signature = String::from_utf8(fetch(&format!("{feed}.sig"), 1024)?)?;
+            verify_manifest(&bytes, &signature, key, current, target)
+        }
+    }
+}
+
+fn check_with(
+    key: &str,
+    current: &str,
+    target: &str,
+    mut fetch: impl FnMut(&str, u64) -> anyhow::Result<Vec<u8>>,
+) -> anyhow::Result<Option<Release>> {
+    match check_source(FEED, key, current, target, &mut fetch) {
+        Ok(Some(release)) => Ok(Some(release)),
+        // A mirror can be reachable but stale while its polling service is down.
+        Ok(None) => match check_source(GITHUB_FEED, key, current, target, &mut fetch) {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                log::debug!("GitHub update check failed after a valid mirror check: {error:#}");
+                Ok(None)
+            }
+        },
+        Err(mirror_error) => check_source(GITHUB_FEED, key, current, target, &mut fetch)
+            .with_context(|| {
+                format!(
+                    "Mirror update check failed ({mirror_error:#}); GitHub fallback also failed"
+                )
+            }),
+    }
+}
+
 pub fn check() -> anyhow::Result<Option<Release>> {
     let key = option_env!("BENGA_UPDATE_PUBLIC_KEY")
         .filter(|s| !s.is_empty())
         .context("This build has no update verification key")?;
-    let bytes = get(FEED, 128 * 1024)?;
-    let signature = String::from_utf8(get(&format!("{FEED}.sig"), 1024)?)?;
-    match verify_manifest(
-        &bytes,
-        &signature,
-        key,
-        env!("CARGO_PKG_VERSION"),
-        &platform(),
-    ) {
-        Ok(result) => Ok(result),
-        // A mirror may atomically switch releases between these two HTTP requests.
-        Err(_) => {
-            let bytes = get(FEED, 128 * 1024)?;
-            let signature = String::from_utf8(get(&format!("{FEED}.sig"), 1024)?)?;
-            verify_manifest(
-                &bytes,
-                &signature,
-                key,
-                env!("CARGO_PKG_VERSION"),
-                &platform(),
-            )
-        }
-    }
+    check_with(key, env!("CARGO_PKG_VERSION"), &platform(), get)
 }
 
 /// Returns only layouts entirely owned by the app; package-manager installs use their manager.
@@ -157,9 +191,13 @@ fn install_root(executable: &Path) -> anyhow::Result<PathBuf> {
         );
         return Ok(root.to_owned());
     }
+    portable_install_root(executable)
+}
+
+fn portable_install_root(executable: &Path) -> anyhow::Result<PathBuf> {
     let root = executable.parent().context("App directory is missing")?;
     ensure!(
-        root.join("assets/models").is_dir() && root.join(".benga-portable").is_file(),
+        root.join(".benga-portable").is_file(),
         "Use the package manager or installer to update this installation"
     );
     Ok(root.to_owned())
@@ -280,12 +318,10 @@ pub fn prepare(release: &Release) -> anyhow::Result<Prepared> {
         executable_in(&staged).is_file(),
         "Update is missing the executable"
     );
-    let resources = if cfg!(target_os = "macos") {
-        staged.join("Contents/Resources/assets/models")
-    } else {
-        staged.join("assets/models")
-    };
-    ensure!(resources.is_dir(), "Update is missing bundled models");
+    ensure!(
+        install_root(&executable_in(&staged))? == staged,
+        "Invalid update layout"
+    );
     Ok(Prepared {
         directory,
         target,
@@ -466,7 +502,9 @@ pub fn run_helper() -> anyhow::Result<bool> {
         "Invalid staging directory"
     );
     ensure!(
-        install_root(&executable_in(&target))? == target && executable_in(&staged).is_file(),
+        install_root(&executable_in(&target))? == target
+            && install_root(&executable_in(&staged))? == staged
+            && executable_in(&staged).is_file(),
         "Invalid update layout"
     );
     let pid: u32 = args[4].to_str().context("Invalid PID")?.parse()?;
@@ -564,6 +602,149 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
     use std::io::Write;
+
+    fn signed_fixture(version: &str) -> (Vec<u8>, Vec<u8>, String) {
+        let signing = SigningKey::from_bytes(&[7; 32]);
+        let bytes = format!(
+            "{{\"version\":\"{version}\",\"tag\":\"v{version}\",\"platforms\":{{\"macos-aarch64\":{{\"url\":\"https://github.com/zezic/benga/releases/download/v{version}/Benga-v{version}-macos-aarch64.zip\",\"sha256\":\"{}\",\"size\":42}}}}}}\n",
+            "a".repeat(64)
+        )
+        .into_bytes();
+        let signature = STANDARD
+            .encode(signing.sign(&bytes).to_bytes())
+            .into_bytes();
+        let key = STANDARD.encode(signing.verifying_key().to_bytes());
+        (bytes, signature, key)
+    }
+
+    #[test]
+    fn github_fallback_recovers_from_unavailable_or_untrusted_mirrors() -> anyhow::Result<()> {
+        let (bytes, signature, key) = signed_fixture("1.2.0");
+        for mirror_body in [None, Some(b"<html>Maintenance</html>".to_vec()), {
+            let mut tampered = bytes.clone();
+            tampered.push(b' ');
+            Some(tampered)
+        }] {
+            let mut requests = Vec::new();
+            let release = check_with(&key, "1.0.0", "macos-aarch64", |url, limit| {
+                requests.push(url.to_owned());
+                assert_eq!(
+                    limit,
+                    if url.ends_with(".sig") {
+                        1024
+                    } else {
+                        MAX_MANIFEST
+                    }
+                );
+                match url {
+                    FEED => mirror_body.clone().context("Mirror is offline"),
+                    GITHUB_FEED => Ok(bytes.clone()),
+                    _ if url == format!("{FEED}.sig") || url == format!("{GITHUB_FEED}.sig") => {
+                        Ok(signature.clone())
+                    }
+                    _ => bail!("Unexpected URL: {url}"),
+                }
+            })?
+            .context("Expected the signed GitHub release")?;
+            assert_eq!(release.version, "1.2.0");
+            assert!(requests.iter().any(|url| url == GITHUB_FEED));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn valid_mirror_updates_avoid_github_and_retry_publication_races() -> anyhow::Result<()> {
+        let (bytes, signature, key) = signed_fixture("1.2.0");
+        let (older, _, _) = signed_fixture("1.1.0");
+        for race in [false, true] {
+            let mut manifests = 0;
+            let release = check_with(&key, "1.0.0", "macos-aarch64", |url, _| {
+                if url == FEED {
+                    manifests += 1;
+                    Ok(if race && manifests == 1 {
+                        older.clone()
+                    } else {
+                        bytes.clone()
+                    })
+                } else if url == format!("{FEED}.sig") {
+                    Ok(signature.clone())
+                } else {
+                    bail!("A valid mirror must not need GitHub")
+                }
+            })?
+            .context("Expected a mirror release")?;
+            assert_eq!(release.version, "1.2.0");
+            assert_eq!(manifests, if race { 2 } else { 1 });
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn stale_mirror_cannot_hide_a_new_github_release() -> anyhow::Result<()> {
+        let (mirror, mirror_signature, key) = signed_fixture("1.0.0");
+        let (github, github_signature, _) = signed_fixture("1.2.0");
+        let release = check_with(&key, "1.0.0", "macos-aarch64", |url, _| match url {
+            FEED => Ok(mirror.clone()),
+            GITHUB_FEED => Ok(github.clone()),
+            _ if url == format!("{FEED}.sig") => Ok(mirror_signature.clone()),
+            _ if url == format!("{GITHUB_FEED}.sig") => Ok(github_signature.clone()),
+            _ => bail!("Unexpected URL"),
+        })?
+        .context("Expected a newer GitHub release")?;
+        assert_eq!(release.version, "1.2.0");
+        // A verified no-update answer remains usable when GitHub is unavailable.
+        assert!(check_with(&key, "1.0.0", "macos-aarch64", |url, _| {
+            match url {
+                FEED => Ok(mirror.clone()),
+                _ if url == format!("{FEED}.sig") => Ok(mirror_signature.clone()),
+                _ => bail!("GitHub is offline"),
+            }
+        })?
+        .is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn github_fallback_cannot_bypass_signatures_or_stable_version_checks() -> anyhow::Result<()> {
+        for (version, tampered, accepted) in [
+            ("1.2.0", true, false),
+            ("1.2.0-beta.1", false, false),
+            ("1.2.0+build", false, false),
+            ("0.9.0", false, true),
+        ] {
+            let (mut bytes, signature, key) = signed_fixture(version);
+            if tampered {
+                bytes.push(b' ');
+            }
+            let result = check_with(&key, "1.0.0", "macos-aarch64", |url, _| match url {
+                FEED => bail!("Mirror is offline"),
+                GITHUB_FEED => Ok(bytes.clone()),
+                _ if url == format!("{GITHUB_FEED}.sig") => Ok(signature.clone()),
+                _ => bail!("Unexpected URL"),
+            });
+            if accepted {
+                assert!(result?.is_none(), "Downgrades must never produce an update");
+            } else {
+                assert!(
+                    result.is_err(),
+                    "The GitHub feed must also be authenticated and stable"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn embedded_models_need_only_the_portable_marker_for_self_updates() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let executable = directory.path().join("benga");
+        fs::write(&executable, b"standalone binary with embedded models")?;
+        assert!(portable_install_root(&executable).is_err());
+        fs::write(directory.path().join(".benga-portable"), b"")?;
+        assert_eq!(portable_install_root(&executable)?, directory.path());
+        assert!(!directory.path().join("assets/models").exists());
+        Ok(())
+    }
 
     #[test]
     fn signature_tampering_and_downgrades_are_rejected() -> anyhow::Result<()> {

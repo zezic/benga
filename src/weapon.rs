@@ -1,15 +1,12 @@
 //! Loads the authored weapon catalog with its real-world specs, points of
 //! interest and comedy beats.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Context;
 use serde::Deserialize;
 
-const CATALOG_PATH: &str = "assets/models-spec/weapon_visualizer_meme_spec.json";
+const CATALOG: &str = include_str!("../assets/models-spec/weapon_visualizer_meme_spec.json");
 
 /// The weapon catalog. Unknown fields are rejected so the structs cannot
 /// silently fall behind the authored data.
@@ -26,12 +23,7 @@ pub struct Catalog {
 
 impl Catalog {
     pub fn load() -> anyhow::Result<Self> {
-        let text = fs::read_to_string(crate::assets::path(
-            "models-spec/weapon_visualizer_meme_spec.json",
-        ))
-        .with_context(|| format!("could not read the weapon catalog at {CATALOG_PATH}"))?;
-        serde_json::from_str(&text)
-            .with_context(|| format!("invalid weapon catalog at {CATALOG_PATH}"))
+        serde_json::from_str(CATALOG).context("invalid embedded weapon catalog")
     }
 }
 

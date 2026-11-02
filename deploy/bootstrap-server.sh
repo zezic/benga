@@ -41,10 +41,10 @@ fingerprint_other_sites() {
 fingerprint_other_sites > "$audit_dir/before"
 
 if ! getent passwd benga >/dev/null; then
-    useradd --system --user-group --home-dir /srv/benga --shell /usr/sbin/nologin benga
+    useradd --system --user-group --home-dir /home/benga --shell /usr/sbin/nologin benga
 fi
 install -d -m 0755 -o root -g root /srv/benga /srv/benga/acme /opt/benga /etc/benga
-install -d -m 0755 -o benga -g benga /srv/benga/site /srv/benga/downloads
+install -d -m 0755 -o benga -g benga /home/benga /home/benga/web /srv/benga/downloads
 install -m 0644 "$source_dir/mirror.py" /opt/benga/mirror.py
 install -m 0644 "$source_dir/benga-mirror.service" /etc/systemd/system/benga-mirror.service
 install -m 0644 "$source_dir/benga-mirror.timer" /etc/systemd/system/benga-mirror.timer

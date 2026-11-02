@@ -32,17 +32,10 @@ fn independent_percussion_preserves_every_arrangement_input_and_hop() {
                 hops += 1;
                 let actual = visualizer.last_spectrum;
                 assert_eq!(actual.rms.to_bits(), expected.rms.to_bits());
-                for (actual, expected) in [
-                    actual.bands,
-                    actual.linear_bands,
-                    actual.band_excess,
-                ]
-                .into_iter()
-                .zip([
-                    expected.bands,
-                    expected.linear_bands,
-                    expected.band_excess,
-                ]) {
+                for (actual, expected) in [actual.bands, actual.linear_bands, actual.band_excess]
+                    .into_iter()
+                    .zip([expected.bands, expected.linear_bands, expected.band_excess])
+                {
                     assert_eq!(
                         actual.map(f32::to_bits),
                         expected.map(f32::to_bits),

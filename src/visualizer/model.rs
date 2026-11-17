@@ -8,6 +8,7 @@ use std::{
 };
 
 use anyhow::{ensure, Context};
+use rayon::prelude::*;
 
 use crate::frame_schedule::Adjustment;
 
@@ -314,9 +315,10 @@ pub struct ModelSet {
 impl ModelSet {
     pub fn load(rng: &mut Rng) -> anyhow::Result<Self> {
         let models = crate::assets::MODELS
-            .iter()
+            .par_iter()
             .map(|source| Model::load_bytes(Path::new(source.file_name), source.bytes))
-            .collect::<anyhow::Result<Vec<_>>>()?;
+            .collect::<Vec<_>>();
+        let models = models.into_iter().collect::<anyhow::Result<Vec<_>>>()?;
         Ok(Self::from_models(models, rng))
     }
 
@@ -342,7 +344,7 @@ impl ModelSet {
     pub fn prepare(&mut self, crease: CreaseThreshold, catalog: Option<&crate::weapon::Catalog>) {
         self.prepared = self
             .models
-            .iter()
+            .par_iter()
             .enumerate()
             .map(|(index, model)| {
                 let body = self
@@ -894,7 +896,14 @@ mod tests {
         if std::env::var_os(PROBE).is_some() {
             let models = ModelSet::load(&mut Rng::new(5))?;
             assert_eq!(models.models.len(), crate::assets::MODELS.len());
-            assert!(models.models.iter().all(|model| !model.edges.is_empty()));
+            for (model, source) in models.models.iter().zip(crate::assets::MODELS) {
+                let path = Path::new(source.file_name);
+                assert_eq!(
+                    Some(model.id.as_str()),
+                    path.file_stem().and_then(|stem| stem.to_str())
+                );
+                assert!(!model.edges.is_empty());
+            }
             // The standalone process must load the authored captions and every
             // POI too, rather than silently falling back to a generic wireframe.
             every_catalog_poi_resolves_to_a_bundled_model_anchor()?;

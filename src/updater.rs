@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
+    fmt::Write as _,
     fs,
     io::Read,
     path::{Component, Path, PathBuf},
@@ -18,6 +19,15 @@ const GITHUB_FEED: &str = "https://github.com/zezic/benga/releases/latest/downlo
 const MAX_MANIFEST: u64 = 128 * 1024;
 const MAX_ARCHIVE: u64 = 512 * 1024 * 1024;
 const MAX_UNPACKED: u64 = 2 * 1024 * 1024 * 1024;
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(hex, "{byte:02x}").expect("writing to a string succeeds");
+    }
+    hex
+}
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Artifact {
@@ -305,7 +315,7 @@ pub fn prepare(release: &Release) -> anyhow::Result<Prepared> {
         "Downloaded update has the wrong size"
     );
     ensure!(
-        format!("{:x}", Sha256::digest(&bytes)) == artifact.sha256.to_ascii_lowercase(),
+        sha256_hex(&bytes) == artifact.sha256.to_ascii_lowercase(),
         "Update checksum does not match"
     );
     extract(&bytes, directory.path(), !cfg!(target_os = "linux"))?;
@@ -364,10 +374,7 @@ struct CleanupReceipt {
 
 fn receipt_path(target: &Path) -> anyhow::Result<PathBuf> {
     let parent = target.parent().context("Missing install parent")?;
-    let hash = format!(
-        "{:x}",
-        Sha256::digest(target.as_os_str().as_encoded_bytes())
-    );
+    let hash = sha256_hex(target.as_os_str().as_encoded_bytes());
     // Keep mutable updater state outside macOS's signed application bundle.
     Ok(parent.join(format!(".benga-update-state-{}.json", &hash[..16])))
 }
@@ -602,6 +609,15 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
     use std::io::Write;
+
+    #[test]
+    fn cleanup_receipt_path_matches_existing_installations() -> anyhow::Result<()> {
+        assert_eq!(
+            receipt_path(Path::new("portable/Benga"))?,
+            Path::new("portable/.benga-update-state-a391dafe42c64c05.json")
+        );
+        Ok(())
+    }
 
     fn signed_fixture(version: &str) -> (Vec<u8>, Vec<u8>, String) {
         let signing = SigningKey::from_bytes(&[7; 32]);

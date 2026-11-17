@@ -102,10 +102,9 @@ impl FrameRateLimit {
     }
 }
 
-/// One interval shared by redraw pacing and its render-budget feedback.
-/// Synchronized presentation cannot outrun the current display mode; matching
-/// its cadence keeps intentional FIFO waiting out of measured redraw work.
-/// Unsynchronized presentation retains the requested limit (or no limit).
+/// Frame interval available to the adaptive renderer.
+/// Synchronized presentation uses the slower of the requested limit
+/// and the display refresh rate.
 pub fn presentation_interval(
     limit: FrameRateLimit,
     reported_refresh_millihertz: Option<u32>,
@@ -210,9 +209,16 @@ impl FrameSchedule {
     }
 
     pub fn deadline(&self, now: Instant) -> Instant {
+        let deadline = if self.redraw_is_pending() && self.is_due(now) {
+            // The window system wakes us for the requested redraw. Keep a
+            // background tick if the compositor defers that event.
+            now + BACKGROUND_INTERVAL
+        } else {
+            self.next_due
+        };
         self.retry_at
             .filter(|retry| *retry > now)
-            .map_or(self.next_due, |retry| self.next_due.min(retry))
+            .map_or(deadline, |retry| deadline.min(retry))
     }
 
     pub fn resized(&mut self, area: SurfaceArea, now: Instant) {
@@ -229,8 +235,7 @@ impl FrameSchedule {
         self.request_visible_frame_with_interval(now, limit.interval());
     }
 
-    /// Schedule the exact effective interval, including display rates which
-    /// have no corresponding settings choice, such as 144 Hz.
+    /// Schedule a timed redraw, or leave pacing to presentation when uncapped.
     pub fn request_visible_frame_with_interval(
         &mut self,
         now: Instant,
@@ -290,7 +295,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn synchronized_pacing_and_budget_share_the_display_limited_interval() {
+    fn synchronized_budget_respects_the_display_and_frame_rate_limit() {
         let display = FrameRateLimit::Fps120.interval();
         for limit in [
             FrameRateLimit::Fps120,
@@ -330,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn unsynchronized_pacing_keeps_the_requested_rate() {
+    fn unsynchronized_budget_uses_the_requested_rate() {
         assert_eq!(
             presentation_interval(FrameRateLimit::Fps240, Some(120_000), false),
             FrameRateLimit::Fps240.interval()
@@ -381,6 +386,24 @@ mod tests {
     }
 
     #[test]
+    fn visible_vsync_requests_immediately_and_waits_for_the_redraw_event() {
+        let now = Instant::now();
+        let mut schedule = FrameSchedule::new(now);
+        schedule.resized(SurfaceArea::NonEmpty, now);
+        schedule.request_visible_frame(now, FrameRateLimit::VSync);
+        assert!(schedule.is_due(now));
+        assert_eq!(schedule.deadline(now), now + BACKGROUND_INTERVAL);
+        assert_eq!(schedule.take_redraw_permit(), RedrawPermit::Requested);
+
+        schedule.limit_changed(now);
+        schedule.request_visible_frame(now, FrameRateLimit::Fps240);
+        assert_eq!(
+            schedule.deadline(now),
+            now + FrameRateLimit::Fps240.interval().unwrap()
+        );
+    }
+
+    #[test]
     fn late_wakes_preserve_every_limited_cadence_without_catch_up() {
         for &limit in FrameRateLimit::VARIANTS {
             let Some(interval) = limit.interval() else {
@@ -418,6 +441,7 @@ mod tests {
         assert!(schedule.is_due(restored));
         schedule.surface_unavailable(restored);
         assert_eq!(schedule.kind(restored), FrameKind::Background);
+        assert_eq!(schedule.deadline(restored), restored + BACKGROUND_INTERVAL);
         assert_eq!(
             schedule.kind(restored + BACKGROUND_INTERVAL),
             FrameKind::Visible

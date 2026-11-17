@@ -1,7 +1,7 @@
 //! Shared vector artwork from the original Benga logo.
 use crate::theme::mix;
 use anyhow::{ensure, Context};
-use quick_xml::{events::Event, Reader};
+use quick_xml::{events::Event, Reader, XmlVersion};
 use vello::{
     kurbo::{Affine, BezPath, Rect, Shape},
     peniko::{Color, Fill},
@@ -79,41 +79,42 @@ impl Logo {
 /// fonts, editor metadata and the unused Inkscape path effect are irrelevant.
 fn logo_paths() -> anyhow::Result<Vec<LogoPath>> {
     let mut reader = Reader::from_str(LOGO);
+    let version = XmlVersion::Explicit1_0;
     let mut transforms = vec![Affine::IDENTITY];
     let mut paths = Vec::new();
     loop {
         match reader.read_event()? {
-            Event::Start(tag) if tag.name().as_ref() == b"g" => {
+            Event::Start(tag) if tag.name().as_ref() == "g" => {
                 let parent = *transforms.last().expect("root transform is retained");
                 let local = tag
                     .try_get_attribute("transform")?
-                    .map(|attribute| matrix(&attribute.unescape_value()?))
+                    .map(|attribute| matrix(&attribute.normalized_value(version)?))
                     .transpose()?
                     .unwrap_or(Affine::IDENTITY);
                 transforms.push(parent * local);
             }
-            Event::End(tag) if tag.name().as_ref() == b"g" => {
+            Event::End(tag) if tag.name().as_ref() == "g" => {
                 ensure!(transforms.len() > 1, "Unbalanced logo groups");
                 transforms.pop();
             }
-            Event::Start(tag) | Event::Empty(tag) if tag.name().as_ref() == b"path" => {
+            Event::Start(tag) | Event::Empty(tag) if tag.name().as_ref() == "path" => {
                 let Some(data) = tag.try_get_attribute("d")? else {
                     continue;
                 };
-                let path = BezPath::from_svg(&data.unescape_value()?)?;
+                let path = BezPath::from_svg(&data.normalized_value(version)?)?;
                 if path.bounding_box().area() == 0.0 {
                     continue;
                 }
                 let local = tag
                     .try_get_attribute("transform")?
-                    .map(|attribute| matrix(&attribute.unescape_value()?))
+                    .map(|attribute| matrix(&attribute.normalized_value(version)?))
                     .transpose()?
                     .unwrap_or(Affine::IDENTITY);
                 let outline = tag
                     .try_get_attribute("style")?
                     .map(|style| {
                         style
-                            .unescape_value()
+                            .normalized_value(version)
                             .map(|style| style.contains("fill:#b7b7c8"))
                     })
                     .transpose()?

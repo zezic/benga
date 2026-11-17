@@ -925,27 +925,15 @@ impl ApplicationHandler for App {
         if let Err(error) = self.settings.flush_if_due(now) {
             log::error!("{error:#}");
         }
+        let now = Instant::now();
         if self.frames.is_due(now) {
             match self.frames.kind(now) {
                 FrameKind::Visible => {
                     let WindowState::Active(window) = &self.state else {
                         unreachable!("a drawable surface owns its window")
                     };
-                    let refresh = window
-                        .render
-                        .window
-                        .current_monitor()
-                        .and_then(|monitor| monitor.refresh_rate_millihertz());
-                    let synchronized = matches!(
-                        window.render.surface_configuration().present_mode,
-                        wgpu::PresentMode::AutoVsync
-                            | wgpu::PresentMode::Fifo
-                            | wgpu::PresentMode::FifoRelaxed
-                    );
-                    let interval =
-                        presentation_interval(self.frame_rate_limit(), refresh, synchronized);
                     self.frames
-                        .request_visible_frame_with_interval(now, interval);
+                        .request_visible_frame(now, self.frame_rate_limit());
                     window.render.window.request_redraw();
                 }
                 FrameKind::Background => self.frames.background_tick_finished(now),

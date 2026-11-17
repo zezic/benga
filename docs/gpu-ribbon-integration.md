@@ -45,12 +45,15 @@ frames. Older-quality samples can inform scaling-benefit evidence, but cannot
 drive a new control step; another viewport or rendering session is discarded.
 There is no additional 120 ms collection window or one-second recovery delay.
 
-Synchronized presentation uses one shared interval for redraw pacing and the
-adaptive budget: the slower of the selected FPS limit and the current monitor's
-reported refresh rate, with 60 Hz as a fallback. This includes the VSync settings
-choice. Arbitrary monitor rates such as 144 Hz retain their exact interval;
-they are not rounded down to a listed FPS choice. The normal desktop uses
-AutoVsync. An explicit unsynchronized diagnostic run keeps its requested limit.
+The normal desktop presents with AutoVsync. With the **VSync** setting, the
+swapchain paces visible redraws. Numeric FPS limits use monotonic deadlines at
+the selected rate and skip expired slots. On supported Windows versions,
+winit uses a high-resolution waitable timer for those deadlines.
+
+The adaptive budget for synchronized presentation uses the slower of the
+selected FPS limit and the current monitor's reported refresh rate, with 60 Hz
+as a fallback. The VSync setting uses the display interval, including arbitrary
+rates such as 144 Hz. Unsynchronized diagnostic runs use the requested limit.
 Using that budget:
 
 - **Lower resolution** as estimated next-frame cost reaches **85% of budget**.

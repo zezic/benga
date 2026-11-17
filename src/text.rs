@@ -178,8 +178,7 @@ impl Fonts {
             )));
         }
         let mut layout = builder.build(text);
-        layout.break_all_lines(max_width.filter(|width| *width > 0.0));
-        layout.align(
+        layout.set_alignment(
             match align {
                 BlockAlign::Left => Alignment::Left,
                 BlockAlign::Center => Alignment::Center,
@@ -187,8 +186,10 @@ impl Fonts {
             },
             AlignmentOptions {
                 align_when_overflowing: true,
+                ..Default::default()
             },
         );
+        layout.break_all_lines(max_width.filter(|width| *width > 0.0));
         Text { layout, max_width }
     }
 
@@ -510,17 +511,16 @@ impl Text {
             .and_then(|line| {
                 line.items().find_map(|item| match item {
                     PositionedLayoutItem::GlyphRun(glyph_run) => {
-                        glyph_run.run().metrics().cap_height.map(f64::from)
+                        glyph_run.run().font_metrics().cap_height.map(f64::from)
                     }
                     _ => None,
                 })
             })
             .unwrap_or_else(|| {
-                0.72 * self
-                    .layout
-                    .lines()
-                    .next()
-                    .map_or(0.0, |line| f64::from(line.metrics().ascent))
+                0.72 * self.layout.lines().next().map_or(0.0, |line| {
+                    let metrics = line.metrics();
+                    f64::from(metrics.baseline - metrics.content_block_min_coord)
+                })
             })
     }
 
@@ -551,7 +551,7 @@ impl Text {
                 .draw_glyphs(run.font())
                 .font_size(run.font_size())
                 .transform(transform)
-                .normalized_coords(run.normalized_coords())
+                .normalized_coords(bytemuck::cast_slice(run.normalized_coords()))
                 .brush(color)
                 .draw(
                     Fill::NonZero,
@@ -575,7 +575,7 @@ impl Text {
             lines.push(TextLine {
                 top: f64::from(metrics.block_min_coord),
                 baseline: f64::from(metrics.baseline),
-                width: f64::from(metrics.advance - metrics.trailing_whitespace),
+                width: f64::from(metrics.advance - metrics.hanging_advance),
                 line_height: f64::from(metrics.line_height),
             });
             for item in line.items() {
@@ -598,12 +598,12 @@ impl Text {
                     });
                 }
                 if cap_height == 0.0 {
-                    cap_height = run.metrics().cap_height.map_or(0.0, f64::from);
+                    cap_height = run.font_metrics().cap_height.map_or(0.0, f64::from);
                 }
                 runs.push(TextRun {
                     font: run.font().clone(),
                     font_size: run.font_size(),
-                    normalized_coords: run.normalized_coords().to_vec(),
+                    normalized_coords: bytemuck::cast_slice(run.normalized_coords()).to_vec(),
                     glyphs: run_glyphs,
                 });
             }

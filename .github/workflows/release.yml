@@ -1,6 +1,6 @@
-name: Validate and stage desktop release
+name: Build and publish desktop release
 
-# Version tags only. v<VERSION>-check.N validates; v<VERSION> stages a draft.
+# v<VERSION>-check.N validates packages. v<VERSION> publishes a release.
 on:
   push:
     tags:
@@ -15,10 +15,11 @@ concurrency:
 
 jobs:
   prepare:
+    if: github.event.created
     runs-on: ubuntu-22.04
     outputs:
       public-key: ${{ steps.signing.outputs.public-key }}
-      create-draft: ${{ steps.signing.outputs.create-draft }}
+      publish: ${{ steps.signing.outputs.publish }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -35,16 +36,16 @@ jobs:
           release_tag="$RELEASE_TAG"
           if [[ "$RELEASE_TAG" =~ ^(.+)-check\.[1-9][0-9]*$ ]]; then
             release_tag="${BASH_REMATCH[1]}"
-            echo "create-draft=false" >> "$GITHUB_OUTPUT"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
           else
-            echo "create-draft=true" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
           fi
           python scripts/release_metadata.py validate-tag "$release_tag"
           if [[ -n "$BENGA_UPDATE_SIGNING_KEY" ]]; then
             public_key=$(python scripts/release_metadata.py public-key)
             echo "public-key=$public_key" >> "$GITHUB_OUTPUT"
           else
-            echo '::warning::No update signing key: native package validation will run, but a release draft cannot be created.'
+            echo '::warning::No update signing key: native package validation will run, but publishing requires a signed update manifest.'
           fi
 
   build:
@@ -110,9 +111,9 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
-  draft:
+  publish:
     needs: [prepare, build]
-    if: needs.prepare.outputs.create-draft == 'true'
+    if: needs.prepare.outputs.publish == 'true'
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -136,15 +137,19 @@ jobs:
         env:
           BENGA_UPDATE_SIGNING_KEY: ${{ secrets.BENGA_UPDATE_SIGNING_KEY }}
         run: |
-          test -n "$BENGA_UPDATE_PUBLIC_KEY" || { echo '::error::Configure BENGA_UPDATE_SIGNING_KEY and rerun the workflow to rebuild packages with update verification before staging a release.'; exit 1; }
+          test -n "$BENGA_UPDATE_PUBLIC_KEY" || { echo '::error::Configure BENGA_UPDATE_SIGNING_KEY and rerun the workflow to rebuild packages with update verification before publishing.'; exit 1; }
           python scripts/release_metadata.py create target/release-assets --tag "$RELEASE_TAG" --repository "$GH_REPO"
-      - name: Stage the complete draft for review
+      - name: Upload packages and publish
         shell: bash
         run: |
-          if gh release view "$RELEASE_TAG" --json isDraft > target/release-state.json 2>/dev/null; then
-            python -c 'import json; assert json.load(open("target/release-state.json"))["isDraft"], "Refusing to overwrite a published release"'
+          if is_draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [[ "$is_draft" == false ]]; then
+              echo "Benga $RELEASE_TAG is already published." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
           else
             gh release create "$RELEASE_TAG" --verify-tag --draft --title "Benga $RELEASE_TAG" --generate-notes
           fi
           gh release upload "$RELEASE_TAG" target/release-assets/* --clobber
-          echo "Draft staged. Review native install, GPU and audio behavior before publishing manually." >> "$GITHUB_STEP_SUMMARY"
+          gh release edit "$RELEASE_TAG" --verify-tag --draft=false
+          echo "Published [Benga $RELEASE_TAG]($GITHUB_SERVER_URL/$GH_REPO/releases/tag/$RELEASE_TAG)." >> "$GITHUB_STEP_SUMMARY"

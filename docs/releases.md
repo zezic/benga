@@ -27,14 +27,15 @@ Packages also carry license notices and first-run guidance. Linux needs a Vulkan
 
 ## Signing and CI
 
-`.github/workflows/release.yml` runs **only on `v*` tag pushes**. The stable
-`vMAJOR.MINOR.PATCH` tag must match `Cargo.toml`; branch pushes and PRs do not build
-packages. A tag such as `v0.1.0-check.1` validates the current Cargo version on
-all five native runners without creating a release. The stable `v0.1.0` tag
-stages a complete signed **draft** only after all jobs pass. Review the packages
-and publish the draft manually. Published releases are never overwritten;
-interrupted drafts can be retried. Temporary Actions artifacts expire after three days; downloads use
-permanent Release assets. [Standard runners are free for public repositories](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
+`.github/workflows/release.yml` builds only when a push creates a new `v*` tag.
+The stable `vMAJOR.MINOR.PATCH` tag must match `Cargo.toml`. After tests, builds,
+and package validation pass on all five native runners, CI signs the update
+manifest, uploads all assets to a draft, and publishes the GitHub release.
+Rerun the workflow to finish an interrupted draft.
+
+A tag such as `v0.1.1-check.1` runs build and package validation only.
+Temporary Actions artifacts expire after three days. Published release assets
+serve as the permanent downloads. [Standard runners are free for public repositories](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
 
 Native validation checks archive contents and license notices, launches the CLI
 from outside the checkout, verifies the Mac ZIP/DMG signatures, exercises the
@@ -107,7 +108,7 @@ restoring the sibling `.benga-backup-*` directory manually.
 - Test installed startup, GPU support, audio permission denial/recovery, silence,
   output-device changes, window controls and updates on every supported OS.
 - Exercise offline checks, invalid signatures/checksums and read-only installs.
-- Review sources/version, run a validation tag, then stage the matching stable tag.
+- Review sources and version before pushing the matching stable release tag.
 - Website design approved on 2026-11-02. Test the real installer and complete
   the webroot migration before publishing to `/home/benga/web` after the server
   recovers. Follow [server activation](server.md).

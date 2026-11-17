@@ -16,6 +16,7 @@ struct Adjustment {
 
 pub(super) struct AdaptiveResolution {
     enabled: bool,
+    base_downsize: f32,
     downsize: f32,
     maximum: f32,
     target: Duration,
@@ -36,6 +37,7 @@ impl Default for AdaptiveResolution {
     fn default() -> Self {
         Self {
             enabled: false,
+            base_downsize: BASE_DOWNSIZE,
             downsize: BASE_DOWNSIZE,
             maximum: f32::MAX,
             target: Duration::ZERO,
@@ -53,6 +55,22 @@ impl Default for AdaptiveResolution {
 }
 
 impl AdaptiveResolution {
+    pub fn set_base_downsize(&mut self, downsize: u32) -> bool {
+        assert!((1..=16).contains(&downsize));
+        let downsize = downsize as f32;
+        if self.base_downsize == downsize {
+            return false;
+        }
+        self.base_downsize = downsize;
+        self.maximum = self.maximum.max(downsize);
+        self.restart();
+        true
+    }
+
+    pub fn base_downsize(&self) -> f32 {
+        self.base_downsize
+    }
+
     pub fn enable(&mut self, enabled: bool) {
         if self.enabled != enabled {
             self.enabled = enabled;
@@ -64,12 +82,12 @@ impl AdaptiveResolution {
         if self.enabled {
             self.downsize
         } else {
-            1.0
+            self.base_downsize
         }
     }
 
     pub fn extent(&mut self, viewport: [u32; 2]) -> [u32; 2] {
-        self.maximum = viewport[0].max(viewport[1]).max(1) as f32;
+        self.maximum = (viewport[0].max(viewport[1]).max(1) as f32).max(self.base_downsize);
         self.downsize = self.downsize.min(self.maximum);
         extent(viewport, self.downsize())
     }
@@ -85,13 +103,13 @@ impl AdaptiveResolution {
     }
 
     pub fn restart(&mut self) {
-        self.downsize = BASE_DOWNSIZE;
+        self.downsize = self.base_downsize;
         self.reset_timing();
     }
 
     /// Roll back a native GPU trial that proved insensitive to resolution.
     pub fn cap_downsize(&mut self, limit: f32) {
-        let limit = limit.max(BASE_DOWNSIZE).min(self.maximum);
+        let limit = limit.max(self.base_downsize).min(self.maximum);
         if self.downsize > limit {
             self.downsize = limit;
             self.reset_timing();
@@ -248,7 +266,7 @@ impl AdaptiveResolution {
             self.rejected_finer = None;
         }
 
-        let finer = self.downsize > BASE_DOWNSIZE
+        let finer = self.downsize > self.base_downsize
             && (projected_cost < budget * RESTORE_BELOW || self.held_cost.is_some());
         let mut next = if finer {
             // Pixel cost scales approximately with inverse downsize squared.
@@ -259,7 +277,7 @@ impl AdaptiveResolution {
             } else {
                 (projected_cost / (budget * AIM_FOR)).sqrt().clamp(0.5, 1.0)
             };
-            (self.downsize * change as f32).max(BASE_DOWNSIZE)
+            (self.downsize * change as f32).max(self.base_downsize)
         } else if projected_cost >= budget * DROP_AT && self.held_cost.is_none() {
             let change = (projected_cost / (budget * AIM_FOR)).sqrt().clamp(1.0, 2.0);
             (self.downsize * change as f32).min(self.maximum)
@@ -324,6 +342,63 @@ mod tests {
         assert_eq!(controller.extent([1921, 1081]), [1921, 1081]);
         assert_eq!(controller.downsize(), BASE_DOWNSIZE);
         assert_eq!(extent([1, 1], 1000.0), [1, 1]);
+    }
+
+    #[test]
+    fn configured_base_is_used_before_feedback_and_survives_restarts() {
+        for base in 1..=16 {
+            let mut controller = AdaptiveResolution::default();
+            controller.set_base_downsize(base);
+            let expected = extent([1921, 1081], base as f32);
+            assert_eq!(controller.extent([1921, 1081]), expected);
+            controller.enable(true);
+            assert_eq!(controller.extent([1921, 1081]), expected);
+            feed_pixel_cost(&mut controller, 32, 20.0);
+            assert!(controller.downsize() > base as f32);
+            controller.restart();
+            assert_eq!(controller.downsize(), base as f32);
+            controller.enable(false);
+            assert_eq!(controller.extent([1921, 1081]), expected);
+            // A preference larger than the viewport still produces a valid
+            // texture, and growing the viewport keeps the selected base.
+            assert_eq!(controller.extent([1, 1]), [1, 1]);
+            assert_eq!(controller.downsize(), base as f32);
+            assert_eq!(controller.extent([1921, 1081]), expected);
+        }
+    }
+
+    #[test]
+    fn cheap_frames_and_gpu_scaling_caps_preserve_the_configured_base() {
+        let mut controller = AdaptiveResolution::default();
+        controller.set_base_downsize(8);
+        controller.enable(true);
+        controller.extent([5120, 2880]);
+        feed_pixel_cost(&mut controller, 32, 20.0);
+        assert!(controller.downsize() > 8.0);
+        feed(&mut controller, 16, 1.0 / 60.0, 0.001);
+        assert_eq!(controller.downsize(), 8.0);
+        feed_pixel_cost(&mut controller, 32, 20.0);
+        controller.cap_downsize(1.0);
+        assert_eq!(controller.downsize(), 8.0);
+    }
+
+    #[test]
+    fn changing_base_applies_immediately_and_unchanged_values_preserve_feedback() {
+        let mut controller = AdaptiveResolution::default();
+        controller.enable(true);
+        controller.extent([5120, 2880]);
+        controller.set_base_downsize(4);
+        feed_pixel_cost(&mut controller, 32, 20.0);
+        let coarse = controller.downsize();
+        assert!(coarse > 4.0);
+        assert!(!controller.set_base_downsize(4));
+        assert_eq!(controller.downsize(), coarse);
+        assert!(controller.set_base_downsize(16));
+        assert_eq!(controller.downsize(), 16.0);
+        assert!(controller.set_base_downsize(1));
+        assert_eq!(controller.downsize(), 1.0);
+        assert!(controller.previous_observation.is_none());
+        assert!(controller.adjustment.is_none());
     }
 
     #[test]

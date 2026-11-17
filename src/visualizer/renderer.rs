@@ -429,6 +429,15 @@ impl Renderer {
         self.gpu_budget = None;
     }
 
+    /// Initial and minimum linear downsize for the GPU model layer.
+    /// Changing the preference starts fresh feedback at the requested quality.
+    pub fn set_base_downsize(&mut self, downsize: u32) {
+        if self.adaptive_resolution.set_base_downsize(downsize) {
+            self.gpu_feedback.restart();
+            self.gpu_budget = None;
+        }
+    }
+
     pub fn gpu_timing_tag(&mut self, viewport: [u32; 2]) -> crate::render::GpuFrameTag {
         if self.gpu_feedback.observe_viewport(viewport) {
             self.adaptive_resolution.restart();
@@ -464,7 +473,10 @@ impl Renderer {
             // frames at an older size instead of repeatedly cutting based on
             // a stale expensive frame. Presentation waiting is outside this
             // GPU command span and cannot drive resolution changes.
-            let scaling_limit = self.gpu_feedback.scaling_limit(timing);
+            let scaling_limit = self
+                .gpu_feedback
+                .scaling_limit(timing)
+                .map(|limit| limit.max(self.adaptive_resolution.base_downsize()));
             if let Some(limit) = scaling_limit {
                 if self.ribbon_downsize() > limit {
                     self.adaptive_resolution.cap_downsize(limit);

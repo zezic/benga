@@ -124,6 +124,51 @@ impl From<Zoom> for f64 {
     }
 }
 
+/// Starting and minimum linear downsize for the desktop model renderer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u32", into = "u32")]
+pub struct BaseDownsize(u32);
+
+impl BaseDownsize {
+    pub const MAX: u32 = 16;
+
+    pub fn factor(self) -> u32 {
+        self.0
+    }
+
+    #[must_use]
+    pub fn adjusted(self, adjustment: Adjustment) -> Self {
+        Self(match adjustment {
+            Adjustment::Decrease => self.0.saturating_sub(1).max(1),
+            Adjustment::Increase => (self.0 + 1).min(Self::MAX),
+        })
+    }
+}
+
+impl Default for BaseDownsize {
+    fn default() -> Self {
+        Self(1)
+    }
+}
+
+impl TryFrom<u32> for BaseDownsize {
+    type Error = anyhow::Error;
+
+    fn try_from(factor: u32) -> Result<Self, Self::Error> {
+        ensure!(
+            (1..=Self::MAX).contains(&factor),
+            "base_downsize must be an integer between 1 and 16"
+        );
+        Ok(Self(factor))
+    }
+}
+
+impl From<BaseDownsize> for u32 {
+    fn from(value: BaseDownsize) -> Self {
+        value.0
+    }
+}
+
 /// Exposure length in frame intervals, bounded to keep motion history finite.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "f32", into = "f32")]
@@ -295,6 +340,7 @@ pub struct Config {
     pub preamp_db: PreampDb,
     pub zoom: Zoom,
     pub frame_rate_limit: FrameRateLimit,
+    pub base_downsize: BaseDownsize,
     pub shutter_frames: ShutterFrames,
     pub visualizer_text_scale: VisualizerTextScale,
     pub presentation_opacity: PresentationOpacity,
@@ -414,6 +460,32 @@ mod tests {
         for invalid in [0.34, 3.01, f64::NAN, f64::INFINITY] {
             assert!(Zoom::try_from(invalid).is_err());
         }
+    }
+
+    #[test]
+    fn base_downsize_steps_through_integers_and_preserves_config_bounds() -> anyhow::Result<()> {
+        let mut value = BaseDownsize::default();
+        assert_eq!(value.factor(), 1);
+        assert_eq!(value.adjusted(Adjustment::Decrease), value);
+        for expected in 2..=BaseDownsize::MAX {
+            value = value.adjusted(Adjustment::Increase);
+            assert_eq!(value.factor(), expected);
+        }
+        assert_eq!(value.adjusted(Adjustment::Increase), value);
+        for expected in (1..BaseDownsize::MAX).rev() {
+            value = value.adjusted(Adjustment::Decrease);
+            assert_eq!(value.factor(), expected);
+        }
+
+        for factor in 1..=BaseDownsize::MAX {
+            let config: Config = ron::from_str(&format!("(base_downsize: {factor})"))?;
+            assert_eq!(config.base_downsize.factor(), factor);
+            assert_eq!(ron::from_str::<Config>(&ron::to_string(&config)?)?, config);
+        }
+        for invalid in ["0", "17", "-1", "1.5", "NaN", "4294967296"] {
+            assert!(ron::from_str::<Config>(&format!("(base_downsize: {invalid})")).is_err());
+        }
+        Ok(())
     }
 
     #[test]

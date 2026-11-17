@@ -222,6 +222,7 @@ mod tests {
         config.edit().preamp_db = PreampDb::try_from(-12.0)?;
         config.edit().zoom = crate::config::Zoom::try_from(1.7)?;
         config.edit().frame_rate_limit = FrameRateLimit::Fps55;
+        config.edit().base_downsize = crate::config::BaseDownsize::try_from(8)?;
         config.edit().shutter_frames = crate::config::ShutterFrames::try_from(2.5)?;
         config.edit().theme = config
             .theme
@@ -329,6 +330,9 @@ mod tests {
             "(zoom: 0.34)",
             "(zoom: 3.01)",
             "(zoom: NaN)",
+            "(base_downsize: 0)",
+            "(base_downsize: 17)",
+            "(base_downsize: 1.5)",
             "(shutter_frames: 0.0)",
             "(shutter_frames: 17.0)",
             "(shutter_frames: NaN)",
@@ -434,6 +438,10 @@ mod tests {
         );
         assert_eq!(missing.preamp_db, PreampDb::default());
         assert_eq!(missing.zoom, crate::config::Zoom::default());
+        assert_eq!(
+            missing.base_downsize,
+            crate::config::BaseDownsize::default()
+        );
         assert_eq!(
             missing.shutter_frames,
             crate::config::ShutterFrames::default()

@@ -42,6 +42,7 @@
     preamp_db: 0.0,
     zoom: 1.5379000000000003,
     frame_rate_limit: Fps60,
+    base_downsize: 1,
     shutter_frames: 2.0,
     visualizer_text_scale: 1.2,
     presentation_opacity: 0.99999994,

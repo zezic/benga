@@ -86,10 +86,16 @@ Benga runs in presentation mode. Move the mouse to reveal the controls; hover
 any control for a hint. They fade after 5 seconds of inactivity.
 
 - Browse models and themes, lock the current model, or enable automatic colors.
-- Adjust motion blur, line width, zoom, and the FPS limit.
+- Adjust motion blur, line width, zoom, the FPS limit, and base downsize.
 - Adjust analyzer boost and text opacity, or manage disliked themes.
 - Double-click the background to toggle fullscreen; `Esc` leaves fullscreen.
 - Use **Save as Default** to set the startup theme.
+
+**Base Downsize** sets the model renderer's starting and minimum downsize, in
+integer steps from 1× to 16×. At 1× it uses the full output resolution; larger
+values reduce model resolution for faster rendering. Adaptive rendering can
+increase downsize further when needed. Changes apply immediately and save
+automatically for future launches. The default is 1×.
 
 Music drives the model's motion, part highlights, and close-ups of points of
 interest. Each launch starts with a randomly selected model. Automatic model

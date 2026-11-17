@@ -75,6 +75,7 @@ enum Setting {
     Theme,
     PresentationOpacity,
     FrameRate,
+    BaseDownsize,
     LineWidth,
     Zoom,
 }
@@ -118,6 +119,14 @@ impl App {
                 self.frames.limit_changed(Instant::now());
                 if let WindowState::Active(window) = &mut self.state {
                     window.visualizer_renderer.reset_frame_timing();
+                }
+            }
+            Setting::BaseDownsize => {
+                settings.base_downsize = settings.base_downsize.adjusted(adjustment);
+                if let WindowState::Active(window) = &mut self.state {
+                    window
+                        .visualizer_renderer
+                        .set_base_downsize(settings.base_downsize.factor());
                 }
             }
             Setting::Zoom => {
@@ -170,6 +179,7 @@ impl App {
                     Dial::LineWidth => Setting::LineWidth,
                     Dial::Zoom => Setting::Zoom,
                     Dial::FrameRate => Setting::FrameRate,
+                    Dial::BaseDownsize => Setting::BaseDownsize,
                     Dial::TextOpacity => Setting::PresentationOpacity,
                 };
                 self.adjust_setting(setting, adjustment);
@@ -812,6 +822,9 @@ impl ApplicationHandler for App {
                     );
                 }
                 self.renderer_status = None;
+                window
+                    .visualizer_renderer
+                    .set_base_downsize(self.settings.base_downsize.factor());
                 window
                     .visualizer_renderer
                     .set_adaptive_ribbon_resolution(true);

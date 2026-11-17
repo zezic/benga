@@ -116,8 +116,9 @@ fn reduced_ribbon_layer_retains_thin_ink_and_full_resolution_scene() -> anyhow::
         write_texture(&background, &background_pixels);
         for x in [31.0, 32.0, 35.75] {
             let mut baseline_ink = None;
-            for downsize in [1.0, 2.0, 8.0] {
-                renderer.benchmark_ribbon_downsize(Some(downsize));
+            for base in [1, 2, 8, 16] {
+                renderer.set_base_downsize(base);
+                let downsize = base as f32;
                 model.projected[0][0] = x;
                 model.projected[1][0] = x;
                 model.reset += 1;

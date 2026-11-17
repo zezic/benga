@@ -41,6 +41,7 @@ pub enum Dial {
     Model,
     LineWidth,
     FrameRate,
+    BaseDownsize,
     TextOpacity,
     Zoom,
 }
@@ -82,6 +83,7 @@ enum Control {
     MotionBlur,
     LineWidth,
     FrameRate,
+    BaseDownsize,
     Zoom,
     TextOpacity,
     HideCursor,
@@ -102,6 +104,7 @@ impl Control {
             Self::MotionBlur => "MOTION BLUR",
             Self::LineWidth => "LINE WIDTH",
             Self::FrameRate => "FPS LIMIT",
+            Self::BaseDownsize => "BASE DOWNSIZE",
             Self::Zoom => "ZOOM",
             Self::TextOpacity => "TEXT OPACITY",
             Self::HideCursor => "CURSOR",
@@ -125,6 +128,7 @@ impl Control {
             Self::MotionBlur => "Toggle motion blur on the model wireframe.",
             Self::LineWidth => "Adjust the thickness of model wireframe lines.",
             Self::FrameRate => "Limit drawing speed, or synchronize with the display using VSync.",
+            Self::BaseDownsize => "Set the model's minimum downsize from 1x to 16x. Adaptive rendering starts here and may downsize further to meet the FPS limit.",
             Self::Zoom => "Adjust visualizer magnification.",
             Self::TextOpacity => "Adjust infographic opacity. Set 0% to hide the presentation text.",
             Self::HideCursor => "Hide the mouse pointer when the controls fade out.",
@@ -169,10 +173,6 @@ struct ControlColumn {
 }
 
 impl ControlColumn {
-    const fn single(top: Control) -> Self {
-        Self { top, bottom: None }
-    }
-
     const fn pair(top: Control, bottom: Control) -> Self {
         Self {
             top,
@@ -217,7 +217,7 @@ const GROUPS: [ControlGroup; 5] = [
     ControlGroup {
         domain: Domain::Rendering,
         columns: &[
-            ControlColumn::single(Control::MotionBlur),
+            ControlColumn::pair(Control::MotionBlur, Control::BaseDownsize),
             ControlColumn::pair(Control::LineWidth, Control::Zoom),
             ControlColumn::pair(Control::FrameRate, Control::TextOpacity),
         ],
@@ -721,6 +721,10 @@ impl Controls {
                 dial(Dial::LineWidth, format!("{}%", config.line_width.percent()))
             }
             Control::FrameRate => dial(Dial::FrameRate, config.frame_rate_limit.to_string()),
+            Control::BaseDownsize => dial(
+                Dial::BaseDownsize,
+                format!("{}x", config.base_downsize.factor()),
+            ),
             Control::Zoom => dial(Dial::Zoom, format!("{:.0}%", config.zoom.factor() * 100.0)),
             Control::TextOpacity => dial(
                 Dial::TextOpacity,
@@ -924,6 +928,7 @@ impl Controls {
                     | Control::Model
                     | Control::LineWidth
                     | Control::FrameRate
+                    | Control::BaseDownsize
                     | Control::TextOpacity
                     | Control::Zoom
             );
@@ -1692,6 +1697,52 @@ mod tests {
             layout.cell(Control::Help).rect.x0,
             layout.cell(Control::Boost).rect.x0
         );
+        assert_eq!(layout.cell(Control::BaseDownsize).row, Row::Bottom);
+        assert_eq!(
+            layout.cell(Control::BaseDownsize).rect.x0,
+            layout.cell(Control::MotionBlur).rect.x0
+        );
+    }
+
+    #[test]
+    fn base_downsize_dial_shows_the_saved_factor_and_routes_both_steps() -> anyhow::Result<()> {
+        let now = Instant::now();
+        let mut fonts = Fonts::new()?;
+        for factor in [1, 4, 16] {
+            let mut config = Config::default();
+            config.base_downsize = crate::config::BaseDownsize::try_from(factor)?;
+            for (width, height, dpi) in [(800.0, 600.0, 1.0), (1280.0, 720.0, 2.0)] {
+                let mut view = View::fit(vello::kurbo::Size::new(width, height));
+                view.set_ui_scale(dpi);
+                let mut controls = Controls::new(now);
+                draw(&mut controls, &mut fonts, &view, &config, now);
+                let label = format!("{factor}x");
+                let plan = controls
+                    .text
+                    .get(&(label.clone(), LabelStyle::Value))
+                    .expect("the dial displays the saved base downsize")
+                    .plan();
+                assert_eq!(plan.glyphs.len(), label.len());
+                assert!(
+                    plan.glyphs.iter().all(|glyph| glyph.id != 0),
+                    "the bundled font must render every character in {label}"
+                );
+                for increase in [false, true] {
+                    let matches_step = |action| {
+                        matches!(
+                            action,
+                            ControlAction::Adjust(Dial::BaseDownsize, step)
+                                if matches!(step, Adjustment::Increase) == increase
+                        )
+                    };
+                    let button = target(&controls, matches_step);
+                    assert!(controls
+                        .click(button.center(), now)
+                        .is_some_and(matches_step));
+                }
+            }
+        }
+        Ok(())
     }
 
     #[test]

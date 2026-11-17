@@ -34,9 +34,11 @@ conservative layout support remain CPU-side. In supported GPU modes, source
 projection, motion history, edge expansion and rasterization stay on the GPU;
 no CPU-expanded model line/ribbon triangles are uploaded.
 
-Adaptive rendering starts at **1× downsize**, using the full physical output
-width and height, and can restore all the way back to 1× when timing allows.
-There is no supersampling: the adaptive factor never falls below 1×.
+Adaptive rendering starts at the saved **Base Downsize**, adjustable from
+**1× to 16×** in integer steps under Rendering. The default is **1×**, using
+the full physical output width and height. Adaptive quality can restore detail
+back to the selected base and never falls below it. Changes apply immediately
+and persist across launches.
 Each fresh timing result updates the target for the **next submitted frame**.
 GPU measurements arrive asynchronously and can trail submission by several
 frames. Older-quality samples can inform scaling-benefit evidence, but cannot
@@ -59,8 +61,8 @@ Using that budget:
 - Aim for **75% of budget** (**12.50 ms** at 60 FPS) when choosing the next
   factor. The estimate multiplies linear downsize by
   `sqrt(projected_cost / target_cost)`, limiting each frame's factor change to
-  **0.5×–2×** and retaining the **1× minimum downsize**. Quality normally stays
-  unchanged between the restore and drop thresholds.
+  **0.5×–2×** and retaining the **selected base as minimum downsize**. Quality
+  normally stays unchanged between the restore and drop thresholds.
 
 These examples use controller-equivalent milliseconds. Native GPU feedback
 translates the actual ribbon time through the allowance below; the host
@@ -129,8 +131,9 @@ jitter sample cannot repeatedly restart an unhelpful sequence. That limit is rec
 remaining deadline headroom is consumed, and expires when rendering becomes
 substantially cheaper. There is no timed hold before a useful quality change.
 A resize, R switch, occlusion timing restart or frame-budget change resets quality
-to 1×. There is no fixed maximum downsize factor. Sudden workload changes can
-still miss a deadline, and CPU/fixed presentation costs can limit attainable FPS.
+to the selected base. There is no fixed maximum adaptive downsize factor.
+Sudden workload changes can still miss a deadline, and CPU/fixed presentation
+costs can limit attainable FPS.
 
 The model always renders into its own `Rgba16Float` layer. At 1× that layer has
 the native output dimensions; it remains separate so compositing and GPU model

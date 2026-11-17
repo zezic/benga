@@ -290,7 +290,40 @@ fn extract(bytes: &[u8], destination: &Path, zipped: bool) -> anyhow::Result<()>
     Ok(())
 }
 
-pub fn prepare(release: &Release) -> anyhow::Result<Prepared> {
+fn read_archive(
+    reader: impl Read,
+    size: u64,
+    mut progress: impl FnMut(u8),
+) -> anyhow::Result<Vec<u8>> {
+    let mut reader = reader.take(size + 1);
+    let mut bytes = Vec::new();
+    let mut buffer = [0; 64 * 1024];
+    let mut last_percent = 0;
+    loop {
+        let count = match reader.read(&mut buffer) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result?,
+        };
+        if count == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+        // Report completion only after EOF and the size check.
+        let percent = (100 * bytes.len() as u64 / size).min(99) as u8;
+        if percent > last_percent {
+            progress(percent);
+            last_percent = percent;
+        }
+    }
+    ensure!(
+        bytes.len() as u64 == size,
+        "Downloaded update has the wrong size"
+    );
+    progress(100);
+    Ok(bytes)
+}
+
+pub fn prepare(release: &Release, progress: impl FnMut(u8)) -> anyhow::Result<Prepared> {
     let target = install_root(&std::env::current_exe()?.canonicalize()?)?;
     ensure!(
         !receipt_path(&target)?.exists(),
@@ -303,17 +336,7 @@ pub fn prepare(release: &Release) -> anyhow::Result<Prepared> {
         .context("Installation is read-only; move Benga to a writable folder to update")?;
     let artifact = &release.artifact;
     let mut response = agent().get(&artifact.url).call()?;
-    let mut reader = response
-        .body_mut()
-        .with_config()
-        .limit(artifact.size + 1)
-        .reader();
-    let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes)?;
-    ensure!(
-        bytes.len() as u64 == artifact.size,
-        "Downloaded update has the wrong size"
-    );
+    let bytes = read_archive(response.body_mut().as_reader(), artifact.size, progress)?;
     ensure!(
         sha256_hex(&bytes) == artifact.sha256.to_ascii_lowercase(),
         "Update checksum does not match"
@@ -609,6 +632,32 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
     use std::io::Write;
+
+    #[test]
+    fn archive_progress_completes_only_after_the_signed_size_matches() -> anyhow::Result<()> {
+        let archive = vec![0xab; 256 * 1024];
+        let size = archive.len() as u64;
+        let mut updates = Vec::new();
+        let bytes = read_archive(archive.as_slice(), size, |percent| updates.push(percent))?;
+        assert_eq!(bytes, archive);
+        assert_eq!(updates, [25, 50, 75, 99, 100]);
+
+        updates.clear();
+        assert!(
+            read_archive(&archive[..archive.len() - 1], size, |percent| {
+                updates.push(percent);
+            })
+            .is_err()
+        );
+        assert!(!updates.contains(&100));
+
+        updates.clear();
+        let mut oversized = std::io::repeat(0).take(size + 5);
+        assert!(read_archive(&mut oversized, size, |percent| updates.push(percent)).is_err());
+        assert!(!updates.contains(&100));
+        assert_eq!(oversized.limit(), 4);
+        Ok(())
+    }
 
     #[test]
     fn cleanup_receipt_path_matches_existing_installations() -> anyhow::Result<()> {

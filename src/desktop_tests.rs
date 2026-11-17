@@ -39,6 +39,34 @@ fn first_start_help_can_be_dismissed_and_update_preferences_persist() -> anyhow:
 }
 
 #[test]
+fn download_progress_keeps_the_worker_active_until_preparation_finishes() -> anyhow::Result<()> {
+    let config = Config::default();
+    let mut desktop = Desktop::new(&config, None, true)?;
+    desktop.status = "Downloading v1.2.3".into();
+    desktop.download_percent = Some(0);
+    let (tx, rx) = mpsc::channel();
+    desktop.receiver = Some(rx);
+
+    tx.send(Event::DownloadProgress(15))?;
+    tx.send(Event::DownloadProgress(42))?;
+    desktop.poll(&config);
+    assert_eq!(desktop.status_label(), "Downloading v1.2.3 (42%)");
+    assert!(desktop.receiver.is_some());
+
+    tx.send(Event::DownloadProgress(100))?;
+    desktop.poll(&config);
+    assert_eq!(desktop.status_label(), "Preparing update...");
+    assert!(desktop.receiver.is_some());
+
+    tx.send(Event::Prepared(Err(anyhow::anyhow!("checksum mismatch"))))?;
+    desktop.poll(&config);
+    assert_eq!(desktop.status_label(), "Update failed. Try again.");
+    assert!(desktop.download_percent.is_none());
+    assert!(desktop.receiver.is_none());
+    Ok(())
+}
+
+#[test]
 fn every_enabled_button_and_update_badge_respond_to_hover_in_both_tones() -> anyhow::Result<()> {
     let config = Config::default();
     for theme in [

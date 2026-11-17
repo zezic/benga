@@ -17,6 +17,7 @@ use vello::{
 
 enum Event {
     Checked(anyhow::Result<Option<Release>>),
+    DownloadProgress(u8),
     Prepared(anyhow::Result<Prepared>),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,6 +40,7 @@ pub struct Desktop {
     available: Option<Release>,
     prepared: Option<Prepared>,
     status: String,
+    download_percent: Option<u8>,
     audio_error: Option<String>,
     automatic: bool,
 }
@@ -64,6 +66,7 @@ impl Desktop {
                 "Updates unavailable in this build."
             }
             .into(),
+            download_percent: None,
             audio_error,
             automatic: config.updates.auto_install,
         };
@@ -96,18 +99,31 @@ impl Desktop {
         if let Some(release) = self.available.clone() {
             let (tx, rx) = mpsc::channel();
             self.receiver = Some(rx);
-            self.status = format!("Downloading v{}...", release.version);
+            self.status = format!("Downloading v{}", release.version);
+            self.download_percent = Some(0);
             std::thread::spawn(move || {
-                let _ = tx.send(Event::Prepared(updater::prepare(&release)));
+                let result = updater::prepare(&release, |percent| {
+                    let _ = tx.send(Event::DownloadProgress(percent));
+                });
+                let _ = tx.send(Event::Prepared(result));
             });
         }
     }
 
     pub fn poll(&mut self, config: &Config) {
         self.automatic = config.updates.auto_install;
-        if let Some(event) = self.receiver.as_ref().and_then(|rx| rx.try_recv().ok()) {
-            self.receiver = None;
+        while let Some(event) = self.receiver.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            if !matches!(event, Event::DownloadProgress(_)) {
+                self.receiver = None;
+                self.download_percent = None;
+            }
             match event {
+                Event::DownloadProgress(percent) => {
+                    self.download_percent = Some(percent);
+                    if percent == 100 {
+                        self.status = "Preparing update...".into();
+                    }
+                }
                 Event::Checked(Ok(Some(release))) => {
                     self.status = format!("v{} available", release.version);
                     self.available = Some(release);
@@ -200,6 +216,13 @@ impl Desktop {
         self.pointer = pointer;
     }
 
+    fn status_label(&self) -> String {
+        match self.download_percent {
+            Some(percent @ 0..=99) => format!("{} ({percent}%)", self.status),
+            _ => self.status.clone(),
+        }
+    }
+
     pub fn draw(
         &mut self,
         scene: &mut Scene,
@@ -213,7 +236,11 @@ impl Desktop {
         let palette = DialogPalette::new(colors, ink);
         if !self.open {
             if let Some(release) = &self.available {
-                let label = format!("Benga v{} available", release.version);
+                let label = if self.download_percent.is_some() {
+                    self.status_label()
+                } else {
+                    format!("Benga v{} available", release.version)
+                };
                 let width = (viewport.width / scale - 24.0).clamp(100.0, 248.0);
                 let rect = Rect::new(
                     viewport.width / scale - width - 12.0,
@@ -227,6 +254,12 @@ impl Desktop {
                     palette,
                 };
                 self.button(&mut canvas, rect, &label, Action::Open, false, true);
+                if let Some(percent) = self.download_percent {
+                    canvas.progress_bar(
+                        Rect::new(rect.x0 + 1.0, rect.y1 - 5.0, rect.x1 - 1.0, rect.y1 - 1.0),
+                        percent,
+                    );
+                }
                 return true;
             }
             return false;
@@ -315,10 +348,13 @@ impl Desktop {
             &mut canvas,
             Point::new(20.0, 121.0),
             width - 40.0,
-            &self.status.clone(),
+            &self.status_label(),
             TextStyle::Label,
             palette.muted,
         );
+        if let Some(percent) = self.download_percent {
+            canvas.progress_bar(Rect::new(20.0, 126.0, width - 20.0, 130.0), percent);
+        }
         let checks = format!(
             "[{}] Check on startup",
             if config.updates.check_on_start {
@@ -503,6 +539,26 @@ struct Canvas<'a> {
     scene: &'a mut Scene,
     transform: Affine,
     palette: DialogPalette,
+}
+
+impl Canvas<'_> {
+    fn progress_bar(&mut self, track: Rect, percent: u8) {
+        self.scene.fill(
+            Fill::NonZero,
+            self.transform,
+            self.palette.border,
+            None,
+            &track,
+        );
+        if percent > 0 {
+            let fill = Rect {
+                x1: track.x0 + track.width() * f64::from(percent) / 100.0,
+                ..track
+            };
+            self.scene
+                .fill(Fill::NonZero, self.transform, self.palette.ink, None, &fill);
+        }
+    }
 }
 
 #[cfg(test)]

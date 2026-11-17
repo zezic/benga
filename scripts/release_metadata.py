@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create authenticated updater metadata from a complete set of native packages."""
+"""Create authenticated updater metadata for the selected release platforms."""
 
 import argparse
 import base64
@@ -56,22 +56,32 @@ def sha256(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def write_metadata(directory, tag, repository, expected_public_key):
+def artifact_metadata(directory, tag, repository, filename):
+    path = directory / filename
+    size = path.stat().st_size if path.is_file() else 0
+    if not size:
+        raise ValueError(f"Missing update asset: {filename}")
+    return {
+        "url": f"https://github.com/{repository}/releases/download/{tag}/{filename}",
+        "sha256": sha256(path),
+        "size": size,
+    }
+
+
+def write_metadata(directory, tag, repository, expected_public_key, platforms=tuple(UPDATE_ARCHIVES)):
     version = validate_tag(tag)
     key = signing_key()
     if not expected_public_key or public_key(key) != expected_public_key:
         raise ValueError("The signing key must match the public key compiled into this build")
+    if not platforms or not set(platforms) <= UPDATE_ARCHIVES.keys():
+        raise ValueError("Select at least one known updater platform")
     packages = {}
-    for platform, extension in UPDATE_ARCHIVES.items():
-        filename = f"Benga-{tag}-{platform}{extension}"
-        path = directory / filename
-        if not path.is_file() or not path.stat().st_size:
-            raise ValueError(f"Missing updater archive: {filename}")
-        packages[platform] = {
-            "url": f"https://github.com/{repository}/releases/download/{tag}/{filename}",
-            "sha256": sha256(path),
-            "size": path.stat().st_size,
-        }
+    for platform in platforms:
+        basename = f"Benga-{tag}-{platform}"
+        package = artifact_metadata(directory, tag, repository, basename + UPDATE_ARCHIVES[platform])
+        if platform == "windows-x86_64":
+            package["installer"] = artifact_metadata(directory, tag, repository, basename + "-setup.exe")
+        packages[platform] = package
     payload = (json.dumps({"version": version, "tag": tag, "platforms": packages}, indent=2) + "\n").encode("utf-8")
     (directory / "latest.json").write_bytes(payload)
     (directory / "latest.json.sig").write_text(base64.b64encode(key.sign(payload)).decode("ascii") + "\n", encoding="ascii")
@@ -90,6 +100,7 @@ def main():
     create.add_argument("directory", type=Path)
     create.add_argument("--tag", required=True)
     create.add_argument("--repository", default="zezic/benga")
+    create.add_argument("--platforms", nargs="+", choices=UPDATE_ARCHIVES, default=tuple(UPDATE_ARCHIVES))
     args = parser.parse_args()
     try:
         if args.command == "public-key":
@@ -99,7 +110,10 @@ def main():
         else:
             if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repository):
                 raise ValueError("Repository must use owner/name syntax")
-            write_metadata(args.directory, args.tag, args.repository, os.environ.get("BENGA_UPDATE_PUBLIC_KEY", ""))
+            write_metadata(
+                args.directory, args.tag, args.repository,
+                os.environ.get("BENGA_UPDATE_PUBLIC_KEY", ""), args.platforms,
+            )
     except (ValueError, OSError) as error:
         print(f"Release metadata: {error}", file=sys.stderr)
         sys.exit(1)

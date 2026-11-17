@@ -28,6 +28,8 @@ class SignedReleaseTests(unittest.TestCase):
         self.tag = f"v{self.version}"
         for platform, extension in release.UPDATE_ARCHIVES.items():
             (self.directory / f"Benga-{self.tag}-{platform}{extension}").write_bytes(platform.encode())
+        self.installer = self.directory / f"Benga-{self.tag}-windows-x86_64-setup.exe"
+        self.installer.write_bytes(b"Windows Setup")
 
     def create(self, public=None):
         release.write_metadata(self.directory, self.tag, "zezic/benga", public or self.public)
@@ -46,15 +48,38 @@ class SignedReleaseTests(unittest.TestCase):
             self.assertEqual(entry["sha256"], release.sha256(archive))
             self.assertEqual(entry["size"], archive.stat().st_size)
             self.assertTrue(entry["url"].endswith(archive.name))
+        installer = manifest["platforms"]["windows-x86_64"]["installer"]
+        self.assertEqual(installer["sha256"], release.sha256(self.installer))
+        self.assertEqual(installer["size"], self.installer.stat().st_size)
+        self.assertTrue(installer["url"].endswith(self.installer.name))
         self.assertIn("latest.json.sig", (self.directory / "SHA256SUMS").read_text())
 
     def test_incomplete_release_and_unexpected_key_fail_closed(self):
         with self.assertRaisesRegex(ValueError, "match"):
             self.create(release.public_key(Ed25519PrivateKey.generate()))
-        next(self.directory.iterdir()).unlink()
-        with self.assertRaisesRegex(ValueError, "Missing updater archive"):
+        (self.directory / f"Benga-{self.tag}-macos-aarch64.zip").unlink()
+        with self.assertRaisesRegex(ValueError, "Missing update asset"):
             self.create()
         self.assertFalse((self.directory / "latest.json").exists())
+
+    def test_windows_release_requires_the_installer(self):
+        self.installer.unlink()
+        with self.assertRaisesRegex(ValueError, "windows-x86_64-setup"):
+            self.create()
+        self.assertFalse((self.directory / "latest.json").exists())
+
+    def test_signs_a_release_with_paused_platforms(self):
+        paused = {"macos-x86_64", "linux-aarch64"}
+        enabled = tuple(platform for platform in release.UPDATE_ARCHIVES if platform not in paused)
+        for platform in paused:
+            extension = release.UPDATE_ARCHIVES[platform]
+            (self.directory / f"Benga-{self.tag}-{platform}{extension}").unlink()
+        release.write_metadata(self.directory, self.tag, "zezic/benga", self.public, enabled)
+
+        payload = (self.directory / "latest.json").read_bytes()
+        signature = base64.b64decode((self.directory / "latest.json.sig").read_text())
+        self.key.public_key().verify(signature, payload)
+        self.assertEqual(tuple(json.loads(payload)["platforms"]), enabled)
 
     def test_tag_must_match_cargo_version(self):
         with self.assertRaisesRegex(ValueError, "match Cargo.toml"):

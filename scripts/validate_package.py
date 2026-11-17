@@ -110,6 +110,9 @@ def validate_windows(archive, basename, version, temporary):
     try:
         check_resources(installed)
         require(not (installed / ".benga-portable").exists(), "Installer enables portable updates")
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, registration, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+            location, _ = winreg.QueryValueEx(key, "InstallLocation")
+            require(Path(location).resolve() == installed.resolve(), "Windows Setup update location mismatch")
         smoke(installed / "benga.exe", version, temporary)
     finally:
         uninstaller = installed / "unins000.exe"

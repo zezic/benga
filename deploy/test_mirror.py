@@ -25,11 +25,13 @@ class MirrorTests(unittest.TestCase):
         ])
         self.public = base64.b64encode(public[-32:])
 
-    def signed_release(self, version="1.2.3"):
+    def signed_release(self, version="1.2.3", *, omit=()):
         tag = "v" + version
         downloads = {}
         platforms = {}
         for platform, extension in mirror.PLATFORMS.items():
+            if platform in omit:
+                continue
             name = f"Benga-{tag}-{platform}{extension}"
             url = f"https://github.com/zezic/benga/releases/download/{tag}/{name}"
             content = ("test archive: " + platform).encode()
@@ -99,6 +101,23 @@ class MirrorTests(unittest.TestCase):
         self.assertEqual((root / "current").readlink(), Path("v1.2.3"))
         self.assertEqual((root / "current/latest.json").read_bytes(), payload)
         self.assertEqual((root / "current/latest.json.sig").read_bytes(), signature)
+
+    def test_mirrors_only_platforms_listed_in_a_signed_release(self):
+        payload, _, downloads = self.signed_release(omit=("macos-x86_64", "linux-aarch64"))
+        root = self.directory / "downloads"
+        root.mkdir()
+        with patch.object(mirror, "fetch", self.fetcher(downloads)):
+            mirror.mirror(root, self.public)
+        self.assertEqual((root / "current/latest.json").read_bytes(), payload)
+        self.assertEqual(
+            {path.name for path in (root / "current").iterdir()},
+            {
+                "latest.json", "latest.json.sig",
+                "Benga-v1.2.3-macos-aarch64.zip",
+                "Benga-v1.2.3-windows-x86_64.zip",
+                "Benga-v1.2.3-linux-x86_64.tar.gz",
+            },
+        )
 
     def test_failed_download_never_publishes_partial_version(self):
         _, _, downloads = self.signed_release()

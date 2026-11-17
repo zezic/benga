@@ -29,9 +29,15 @@ Packages also carry license notices and first-run guidance. Linux needs a Vulkan
 
 `.github/workflows/release.yml` builds only when a push creates a new `v*` tag.
 The stable `vMAJOR.MINOR.PATCH` tag must match `Cargo.toml`. After tests, builds,
-and package validation pass on all five native runners, CI signs the update
-manifest, uploads all assets to a draft, and publishes the GitHub release.
+and package validation pass on the enabled native runners, CI signs the update
+manifest, uploads their assets to a draft, and publishes the GitHub release.
 Rerun the workflow to finish an interrupted draft.
+
+Intel macOS and ARM Linux are currently paused in the release workflow. To resume
+either target, remove its Rust triple from `BENGA_PAUSED_RELEASE_TARGETS` in
+`.github/workflows/release.yml`. Archived releases still provide earlier packages.
+An existing mirror deployment needs the updated `deploy/mirror.py` to serve
+releases with paused platforms.
 
 A tag such as `v0.1.1-check.1` runs build and package validation only.
 Temporary Actions artifacts expire after three days. Published release assets
@@ -76,11 +82,12 @@ Every release contains `latest.json`, `latest.json.sig` and `SHA256SUMS`:
 }}
 ```
 
-The manifest includes all five release keys above. Mac/Windows entries use ZIP;
-Linux entries use tar.gz. The detached signature is a base64 raw 64-byte Ed25519
-signature over the exact JSON bytes, including its final newline. The app and
-mirror authenticate the manifest, then check archive size and SHA-256. Preserve
-signed bytes and versioned URLs; never rewrite a mirrored manifest.
+The manifest includes every enabled release platform. Mac and Windows entries use
+ZIP. Linux entries use tar.gz. Windows entries also carry an `installer` object
+with the Setup executable's URL, SHA-256 and size. The detached signature is a
+base64 raw 64-byte Ed25519 signature over the exact JSON bytes, including its
+final newline. The app and mirror authenticate the manifest, then check download
+size and SHA-256. Preserve the signed bytes and versioned URLs when mirroring.
 `SHA256SUMS` also covers installers and feed files.
 
 The app checks the mirror first, then the signed GitHub Release feed if the
@@ -91,9 +98,13 @@ builds are not offered as public updates.
 
 Startup checks default on; automatic installation defaults off. **F1** opens the
 preferences. Self-replacement supports writable Mac bundles and Windows/Linux
-archives marked `.benga-portable`; installer-managed copies use their installer
-or package manager. Automatic updates install on quit and leave the app closed;
-manual updates restart.
+archives marked `.benga-portable`. Linux package-managed copies use their package
+manager. Windows Setup installations download the authenticated Setup executable
+and run it after Benga exits. Manual Setup updates open the installer wizard.
+Manual archive updates restart Benga. Automatic updates install on quit and
+leave the app closed. For older Windows
+Setup installations, run an installer containing this updater once to enable
+subsequent in-app updates.
 A failed swap/restart restores the previous app, retained until successful
 startup. There is no crash watchdog; power loss between renames can require
 restoring the sibling `.benga-backup-*` directory manually.

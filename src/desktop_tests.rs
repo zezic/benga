@@ -82,6 +82,7 @@ fn every_enabled_button_and_update_badge_respond_to_hover_in_both_tones() -> any
                 sha256: String::new(),
                 size: 1,
             },
+            installer: None,
         });
         for open in [true, false] {
             desktop.open = open;

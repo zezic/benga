@@ -118,12 +118,14 @@ def parse_manifest(payload, release_tag):
     require(isinstance(version, str) and re.fullmatch(VERSION_PATTERN, version), "Invalid stable version")
     require(manifest.get("tag") == release_tag == f"v{version}", "Release tag and manifest disagree")
     platforms = manifest.get("platforms")
-    require(isinstance(platforms, dict) and set(platforms) == set(PLATFORMS), "Incomplete platform set")
+    require(
+        isinstance(platforms, dict) and platforms and platforms.keys() <= PLATFORMS.keys(),
+        "Invalid platform set",
+    )
     archives = []
-    for platform, extension in PLATFORMS.items():
-        entry = platforms[platform]
+    for platform, entry in platforms.items():
         require(isinstance(entry, dict), "Invalid platform entry")
-        name = f"Benga-{release_tag}-{platform}{extension}"
+        name = f"Benga-{release_tag}-{platform}{PLATFORMS[platform]}"
         url = f"https://github.com/{REPOSITORY}/releases/download/{release_tag}/{name}"
         require(entry.get("url") == url, "Archive URL does not belong to this release")
         digest = entry.get("sha256")

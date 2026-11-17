@@ -137,13 +137,15 @@ impl Desktop {
                     self.status = "Couldn't check. Try again.".into();
                 }
                 Event::Prepared(Ok(prepared)) => {
-                    self.prepared = Some(prepared);
                     self.status = if self.automatic {
                         "Ready. Installs when you quit."
+                    } else if prepared.is_setup() {
+                        "Windows Setup is ready."
                     } else {
                         "Update ready."
                     }
                     .into();
+                    self.prepared = Some(prepared);
                 }
                 Event::Prepared(Err(error)) => {
                     log::warn!("Update preparation: {error:#}");
@@ -400,10 +402,10 @@ impl Desktop {
             self.button(
                 &mut canvas,
                 Rect::new(148.0, 230.0, 296.0, 264.0),
-                if self.prepared.is_some() {
-                    "Install & restart"
-                } else {
-                    "Download"
+                match self.prepared.as_ref() {
+                    Some(prepared) if prepared.is_setup() => "Run installer",
+                    Some(_) => "Install & restart",
+                    None => "Download",
                 },
                 Action::Install,
                 false,

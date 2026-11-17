@@ -19,6 +19,7 @@ const GITHUB_FEED: &str = "https://github.com/zezic/benga/releases/latest/downlo
 const MAX_MANIFEST: u64 = 128 * 1024;
 const MAX_ARCHIVE: u64 = 512 * 1024 * 1024;
 const MAX_UNPACKED: u64 = 2 * 1024 * 1024 * 1024;
+const WINDOWS_SETUP_FILENAME: &str = "benga-setup.exe";
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
@@ -36,15 +37,22 @@ pub struct Artifact {
     pub size: u64,
 }
 #[derive(Debug, Deserialize)]
+struct PlatformRelease {
+    #[serde(flatten)]
+    archive: Artifact,
+    installer: Option<Artifact>,
+}
+#[derive(Debug, Deserialize)]
 struct Manifest {
     version: String,
     tag: String,
-    platforms: BTreeMap<String, Artifact>,
+    platforms: BTreeMap<String, PlatformRelease>,
 }
 #[derive(Clone, Debug)]
 pub struct Release {
     pub version: String,
     pub artifact: Artifact,
+    pub installer: Option<Artifact>,
 }
 
 pub fn configured() -> bool {
@@ -83,6 +91,18 @@ fn get(url: &str, limit: u64) -> anyhow::Result<Vec<u8>> {
         .read_to_vec()?)
 }
 
+fn validate_artifact(artifact: &Artifact) -> anyhow::Result<()> {
+    ensure!(
+        artifact.size > 0 && artifact.size <= MAX_ARCHIVE,
+        "Invalid update size"
+    );
+    ensure!(
+        artifact.sha256.len() == 64 && artifact.sha256.bytes().all(|c| c.is_ascii_hexdigit()),
+        "Invalid update checksum"
+    );
+    Ok(())
+}
+
 fn verify_manifest(
     bytes: &[u8],
     signature: &str,
@@ -111,27 +131,29 @@ fn verify_manifest(
     if version <= semver::Version::parse(current)? {
         return Ok(None);
     }
-    let artifact = manifest
-        .platforms
-        .get(target)
-        .context("No update for this platform")?
-        .clone();
-    ensure!(
-        artifact.size > 0 && artifact.size <= MAX_ARCHIVE,
-        "Update is too large"
-    );
-    ensure!(
-        artifact.sha256.len() == 64 && artifact.sha256.bytes().all(|c| c.is_ascii_hexdigit()),
-        "Invalid update checksum"
-    );
-    let prefix = format!(
-        "https://github.com/zezic/benga/releases/download/{}/Benga-v{}-{}.",
+    let Some(package) = manifest.platforms.get(target) else {
+        return Ok(None);
+    };
+    validate_artifact(&package.archive)?;
+    let base = format!(
+        "https://github.com/zezic/benga/releases/download/{}/Benga-v{}-{}",
         manifest.tag, version, target
     );
-    ensure!(artifact.url.starts_with(&prefix), "Unexpected release URL");
+    ensure!(
+        package.archive.url.starts_with(&format!("{base}.")),
+        "Unexpected release URL"
+    );
+    if let Some(installer) = &package.installer {
+        validate_artifact(installer)?;
+        ensure!(
+            target == "windows-x86_64" && installer.url == format!("{base}-setup.exe"),
+            "Unexpected Windows Setup URL"
+        );
+    }
     Ok(Some(Release {
         version: manifest.version,
-        artifact,
+        artifact: package.archive.clone(),
+        installer: package.installer.clone(),
     }))
 }
 
@@ -213,6 +235,51 @@ fn portable_install_root(executable: &Path) -> anyhow::Result<PathBuf> {
     Ok(root.to_owned())
 }
 
+#[cfg(windows)]
+fn registered_windows_setup(target: &Path) -> bool {
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt, ptr::null_mut};
+    use windows_sys::Win32::{
+        Foundation::ERROR_SUCCESS,
+        System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ},
+    };
+
+    // The uninstall key is derived from the AppId in packaging/windows.iss.
+    let uninstall_key: Vec<u16> =
+        r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{29AA6F93-C24A-4A0C-A631-1645D7460F6B}_is1"
+            .encode_utf16()
+            .chain([0])
+            .collect();
+    let value: Vec<u16> = "InstallLocation\0".encode_utf16().collect();
+    let mut location = vec![0u16; 32768];
+    let mut bytes = (location.len() * size_of::<u16>()) as u32;
+    // The registry call writes at most `bytes` bytes to `location`.
+    let result = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            uninstall_key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_SZ,
+            null_mut(),
+            location.as_mut_ptr().cast(),
+            &mut bytes,
+        )
+    };
+    if result != ERROR_SUCCESS {
+        return false;
+    }
+    let location = &location[..bytes as usize / size_of::<u16>()];
+    let Some(location) = location.strip_suffix(&[0]) else {
+        return false;
+    };
+    let path = PathBuf::from(OsString::from_wide(location));
+    path.is_absolute() && path.canonicalize().is_ok_and(|path| path == target)
+}
+
+#[cfg(not(windows))]
+fn registered_windows_setup(_: &Path) -> bool {
+    false
+}
+
 fn executable_in(root: &Path) -> PathBuf {
     root.join(if cfg!(target_os = "macos") {
         "Contents/MacOS/benga"
@@ -227,7 +294,12 @@ pub struct Prepared {
     // Kept alive until the helper takes ownership of the staged files.
     directory: tempfile::TempDir,
     target: PathBuf,
-    staged: PathBuf,
+    payload: PreparedPayload,
+}
+
+enum PreparedPayload {
+    Archive(PathBuf),
+    Setup { sha256: String },
 }
 
 fn safe_relative(path: &Path) -> bool {
@@ -290,7 +362,7 @@ fn extract(bytes: &[u8], destination: &Path, zipped: bool) -> anyhow::Result<()>
     Ok(())
 }
 
-fn read_archive(
+fn read_update(
     reader: impl Read,
     size: u64,
     mut progress: impl FnMut(u8),
@@ -324,7 +396,20 @@ fn read_archive(
 }
 
 pub fn prepare(release: &Release, progress: impl FnMut(u8)) -> anyhow::Result<Prepared> {
-    let target = install_root(&std::env::current_exe()?.canonicalize()?)?;
+    let executable = std::env::current_exe()?.canonicalize()?;
+    let setup_root = executable
+        .parent()
+        .filter(|path| registered_windows_setup(path));
+    let (target, artifact) = match setup_root {
+        Some(root) => (
+            root.to_owned(),
+            release
+                .installer
+                .as_ref()
+                .context("Download the latest Windows Setup installer to update this copy")?,
+        ),
+        None => (install_root(&executable)?, &release.artifact),
+    };
     ensure!(
         !receipt_path(&target)?.exists(),
         "A previous update still needs cleanup; reopen Benga before updating again"
@@ -334,13 +419,21 @@ pub fn prepare(release: &Release, progress: impl FnMut(u8)) -> anyhow::Result<Pr
         .prefix(".benga-update-")
         .tempdir_in(parent)
         .context("Installation is read-only; move Benga to a writable folder to update")?;
-    let artifact = &release.artifact;
     let mut response = agent().get(&artifact.url).call()?;
-    let bytes = read_archive(response.body_mut().as_reader(), artifact.size, progress)?;
+    let bytes = read_update(response.body_mut().as_reader(), artifact.size, progress)?;
+    let sha256 = artifact.sha256.to_ascii_lowercase();
     ensure!(
-        sha256_hex(&bytes) == artifact.sha256.to_ascii_lowercase(),
+        sha256_hex(&bytes) == sha256,
         "Update checksum does not match"
     );
+    if setup_root.is_some() {
+        fs::write(directory.path().join(WINDOWS_SETUP_FILENAME), bytes)?;
+        return Ok(Prepared {
+            directory,
+            target,
+            payload: PreparedPayload::Setup { sha256 },
+        });
+    }
     extract(&bytes, directory.path(), !cfg!(target_os = "linux"))?;
     let staged = if cfg!(target_os = "macos") {
         directory.path().join("Benga.app")
@@ -358,11 +451,15 @@ pub fn prepare(release: &Release, progress: impl FnMut(u8)) -> anyhow::Result<Pr
     Ok(Prepared {
         directory,
         target,
-        staged,
+        payload: PreparedPayload::Archive(staged),
     })
 }
 
 impl Prepared {
+    pub fn is_setup(&self) -> bool {
+        matches!(self.payload, PreparedPayload::Setup { .. })
+    }
+
     /// Spawn a separate copy so Windows never needs to move its running executable.
     pub fn launch(self, restart: bool) -> anyhow::Result<()> {
         let helper = self.directory.path().join(if cfg!(windows) {
@@ -373,15 +470,31 @@ impl Prepared {
         fs::copy(std::env::current_exe()?, &helper)?;
         let mut command = Command::new(helper);
         command.current_dir(self.directory.path());
-        command
-            .arg("--apply-update")
-            .arg(&self.target)
-            .arg(&self.staged)
+        match &self.payload {
+            PreparedPayload::Archive(staged) => {
+                command.arg("--apply-update").arg(&self.target).arg(staged);
+            }
+            PreparedPayload::Setup { sha256 } => {
+                command.arg("--apply-setup").arg(&self.target).arg(sha256);
+            }
+        }
+        let mut child = command
             .arg(std::process::id().to_string())
-            .arg(if restart { "restart" } else { "quit" });
-        command
+            .arg(if restart { "restart" } else { "quit" })
             .spawn()
             .context("Could not start the update helper")?;
+        if self.is_setup() {
+            let receipt = CleanupReceipt {
+                backup: None,
+                staging: self.directory.path().to_owned(),
+                helper_pid: child.id(),
+            };
+            if let Err(error) = reserve_update(&self.target, &receipt) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        }
         let _ = self.directory.keep();
         Ok(())
     }
@@ -390,7 +503,8 @@ impl Prepared {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct CleanupReceipt {
-    backup: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backup: Option<PathBuf>,
     staging: PathBuf,
     helper_pid: u32,
 }
@@ -400,6 +514,26 @@ fn receipt_path(target: &Path) -> anyhow::Result<PathBuf> {
     let hash = sha256_hex(target.as_os_str().as_encoded_bytes());
     // Keep mutable updater state outside macOS's signed application bundle.
     Ok(parent.join(format!(".benga-update-state-{}.json", &hash[..16])))
+}
+
+fn reserve_update(target: &Path, receipt: &CleanupReceipt) -> anyhow::Result<()> {
+    let path = receipt_path(target)?;
+    let mut file =
+        tempfile::NamedTempFile::new_in(path.parent().context("Missing install parent")?)?;
+    serde_json::to_writer(&mut file, receipt)?;
+    file.persist_noclobber(path)
+        .context("Another update is pending cleanup")?;
+    Ok(())
+}
+
+fn read_receipt(path: &Path) -> anyhow::Result<Option<CleanupReceipt>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(bytes.len() <= 16 * 1024, "Invalid update cleanup receipt");
+    Ok(Some(serde_json::from_slice(&bytes)?))
 }
 
 fn validate_cleanup_path(path: &Path, parent: &Path, prefix: &str) -> anyhow::Result<()> {
@@ -436,21 +570,23 @@ fn validate_cleanup_path(path: &Path, parent: &Path, prefix: &str) -> anyhow::Re
 
 fn cleanup(target: &Path) -> anyhow::Result<bool> {
     let receipt_file = receipt_path(target)?;
-    let bytes = match fs::read(&receipt_file) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
-        Err(error) => return Err(error.into()),
+    let Some(receipt) = read_receipt(&receipt_file)? else {
+        return Ok(true);
     };
-    ensure!(bytes.len() <= 16 * 1024, "Invalid update cleanup receipt");
-    let receipt: CleanupReceipt = serde_json::from_slice(&bytes)?;
     let parent = target.parent().context("Missing install parent")?;
-    validate_cleanup_path(&receipt.backup, parent, ".benga-backup-")?;
+    if let Some(backup) = &receipt.backup {
+        validate_cleanup_path(backup, parent, ".benga-backup-")?;
+    }
     validate_cleanup_path(&receipt.staging, parent, ".benga-update-")?;
     ensure!(receipt.helper_pid > 1, "Invalid update helper PID");
     if process_alive(receipt.helper_pid)? {
         return Ok(false);
     }
-    for path in [&receipt.backup, &receipt.staging] {
+    for path in receipt
+        .backup
+        .iter()
+        .chain(std::iter::once(&receipt.staging))
+    {
         match fs::remove_dir_all(path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -466,7 +602,16 @@ fn cleanup(target: &Path) -> anyhow::Result<bool> {
 pub fn cleanup_after_start() {
     let target = std::env::current_exe()
         .context("Find the running app")
-        .and_then(|path| install_root(&path.canonicalize()?));
+        .and_then(|path| {
+            let executable = path.canonicalize()?;
+            if let Some(parent) = executable
+                .parent()
+                .filter(|path| registered_windows_setup(path))
+            {
+                return Ok(parent.to_owned());
+            }
+            install_root(&executable)
+        });
     let target = match target {
         Ok(target) => target,
         Err(error) => {
@@ -516,11 +661,25 @@ fn replace_installation(
 /// Called before graphics, settings and resource loading in the helper process.
 pub fn run_helper() -> anyhow::Result<bool> {
     let args: Vec<_> = std::env::args_os().collect();
-    if args.get(1).is_none_or(|s| s != "--apply-update") {
+    let setup = cfg!(windows) && args.get(1).is_some_and(|s| s == "--apply-setup");
+    if !setup && args.get(1).is_none_or(|s| s != "--apply-update") {
         return Ok(false);
     }
     ensure!(args.len() == 6, "Invalid update helper arguments");
     let target = PathBuf::from(&args[2]).canonicalize()?;
+    let pid: u32 = args[4].to_str().context("Invalid PID")?.parse()?;
+    ensure!(pid > 1 && pid != std::process::id(), "Invalid parent PID");
+    let restart = match args[5].to_str() {
+        Some("restart") => true,
+        Some("quit") => false,
+        _ => bail!("Invalid update restart mode"),
+    };
+    #[cfg(windows)]
+    if setup {
+        let sha256 = args[3].to_str().context("Invalid Windows Setup checksum")?;
+        run_windows_setup(&target, sha256, pid, restart)?;
+        return Ok(true);
+    }
     let staged = PathBuf::from(&args[3]).canonicalize()?;
     let staging = staged.parent().context("Missing staging directory")?;
     let parent = target.parent().context("Missing install parent")?;
@@ -537,31 +696,15 @@ pub fn run_helper() -> anyhow::Result<bool> {
             && executable_in(&staged).is_file(),
         "Invalid update layout"
     );
-    let pid: u32 = args[4].to_str().context("Invalid PID")?.parse()?;
-    ensure!(pid > 1 && pid != std::process::id(), "Invalid parent PID");
-    let restart = match args[5].to_str() {
-        Some("restart") => true,
-        Some("quit") => false,
-        _ => bail!("Invalid update restart mode"),
-    };
     wait_for_exit(pid)?;
     let backup = parent.join(format!(".benga-backup-{pid}"));
-    let receipt_file = receipt_path(&target)?;
-    ensure!(
-        !receipt_file.exists(),
-        "A previous update still needs cleanup"
-    );
     let receipt = CleanupReceipt {
-        backup: backup.clone(),
+        backup: Some(backup.clone()),
         staging: staging.to_owned(),
         helper_pid: std::process::id(),
     };
-    let mut receipt_temporary = tempfile::NamedTempFile::new_in(parent)?;
-    serde_json::to_writer(&mut receipt_temporary, &receipt)?;
     // Reserving the receipt before any rename also excludes concurrent helpers.
-    receipt_temporary
-        .persist_noclobber(&receipt_file)
-        .context("Another update is pending cleanup")?;
+    reserve_update(&target, &receipt)?;
     replace_installation(&target, &staged, &backup, || {
         if restart {
             if cfg!(target_os = "macos") {
@@ -581,6 +724,63 @@ pub fn run_helper() -> anyhow::Result<bool> {
         Ok(())
     })?;
     Ok(true)
+}
+
+#[cfg(windows)]
+fn run_windows_setup(
+    target: &Path,
+    sha256: &str,
+    pid: u32,
+    interactive: bool,
+) -> anyhow::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    wait_for_exit(pid)?;
+    ensure!(
+        registered_windows_setup(target),
+        "Benga's Windows Setup registration changed"
+    );
+    let helper = std::env::current_exe()?.canonicalize()?;
+    let staging = helper
+        .parent()
+        .context("Missing Windows Setup staging directory")?;
+    let parent = target.parent().context("Missing install parent")?;
+    validate_cleanup_path(staging, parent, ".benga-update-")?;
+    let receipt = read_receipt(&receipt_path(target)?)?.context("Missing Windows Setup receipt")?;
+    ensure!(
+        receipt.backup.is_none()
+            && receipt.staging == staging
+            && receipt.helper_pid == std::process::id(),
+        "Invalid Windows Setup receipt"
+    );
+
+    let installer = staging.join(WINDOWS_SETUP_FILENAME);
+    // Deny writes and replacement between verification and process creation.
+    const FILE_SHARE_READ: u32 = 1;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(&installer)?;
+    let mut bytes = Vec::new();
+    (&file).take(MAX_ARCHIVE + 1).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() as u64 <= MAX_ARCHIVE && sha256_hex(&bytes) == sha256,
+        "Windows Setup checksum does not match"
+    );
+    drop(bytes);
+    let mut command = Command::new(&installer);
+    command
+        .current_dir(staging)
+        .args(["/NORESTART", "/NORESTARTAPPLICATIONS"]);
+    if !interactive {
+        command.args(["/SILENT", "/SP-"]);
+    }
+    let mut child = command.spawn().context("Could not start Windows Setup")?;
+    drop(file);
+    let status = child.wait()?;
+    let _ = fs::remove_file(&installer);
+    ensure!(status.success(), "Windows Setup exited with {status}");
+    Ok(())
 }
 
 fn process_alive(pid: u32) -> anyhow::Result<bool> {
@@ -634,26 +834,24 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn archive_progress_completes_only_after_the_signed_size_matches() -> anyhow::Result<()> {
+    fn update_progress_completes_only_after_the_signed_size_matches() -> anyhow::Result<()> {
         let archive = vec![0xab; 256 * 1024];
         let size = archive.len() as u64;
         let mut updates = Vec::new();
-        let bytes = read_archive(archive.as_slice(), size, |percent| updates.push(percent))?;
+        let bytes = read_update(archive.as_slice(), size, |percent| updates.push(percent))?;
         assert_eq!(bytes, archive);
         assert_eq!(updates, [25, 50, 75, 99, 100]);
 
         updates.clear();
-        assert!(
-            read_archive(&archive[..archive.len() - 1], size, |percent| {
-                updates.push(percent);
-            })
-            .is_err()
-        );
+        assert!(read_update(&archive[..archive.len() - 1], size, |percent| {
+            updates.push(percent);
+        })
+        .is_err());
         assert!(!updates.contains(&100));
 
         updates.clear();
         let mut oversized = std::io::repeat(0).take(size + 5);
-        assert!(read_archive(&mut oversized, size, |percent| updates.push(percent)).is_err());
+        assert!(read_update(&mut oversized, size, |percent| updates.push(percent)).is_err());
         assert!(!updates.contains(&100));
         assert_eq!(oversized.limit(), 4);
         Ok(())
@@ -818,6 +1016,7 @@ mod tests {
         let data = br#"{"version":"1.2.0","tag":"v1.2.0","platforms":{"macos-aarch64":{"url":"https://github.com/zezic/benga/releases/download/v1.2.0/Benga-v1.2.0-macos-aarch64.zip","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":42}}}"#;
         let sig = STANDARD.encode(signing.sign(data).to_bytes());
         assert!(verify_manifest(data, &sig, &key, "1.0.0", "macos-aarch64")?.is_some());
+        assert!(verify_manifest(data, &sig, &key, "1.0.0", "macos-x86_64")?.is_none());
         assert!(verify_manifest(data, &sig, &key, "1.2.0", "macos-aarch64")?.is_none());
         assert!(verify_manifest(data, &sig, &key, "2.0.0", "macos-aarch64")?.is_none());
         let mut tampered = data.to_vec();
@@ -831,6 +1030,46 @@ mod tests {
             "macos-aarch64"
         )
         .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn windows_setup_requires_a_signed_asset_for_the_same_release() -> anyhow::Result<()> {
+        let signing = SigningKey::from_bytes(&[7; 32]);
+        let key = STANDARD.encode(signing.verifying_key().to_bytes());
+        let target = "windows-x86_64";
+        let base =
+            "https://github.com/zezic/benga/releases/download/v1.2.0/Benga-v1.2.0-windows-x86_64";
+        let mut manifest = serde_json::json!({
+            "version": "1.2.0",
+            "tag": "v1.2.0",
+            "platforms": {
+                target: {"url": format!("{base}.zip"), "sha256": "a".repeat(64), "size": 42}
+            }
+        });
+        let verify = |manifest: &serde_json::Value| {
+            let payload = serde_json::to_vec(manifest)?;
+            let signature = STANDARD.encode(signing.sign(&payload).to_bytes());
+            verify_manifest(&payload, &signature, &key, "1.0.0", target)?
+                .context("Missing Windows release")
+        };
+        assert!(verify(&manifest)?.installer.is_none());
+        let url = format!("{base}-setup.exe");
+        manifest["platforms"][target]["installer"] =
+            serde_json::json!({"url": url, "sha256": "b".repeat(64), "size": 123});
+        let release = verify(&manifest)?;
+        assert_eq!(release.artifact.url, format!("{base}.zip"));
+        let installer = release.installer.context("Missing installer")?;
+        assert_eq!(installer.url, url);
+        assert_eq!(installer.sha256, "b".repeat(64));
+        assert_eq!(installer.size, 123);
+
+        manifest["platforms"][target]["installer"]["url"] =
+            serde_json::json!(format!("{base}-setup.exe?other"));
+        assert!(verify(&manifest).is_err());
+        manifest["platforms"][target]["installer"]["url"] = serde_json::json!(url);
+        manifest["platforms"][target]["installer"]["size"] = serde_json::json!(MAX_ARCHIVE + 1);
+        assert!(verify(&manifest).is_err());
         Ok(())
     }
 
@@ -990,7 +1229,7 @@ mod tests {
         fs::create_dir(&unrelated)?;
         let receipt_file = receipt_path(&target)?;
         let mut receipt = CleanupReceipt {
-            backup: backup.clone(),
+            backup: Some(backup.clone()),
             staging: staging.clone(),
             helper_pid: std::process::id(),
         };
@@ -1007,6 +1246,14 @@ mod tests {
         fs::write(&receipt_file, serde_json::to_vec(&receipt)?)?;
         assert!(cleanup(&target)?);
         assert!(!backup.exists() && !staging.exists() && !receipt_file.exists());
+        assert!(target.exists() && unrelated.exists());
+
+        fs::create_dir(&staging)?;
+        receipt.backup = None;
+        reserve_update(&target, &receipt)?;
+        assert!(reserve_update(&target, &receipt).is_err());
+        assert!(cleanup(&target)?);
+        assert!(!staging.exists() && !receipt_file.exists());
         assert!(target.exists() && unrelated.exists());
         Ok(())
     }

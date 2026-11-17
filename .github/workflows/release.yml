@@ -20,6 +20,8 @@ jobs:
     outputs:
       public-key: ${{ steps.signing.outputs.public-key }}
       publish: ${{ steps.signing.outputs.publish }}
+      matrix: ${{ steps.targets.outputs.matrix }}
+      platforms: ${{ steps.targets.outputs.platforms }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -27,6 +29,33 @@ jobs:
           python-version: '3.15'
       - run: python -m pip install --disable-pip-version-check 'cryptography==50.0.2'
       - run: python -m unittest discover -s scripts -p 'test_*.py'
+      - name: Select release targets
+        id: targets
+        env:
+          BENGA_PAUSED_RELEASE_TARGETS: 'x86_64-apple-darwin aarch64-unknown-linux-gnu'
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+          from scripts.package import PLATFORMS
+
+          runners = {
+              "aarch64-apple-darwin": "macos-15",
+              "x86_64-apple-darwin": "macos-15-intel",
+              "x86_64-pc-windows-msvc": "windows-2022",
+              "x86_64-unknown-linux-gnu": "ubuntu-22.04",
+              "aarch64-unknown-linux-gnu": "ubuntu-22.04-arm",
+          }
+          paused = set(os.environ["BENGA_PAUSED_RELEASE_TARGETS"].split())
+          if unknown := paused - runners.keys():
+              raise SystemExit(f"Unknown paused release targets: {', '.join(sorted(unknown))}")
+          enabled = [target for target in runners if target not in paused]
+          if not enabled:
+              raise SystemExit("At least one release target must be enabled")
+          matrix = {"include": [{"runner": runners[target], "target": target} for target in enabled]}
+          print("matrix=" + json.dumps(matrix))
+          print("platforms=" + " ".join(PLATFORMS[target] for target in enabled))
+          PY
       - name: Validate build tag and derive optional update verification key
         id: signing
         env:
@@ -52,18 +81,7 @@ jobs:
     needs: prepare
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - runner: macos-15
-            target: aarch64-apple-darwin
-          - runner: macos-15-intel
-            target: x86_64-apple-darwin
-          - runner: windows-2022
-            target: x86_64-pc-windows-msvc
-          - runner: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-          - runner: ubuntu-22.04-arm
-            target: aarch64-unknown-linux-gnu
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     env:
       BENGA_UPDATE_PUBLIC_KEY: ${{ needs.prepare.outputs.public-key }}
@@ -133,12 +151,14 @@ jobs:
           path: target/release-assets
           merge-multiple: true
       - run: python -m pip install --disable-pip-version-check 'cryptography==50.0.2'
-      - name: Sign the complete release manifest
+      - name: Sign the release manifest
         env:
           BENGA_UPDATE_SIGNING_KEY: ${{ secrets.BENGA_UPDATE_SIGNING_KEY }}
+          RELEASE_PLATFORMS: ${{ needs.prepare.outputs.platforms }}
         run: |
           test -n "$BENGA_UPDATE_PUBLIC_KEY" || { echo '::error::Configure BENGA_UPDATE_SIGNING_KEY and rerun the workflow to rebuild packages with update verification before publishing.'; exit 1; }
-          python scripts/release_metadata.py create target/release-assets --tag "$RELEASE_TAG" --repository "$GH_REPO"
+          read -r -a release_platforms <<< "$RELEASE_PLATFORMS"
+          python scripts/release_metadata.py create target/release-assets --tag "$RELEASE_TAG" --repository "$GH_REPO" --platforms "${release_platforms[@]}"
       - name: Upload packages and publish
         shell: bash
         run: |
